@@ -2,10 +2,12 @@
 data/
 cache/
 logs/
+historical_data/
 
 # Files
 .env
 .DS_Store
+optimized_params.csv
 
 # Python
 __pycache__/

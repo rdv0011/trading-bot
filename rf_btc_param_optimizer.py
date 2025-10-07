@@ -1,5 +1,4 @@
 import os
-import joblib
 import pandas as pd
 import numpy as np
 import ta
@@ -14,13 +13,17 @@ from historical_data import get_historical_data
 from datetime import datetime
 import csv
 import argparse
+# from profile_memory import profile_memory_during_backtest, print_mem_usage
+import gc
 
+# New imports for multiprocessing
+import multiprocessing as mp
+import traceback
 
 TIMEZONE = "UTC"
-MODEL_FILE = "rf_model.pkl"
 CACHE_DIR = "cache"
-FEATURE_FILE = "rf_features.txt"
-BINARY_SEARCH_ITERS = 1  # Default number of binary search iterations
+BINARY_SEARCH_ITERS = 4  # Default number of binary search iterations
+BACKTEST_TIMEOUT_SECONDS = 600  # timeout per subprocess backtest
 
 # -----------------------------
 # RandomForest predictor
@@ -28,66 +31,25 @@ BINARY_SEARCH_ITERS = 1  # Default number of binary search iterations
 class RandomForestPredictor:
     _cache_lock = Lock()
 
-    def __init__(self, model_file=MODEL_FILE, cache_dir=CACHE_DIR, feature_file=FEATURE_FILE):
-        self.model_file = os.path.join(cache_dir, model_file)
-        self.feature_file = os.path.join(cache_dir, feature_file)
+    def __init__(self, cache_dir=CACHE_DIR):
         self.cache_dir = cache_dir
-        self.model = None
-        self.features = None
         os.makedirs(cache_dir, exist_ok=True)
+        self.model = RandomForestRegressor()
 
-        # Load model if available
-        if os.path.exists(self.model_file):
-            try:
-                self.model = joblib.load(self.model_file)
-                print(f"[RF] Loaded model from {self.model_file}")
-            except Exception as e:
-                print(f"[RF] Failed to load model: {e}")
-
-        # Load saved feature list if available
-        if os.path.exists(self.feature_file):
-            with open(self.feature_file, "r") as f:
-                self.features = [line.strip() for line in f.readlines() if line.strip()]
-
-    def _align_features(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Ensure dataframe columns match training feature names"""
-        if self.features is None:
-            return df
-
-        for col in self.features:
-            if col not in df.columns:
-                df[col] = 0.0  # Add missing columns with zeros
-
-        # Drop any extra columns not in the trained model
-        df = df[self.features]
-        return df
-
-    def train(self, df, horizon=1, persist=True, force_retrain=False):
-        if self.model is not None and not force_retrain:
-            return
-
+    def train(self, df, horizon=1):
         df = df.copy()
         df["target"] = df["close"].shift(-horizon)
-        df = df.dropna()
+        df = df.dropna(inplace=False)
 
         X = df.drop(["target"], axis=1)
         y = df["target"]
 
-        self.features = list(X.columns)
-        self.model = RandomForestRegressor(n_estimators=100, random_state=42)
         self.model.fit(X, y)
-
-        if persist:
-            joblib.dump(self.model, self.model_file)
-            with open(self.feature_file, "w") as f:
-                f.write("\n".join(self.features))
-            print(f"[RF] Model + feature list saved to {self.cache_dir}")
 
     def predict(self, df):
         if self.model is None:
             raise RuntimeError("Model not trained or loaded")
         last_row = df.iloc[[-1]].drop(["target"], axis=1, errors="ignore")
-        last_row = self._align_features(last_row)
         return float(self.model.predict(last_row)[0])
 
     def cache_prediction(self, date, prediction, tag="btc_rf"):
@@ -117,13 +79,16 @@ class RandomForestPredictor:
                 return float(row["prediction"].iloc[0])
         except Exception as e:
             print(f"Cache read error: {e}")
+
         return None
 
-
 # -----------------------------
-# Lumibot Strategy
+# Lumibot Strategy (unchanged)
 # -----------------------------
 class RandomForestBTCStrategy(Strategy):
+    # Class-level shared predictor
+    shared_predictor: RandomForestPredictor | None = None
+
     parameters = {
         "compute_frequency": 15,
         "lookback_period": 200,
@@ -141,11 +106,16 @@ class RandomForestBTCStrategy(Strategy):
     def initialize(self):
         asset_symbol = self.parameters.get("asset_symbol", "BTC")
         self.asset = Asset(asset_symbol, "crypto")
-        self.predictor = RandomForestPredictor()
+        if RandomForestBTCStrategy.shared_predictor is None:
+            raise RuntimeError(
+                "[RF] shared_predictor must be initialized before creating a strategy instance!"
+            )
+
+        self.predictor = RandomForestBTCStrategy.shared_predictor
         self.current_position = None
         self.last_compute = None
         self.set_market("24/7")
-
+    
     # -----------------------------
     # Indicators
     # -----------------------------
@@ -154,8 +124,8 @@ class RandomForestBTCStrategy(Strategy):
         bars = self.get_historical_prices(self.asset, data_length, "minute", quote=self.quote_asset)
         df = bars.df.copy()
         df = self._compute_features(df, current_datetime=self.get_datetime())
+        
         return df.iloc[-window_size:].copy()
-
     
     @staticmethod
     def _compute_features(df: pd.DataFrame, current_datetime: datetime | None = None) -> pd.DataFrame:
@@ -183,8 +153,8 @@ class RandomForestBTCStrategy(Strategy):
         df["ichimoku_base"] = ichimoku.ichimoku_base_line()
         df["ichimoku_conversion"] = ichimoku.ichimoku_conversion_line()
         df["stoch"] = ta.momentum.stoch(df["high"], df["low"], df["close"])
+        
         return df.dropna().copy()
-
 
     # -----------------------------
     # Trading iteration
@@ -216,7 +186,15 @@ class RandomForestBTCStrategy(Strategy):
         elif expected_change < p["price_change_threshold_down"]:
             self.open_position_with_orders("short", last_price, p, expected_change)
 
-        # -----------------------------
+    def on_strategy_end(self):
+        if self.is_backtesting:
+            self.predictor = None
+
+    def on_abrupt_closing(self):
+        # Ensures all positions are closed on abrupt strategy termination.
+        self.sell_all()
+
+    # -----------------------------
     # Order creation helpers (Lumibot style)
     # -----------------------------
     def open_position_with_orders(self, direction: str, price: float, params: dict, expected_change: float):
@@ -319,20 +297,7 @@ class RandomForestBTCStrategy(Strategy):
     ):
         """
         Static optimizer. Does NOT require creating a strategy instance.
-
-        Args:
-            hist_df: DataFrame of historical minute data (indexed by datetime).
-            start_dt, end_dt: datetime objects defining the backtest window.
-            initial_params: dict to override default parameters.
-            asset_symbol: e.g. "BTC" (used to create Asset for backtest payload).
-            quote_asset_symbol: e.g. "USDT".
-            params_log: CSV path to append optimized row (compatible with build_training_dataset).
-            binary_search_iters: if provided override default.
-            opt_workers: override default number of parallel backtests.
-            logger: callable for logging (defaults to print).
-
-        Returns:
-            best_params (dict) — optimized parameter values (same keys as strategy.parameters)
+        This version spawns a new subprocess for every backtest run to avoid long-lived memory leaks.
         """
         base = dict(RandomForestBTCStrategy.parameters)
         if initial_params:
@@ -348,36 +313,78 @@ class RandomForestBTCStrategy(Strategy):
         quote_asset = Asset(symbol=quote_asset_symbol, asset_type="forex")
         pandas_data = {asset: Data(asset, hist_df, timestep="minute", quote=quote_asset)}
 
-        # ✅ Attach one global predictor for all runs
-        predictor = RandomForestPredictor()
-            # Ensure feature set matches live trading
-        hist_df = RandomForestBTCStrategy._compute_features(hist_df)
+        # Ensure feature set matches live trading
+        hist_df_features = RandomForestBTCStrategy._compute_features(hist_df)
+
+        # Train predictor once in parent if reuse_model True (child will still train its own copy to be safe)
         if reuse_model:
-            predictor.train(hist_df, horizon=base["compute_frequency"], force_retrain=False)
-        else:
-            predictor.train(hist_df, horizon=base["compute_frequency"], force_retrain=True)
+            prepare_shared_predictor(hist_df_features, compute_frequency=base["compute_frequency"])
 
         def run_backtest(temp_params):
+            """
+            Spawn a separate process to run the backtest and return the parsed profit.
+            """
+            ctx = mp.get_context("spawn")
+            parent_conn, child_conn = ctx.Pipe(duplex=False)
+
+            # We will send a compact payload to the child: hist_df (features), start/end as iso strings, param dict, symbols
+            payload = {
+                "hist_df": hist_df_features,  # DataFrame will be pickled — acceptable here
+                "start_iso": start_dt.isoformat(),
+                "end_iso": end_dt.isoformat(),
+                "params": temp_params,
+                "asset_symbol": asset_symbol,
+                "quote_asset_symbol": quote_asset_symbol,
+                "benchmark_asset": benchmark_asset,
+            }
+
+            # # 🧹 Clean before launching child
+            # gc.collect()
+            # tracemalloc.reset_peak()   # reset peak usage for this iteration
+
+            # target worker
+            p = ctx.Process(target=_subprocess_backtest_worker, args=(child_conn, payload))
+            p.start()
+            child_conn.close()
+
+            # Wait for a message or timeout
+            profit = -np.inf
             try:
-                result = RandomForestBTCStrategy.backtest(
-                    PandasDataBacktesting,
-                    start_dt if isinstance(start_dt, datetime) else start_dt.to_pydatetime(),
-                    end_dt if isinstance(end_dt, datetime) else end_dt.to_pydatetime(),
-                    pandas_data=pandas_data,
-                    benchmark_asset=benchmark_asset,
-                    quote_asset=quote_asset,
-                    parameters=temp_params,
-                    show_plot=False,
-                    save_tearsheet=False,
-                    show_tearsheet=False,
-                    show_indicators=False,
-                    quiet_logs=True,
-                    save_stats_file=False,
-                )
-                return RandomForestBTCStrategy._parse_profit_from_backtest_result(result, logger=logger)
+                # wait until a result arrives or timeout
+                if parent_conn.poll(BACKTEST_TIMEOUT_SECONDS):
+                    msg = parent_conn.recv()
+                    if isinstance(msg, dict) and msg.get("status") == "ok":
+                        result = msg.get("result")
+                        # parse profit similarly to previous local function
+                        profit = RandomForestBTCStrategy._parse_profit_from_backtest_result(result, logger=logger)
+                    else:
+                        err = msg.get("error", "Unknown error")
+                        logger(f"Backtest subprocess reported error: {err}")
+                        profit = -np.inf
+                else:
+                    logger(f"Backtest subprocess timed out after {BACKTEST_TIMEOUT_SECONDS}s; terminating.")
+                    profit = -np.inf
             except Exception as e:
-                logger(f"Backtest failed for params {temp_params}: {e}")
-                return -np.inf
+                logger(f"Error receiving result from backtest subprocess: {e}")
+                profit = -np.inf
+            finally:
+                # ensure child is dead
+                if p.is_alive():
+                    try:
+                        p.terminate()
+                    except Exception:
+                        pass
+                p.join(timeout=5)
+                try:
+                    parent_conn.close()
+                except Exception:
+                    pass
+
+                # # 🧹 Clean up after child finishes
+                # gc.collect()
+                # tracemalloc.reset_peak()   # optional: reset before next iteration
+
+            return profit
 
         # -----------------------------
         # Parameter tuning configuration
@@ -404,10 +411,16 @@ class RandomForestBTCStrategy(Strategy):
                 for val in cfg["coarse_grid"]:
                     ptest = dict(best_params)
                     ptest[pname] = int(val) if pname == "lookback_period" else float(val)
+                    
+                    # print_mem_usage("Before backtest")
+                    # profit = profile_memory_during_backtest(run_backtest, ptest, label=f"backtest {ptest}")
+                    # print_mem_usage("After backtest")
                     profit = run_backtest(ptest)
+                    
                     logger(f"  Candidate {pname}={val} -> profit={profit:.4f}")
                     if profit > best_profit:
                         best_val, best_profit = val, profit
+                
                 best_params[pname] = best_val
                 logger(f"✔ Best coarse {pname}={best_val} profit={best_profit:.4f}")
 
@@ -426,7 +439,12 @@ class RandomForestBTCStrategy(Strategy):
                         val = int(round(c)) if pname == "lookback_period" else round(c, 6)
                         ptest = dict(best_params)
                         ptest[pname] = val
+                        
+                        # print_mem_usage("Before backtest")
+                        # profit = profile_memory_during_backtest(run_backtest, ptest, label=f"backtest {ptest}")
+                        # print_mem_usage("After backtest")
                         profit = run_backtest(ptest)
+                        
                         profits.append((val, profit))
                         logger(f"   Candidate {pname}={val} -> profit={profit:.4f}")
 
@@ -445,6 +463,10 @@ class RandomForestBTCStrategy(Strategy):
 
                     logger(f" -> New search range ({low}, {high})")
 
+        # Clean up predictor and heavy objects created for optimization
+        RandomForestBTCStrategy.shared_predictor = None
+        gc.collect()
+        
         return best_params
     
     @staticmethod
@@ -460,7 +482,85 @@ class RandomForestBTCStrategy(Strategy):
 
         logger("Warning: could not parse profit from backtest result; returning -inf")
         return -np.inf
-    
+
+# -----------------------------
+# Subprocess worker helper
+# -----------------------------
+def _subprocess_backtest_worker(conn, payload):
+    """
+    Runs inside a child process. Reconstructs the minimal pandas_data and runs the Lumibot backtest.
+    Sends back a dict over `conn` with either {'status': 'ok', 'result': result} or {'status': 'error', 'error': str(...)}
+    """
+    try:
+        # Unpack payload
+        hist_df = payload["hist_df"]
+        start_iso = payload["start_iso"]
+        end_iso = payload["end_iso"]
+        params = payload["params"]
+        asset_symbol = payload["asset_symbol"]
+        quote_asset_symbol = payload["quote_asset_symbol"]
+        benchmark_asset = payload["benchmark_asset"]
+
+        # Ensure types / datetimes
+        start_dt = pd.to_datetime(start_iso).to_pydatetime()
+        end_dt = pd.to_datetime(end_iso).to_pydatetime()
+
+        # Recompute features inside the child to be safe
+        hist_df = RandomForestBTCStrategy._compute_features(hist_df)
+
+        # Train a predictor inside the child (so the child owns the ML model memory)
+        predictor = RandomForestPredictor()
+        predictor.train(hist_df, horizon=int(params.get("compute_frequency", 15)))
+
+        # Assign to class shared_predictor for the strategy instances in the child
+        RandomForestBTCStrategy.shared_predictor = predictor
+
+        # Build pandas_data for the child
+        asset = Asset(asset_symbol, "crypto")
+        quote_asset = Asset(symbol=quote_asset_symbol, asset_type="forex")
+        pandas_data = {asset: Data(asset, hist_df, timestep="minute", quote=quote_asset)}
+
+        # Run the backtest
+        result = RandomForestBTCStrategy.backtest(
+            PandasDataBacktesting,
+            start_dt,
+            end_dt,
+            pandas_data=pandas_data,
+            benchmark_asset=benchmark_asset,
+            quote_asset=quote_asset,
+            parameters=params,
+            show_plot=False,
+            save_tearsheet=False,
+            show_tearsheet=False,
+            show_indicators=False,
+            quiet_logs=True,
+            save_stats_file=False,
+        )
+
+        # Send result back
+        conn.send({"status": "ok", "result": result})
+    except Exception as e:
+        tb = traceback.format_exc()
+        conn.send({"status": "error", "error": f"{e}\n{tb}"})
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+        # force GC in child before exit
+        gc.collect()
+        # exit child
+        os._exit(0)
+
+def prepare_shared_predictor(hist_df: pd.DataFrame, compute_frequency: int) -> RandomForestPredictor:
+    """
+    Initialize and train the shared predictor once in the parent (optional).
+    """
+    predictor = RandomForestPredictor()
+    predictor.train(hist_df, horizon=compute_frequency)
+    RandomForestBTCStrategy.shared_predictor = predictor
+    return predictor
+      
 def run_optimizer(hist_df, start_dt, end_dt, params_log, window_days, asset_symbol, quote_asset_symbol, benchmark_asset_symbol):
     """Run optimizer for given window and log results"""
     best_params = RandomForestBTCStrategy.optimize_parameters(
@@ -505,8 +605,8 @@ def run_optimizer(hist_df, start_dt, end_dt, params_log, window_days, asset_symb
         writer.writerow(row)
 
     print(f"Finished optimization for {window_days}-day window ending {end_dt}")
-    return best_params
 
+    return best_params
 
 def generate_training_dataset(start, end, loopback_days, step_days, historical_folder, params_log, asset_symbol, quote_asset_symbol, benchmark_asset_symbol):
     """Run optimizations for sliding windows and generate training data"""
@@ -555,24 +655,6 @@ def generate_training_dataset(start, end, loopback_days, step_days, historical_f
 
         current_start += timedelta(days=step_days)
 
-
-def remove_cached_model(model_file, cache_dir, feature_file):
-    model_path = os.path.join(cache_dir, model_file)
-    if os.path.exists(model_path):
-        try:
-            os.remove(model_path)
-            print(f"[RF] Removed existing model at {model_path} to force retraining.")
-        except Exception as e:
-            print(f"[RF] Failed to remove existing model: {e}")
-
-    feature_path = os.path.join(cache_dir, feature_file)
-    if os.path.exists(feature_path):
-        try:
-            os.remove(feature_path)
-            print(f"[RF] Removed existing feature list at {feature_path} to force retraining.")
-        except Exception as e:
-            print(f"[RF] Failed to remove existing feature list: {e}")
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate dataset of optimized parameters over rolling windows")
     parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
@@ -587,8 +669,6 @@ if __name__ == "__main__":
     # Convert string arguments to datetime
     start_dt = datetime.strptime(args.start, "%Y-%m-%d")
     end_dt = datetime.strptime(args.end, "%Y-%m-%d")
-
-    remove_cached_model(MODEL_FILE, CACHE_DIR, FEATURE_FILE)
 
     generate_training_dataset(
         start_dt,
