@@ -1,95 +1,358 @@
-import os
-import pandas as pd
-import numpy as np
-import ta
-from sklearn.ensemble import RandomForestRegressor
-from lumibot.strategies.strategy import Strategy
-from lumibot.entities import Asset, Data
-from lumibot.backtesting import PandasDataBacktesting
-from datetime import timedelta
-from zoneinfo import ZoneInfo
-from threading import Lock
-from historical_data import get_historical_data
-from datetime import datetime
-import csv
-import argparse
-# from profile_memory import profile_memory_during_backtest, print_mem_usage
 import gc
+import math
+import numpy as np
+import pandas as pd
+from datetime import datetime
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from sklearn.ensemble import RandomForestRegressor
+from typing import Dict, Any, List
 
-# New imports for multiprocessing
-import multiprocessing as mp
-import traceback
-
+# Use same timezone as original
 TIMEZONE = "UTC"
-CACHE_DIR = "cache"
-BINARY_SEARCH_ITERS = 4  # Default number of binary search iterations
-BACKTEST_TIMEOUT_SECONDS = 600  # timeout per subprocess backtest
+
+# Parameter tuning config (kept from your original)
+PARAM_CONFIG = [
+    {"name": "lookback_period", "coarse_grid": [100, 200, 300], "fine_range": (100, 400), "step": 25, "priority": 1},
+    {"name": "price_change_threshold_up", "coarse_grid": [0.003, 0.005, 0.007], "fine_range": (0.002, 0.01), "step": 0.001, "priority": 1},
+    {"name": "price_change_threshold_down", "coarse_grid": [-0.003, -0.005, -0.007], "fine_range": (-0.01, -0.002), "step": 0.001, "priority": 1},
+    {"name": "fraction_portfolio_per_trade", "coarse_grid": [0.8, 0.9, 1.0], "fine_range": (0.5, 1.0), "step": 0.05, "priority": 2},
+    {"name": "take_profit_multiplier", "coarse_grid": [0.8, 1.0, 1.2], "fine_range": (0.5, 1.5), "step": 0.1, "priority": 2},
+    {"name": "stop_loss_multiplier", "coarse_grid": [0.3, 0.5, 0.7], "fine_range": (0.2, 0.8), "step": 0.1, "priority": 2},
+]
 
 # -----------------------------
-# RandomForest predictor
+# Phase 1: Train RF in-memory & precompute predictions
 # -----------------------------
-class RandomForestPredictor:
-    _cache_lock = Lock()
+def train_model_and_precompute_predictions(
+    hist_df: pd.DataFrame,
+    compute_frequency: int = 15,
+    horizon: int = 15,
+    rf_kwargs: Dict[str, Any] = None,
+    feature_fn = None,
+    current_datetime: datetime = None,
+):
+    """
+    1) Compute features using feature_fn
+    2) Train RandomForestRegressor on the full hist_df_features (horizon)
+    3) Precompute predictions at decision timestamps (every compute_frequency minutes)
+    Returns: (rf_model, hist_df_features, decision_index_array, pred_array)
+    """
+    if feature_fn is None:
+        raise RuntimeError("feature_fn not provided")
 
-    def __init__(self, cache_dir=CACHE_DIR):
-        self.cache_dir = cache_dir
-        os.makedirs(cache_dir, exist_ok=True)
-        self.model = RandomForestRegressor()
+    # compute features once
+    hist_df_features = feature_fn(hist_df, current_datetime=current_datetime)
 
-    def train(self, df, horizon=1):
-        df = df.copy()
-        df["target"] = df["close"].shift(-horizon)
-        df = df.dropna(inplace=False)
+    # prepare training target and X
+    df_train = hist_df_features.copy()
+    df_train["target"] = df_train["close"].shift(-horizon)
+    df_train = df_train.dropna(inplace=False)
+    if df_train.empty:
+        raise ValueError("Not enough data to train RF with the given horizon")
 
-        X = df.drop(["target"], axis=1)
-        y = df["target"]
+    X = df_train.drop(columns=["target"])
+    y = df_train["target"]
 
-        self.model.fit(X, y)
+    rf_kwargs = rf_kwargs or {}
+    rf = RandomForestRegressor(**rf_kwargs)
+    rf.fit(X, y)
 
-    def predict(self, df):
-        if self.model is None:
-            raise RuntimeError("Model not trained or loaded")
-        last_row = df.iloc[[-1]].drop(["target"], axis=1, errors="ignore")
-        return float(self.model.predict(last_row)[0])
+    # Determine decision indices (timestamps) for generating signals:
+    timestamps = hist_df_features.index
+    minute_index = (timestamps.view(np.int64) // 10**9) // 60
+    start_min = int(minute_index[0])
+    decision_mask = ((minute_index - start_min) % compute_frequency) == 0
+    decision_idx = np.nonzero(decision_mask)[0]  # integer positions into hist_df_features
 
-    def cache_prediction(self, date, prediction, tag="btc_rf"):
-        filepath = os.path.join(self.cache_dir, f"{tag}_predictions.csv")
+    # Precompute predictions at decision timestamps (vectorized)
+    X_all = hist_df_features.drop(columns=[c for c in hist_df_features.columns if c == "target"], errors="ignore")
+    if len(X_all) == 0:
+        raise ValueError("No feature columns available for prediction")
+    X_decisions = X_all.iloc[decision_idx]
+    preds = rf.predict(X_decisions)  # numpy array
 
-        if date.tzinfo is None:
-            date = date.replace(microsecond=0, tzinfo=ZoneInfo(TIMEZONE))
-        else:
-            date = date.astimezone(ZoneInfo(TIMEZONE)).replace(microsecond=0)
+    return rf, hist_df_features, decision_idx, preds
 
-        row = pd.DataFrame([[date, round(prediction, 2)]], columns=["date", "prediction"])
-        with self._cache_lock:
-            if os.path.exists(filepath):
-                row.to_csv(filepath, mode="a", header=False, index=False)
+# -----------------------------
+# Simulate trades allowing multi-candle durations
+# -----------------------------
+def simulate_trades_multi_candle(
+    prices_df: pd.DataFrame,
+    decision_idx: np.ndarray,
+    preds: np.ndarray,
+    params: Dict[str, Any],
+    compute_frequency: int,
+    initial_capital: float = 1.0,
+) -> Dict[str, Any]:
+    """
+    Simulate trades on minute bars.
+    - decisions occur at indices provided by `decision_idx`, and predictions given by `preds` align with decision_idx.
+    - positions persist across multiple candles until TP/SL, opposite signal (configurable), or end of window.
+    Returns metrics dict: total_return, equity_curve (pd.Series), num_trades, sharpe, max_drawdown
+    """
+
+    # Unpack params with defaults
+    fraction = float(params.get("fraction_portfolio_per_trade", 0.1))
+    take_mult = float(params.get("take_profit_multiplier", 1.2))
+    stop_mult = float(params.get("stop_loss_multiplier", 0.8))
+    thr_up = float(params.get("price_change_threshold_up", 0.006))
+    thr_down = float(params.get("price_change_threshold_down", -0.005))
+    max_long_exposure = float(params.get("max_portfolio_exposure_long", 1.0))
+    max_short_exposure = float(params.get("max_portfolio_exposure_short", 0.5))
+
+    close_prices = prices_df["close"].values
+    n = len(close_prices)
+
+    # Prepare arrays for quick access
+    decision_set = set(decision_idx.tolist())
+
+    # Map from decision index to expected change / predicted price
+    pred_map = dict(zip(decision_idx.tolist(), preds.tolist()))
+
+    # State variables
+    capital = float(initial_capital)
+    equity = capital
+    equity_curve = np.zeros(n, dtype=float)
+    current_position = None  # dict with keys: side, entry_price, tp, sl, quantity, entry_idx
+    num_trades = 0
+
+    # track position value for mark-to-market
+    position_value = 0.0
+
+    # We'll allow new entries only at decision times.
+    # If a position is open, it remains open and is checked every minute for TP/SL.
+    # If opposite signal occurs at a decision time, we will close existing position at close price and (optionally) open new one in same minute.
+
+    # Precompute per-minute returns later from equity_curve.
+
+    for t in range(n):
+        price = close_prices[t]
+
+        # 1) If there is an open position, check TP/SL at the current minute price
+        if current_position is not None:
+            side = current_position["side"]
+            entry_price = current_position["entry_price"]
+            tp = current_position["tp"]
+            sl = current_position["sl"]
+            quantity = current_position["quantity"]
+
+            # Check TP/SL
+            exited = False
+            if side == "long":
+                if price >= tp:
+                    exit_price = tp
+                    pnl = (exit_price - entry_price) / entry_price
+                    exited = True
+                elif price <= sl:
+                    exit_price = sl
+                    pnl = (exit_price - entry_price) / entry_price
+                    exited = True
+            else:  # short
+                if price <= tp:
+                    exit_price = tp
+                    pnl = (entry_price - exit_price) / entry_price
+                    exited = True
+                elif price >= sl:
+                    exit_price = sl
+                    pnl = (entry_price - exit_price) / entry_price
+                    exited = True
+
+            if exited:
+                # realize pnl proportionally to capital fraction used
+                trade_return = pnl * (current_position["value_traded"] / capital)
+                equity += trade_return
+                current_position = None
+                num_trades += 1
+                position_value = 0.0
+                # proceed to next minute (but still allow new entry in same minute at decision)
+
+        # 2) At decision times, optionally open/close positions according to signal
+        if t in decision_set:
+            pred_price = pred_map.get(t, None)
+            if pred_price is not None:
+                expected_change = (pred_price - price) / price
+                # Determine desired direction
+                if expected_change > thr_up:
+                    desired = "long"
+                elif expected_change < thr_down:
+                    desired = "short"
+                else:
+                    desired = "flat"
+
+                # If we have an existing position and desired is opposite, close existing and possibly open new
+                if current_position is not None:
+                    if desired == "flat":
+                        # do nothing (hold or wait for TP/SL)
+                        pass
+                    elif desired != current_position["side"]:
+                        # Close current at current price
+                        entry_price = current_position["entry_price"]
+                        side = current_position["side"]
+                        if side == "long":
+                            pnl = (price - entry_price) / entry_price
+                        else:
+                            pnl = (entry_price - price) / entry_price
+                        trade_return = pnl * (current_position["value_traded"] / capital)
+                        equity += trade_return
+                        current_position = None
+                        num_trades += 1
+                        position_value = 0.0
+                        # We'll allow opening below
+
+                # If no position, and desired is long/short, attempt to open
+                if current_position is None and desired in ("long", "short"):
+                    value_to_trade = capital * fraction
+                    expected_move = abs(price * expected_change)
+                    if expected_move == 0:
+                        expected_move = price * 0.001
+                    if desired == "long":
+                        tp = price + (expected_move * take_mult)
+                        sl = price - (expected_move * stop_mult)
+                        # check exposure cap
+                        if (value_to_trade) <= (max_long_exposure * capital):
+                            quantity = value_to_trade / price
+                            current_position = {
+                                "side": "long",
+                                "entry_price": price,
+                                "tp": tp,
+                                "sl": sl,
+                                "quantity": quantity,
+                                "entry_idx": t,
+                                "value_traded": value_to_trade,
+                            }
+                            position_value = value_to_trade
+                    else:  # short
+                        tp = price - (expected_move * take_mult)
+                        sl = price + (expected_move * stop_mult)
+                        if (value_to_trade) <= (max_short_exposure * capital):
+                            quantity = value_to_trade / price
+                            current_position = {
+                                "side": "short",
+                                "entry_price": price,
+                                "tp": tp,
+                                "sl": sl,
+                                "quantity": quantity,
+                                "entry_idx": t,
+                                "value_traded": value_to_trade,
+                            }
+                            position_value = value_to_trade
+
+        # 3) Update mark-to-market position_value and equity_curve
+        if current_position is not None:
+            # compute unrealized pnl on mark-to-market basis
+            if current_position["side"] == "long":
+                unreal_pnl = (price - current_position["entry_price"]) / current_position["entry_price"]
             else:
-                row.to_csv(filepath, index=False)
+                unreal_pnl = (current_position["entry_price"] - price) / current_position["entry_price"]
+            # unrealized change applied to fraction of capital used
+            equity_mt = equity + unreal_pnl * (current_position["value_traded"] / capital)
+            equity_curve[t] = equity_mt
+        else:
+            equity_curve[t] = equity
 
-    def get_cached_prediction(self, date, tag="btc_rf"):
-        filepath = os.path.join(self.cache_dir, f"{tag}_predictions.csv")
-        if not os.path.exists(filepath):
-            return None
-        try:
-            with self._cache_lock:
-                df = pd.read_csv(filepath, parse_dates=["date"])
-            row = df[df["date"] == pd.to_datetime(date)]
-            if not row.empty:
-                return float(row["prediction"].iloc[0])
-        except Exception as e:
-            print(f"Cache read error: {e}")
+    # End-of-window: close any open position at last price
+    if current_position is not None:
+        price = close_prices[-1]
+        entry_price = current_position["entry_price"]
+        side = current_position["side"]
+        if side == "long":
+            pnl = (price - entry_price) / entry_price
+        else:
+            pnl = (entry_price - price) / entry_price
+        trade_return = pnl * (current_position["value_traded"] / capital)
+        equity += trade_return
+        # write final equity to curve end
+        equity_curve[-1] = equity
+        num_trades += 1
 
-        return None
+    # Fill any zeros at start (e.g., before first index) with initial capital
+    first_nonzero = np.nonzero(equity_curve)[0]
+    if len(first_nonzero) == 0:
+        equity_curve[:] = capital
+    else:
+        idx0 = first_nonzero[0]
+        equity_curve[:idx0] = equity_curve[idx0]
+
+    # Convert to pandas Series with same index as prices_df
+    equity_series = pd.Series(equity_curve, index=prices_df.index)
+
+    # Compute per-minute returns of equity (simple pct change)
+    returns = equity_series.pct_change().fillna(0.0).values
+
+    # Total return (fraction)
+    total_return = float(equity_series.iloc[-1] / capital - 1.0)
+
+    # Sharpe (annualized). For crypto, use 365*24*60 minutes/year
+    minutes_per_year = 365.0 * 24.0 * 60.0
+    # If returns are all zero -> sharpe zero
+    if returns.std() == 0 or np.isclose(returns.std(), 0.0):
+        sharpe = 0.0
+    else:
+        sharpe = (np.mean(returns) / np.std(returns)) * math.sqrt(minutes_per_year)
+
+    # Max drawdown: based on equity_series
+    rolling_max = equity_series.cummax()
+    drawdown = (equity_series / rolling_max) - 1.0
+    max_drawdown = float(drawdown.min())
+
+    metrics = {
+        "total_return": total_return,
+        "num_trades": int(num_trades),
+        "sharpe": float(sharpe),
+        "max_drawdown": float(max_drawdown),
+        "equity_series": equity_series,  # included for debugging / more metrics
+    }
+    return metrics
 
 # -----------------------------
-# Lumibot Strategy (unchanged)
+# Candidate evaluation (thread-friendly)
 # -----------------------------
-class RandomForestBTCStrategy(Strategy):
-    # Class-level shared predictor
-    shared_predictor: RandomForestPredictor | None = None
+def evaluate_candidate_threadsafe(
+    hist_df_features: pd.DataFrame,
+    prices_df: pd.DataFrame,
+    decision_idx: np.ndarray,
+    preds: np.ndarray,
+    params: Dict[str, Any],
+    compute_frequency: int,
+) -> Dict[str, Any]:
+    """
+    Evaluate a single params dict using precomputed preds & decision indices.
+    Returns metrics dict (see simulate_trades_multi_candle).
+    """
+    try:
+        metrics = simulate_trades_multi_candle(
+            prices_df=prices_df,
+            decision_idx=decision_idx,
+            preds=preds,
+            params=params,
+            compute_frequency=compute_frequency,
+            initial_capital=1.0,
+        )
+        return {"status": "ok", "params": params, "metrics": metrics}
+    except Exception as e:
+        return {"status": "error", "params": params, "error": str(e)}
 
-    parameters = {
+# -----------------------------
+# Top-level optimizer (coarse grid + binary refinement) using threads & precomputed preds
+# -----------------------------
+def optimize_parameters_two_phase(
+    hist_df: pd.DataFrame,
+    start_dt: datetime,
+    end_dt: datetime,
+    initial_params: Dict[str, Any] = None,
+    binary_search_iters: int = 4,
+    opt_workers: int = 6,
+    logger=print,
+    rf_kwargs: Dict[str, Any] = None,
+    feature_fn = None,
+):
+    """
+    Two-phase optimizer:
+      - Phase 1 (sequential): train RF in memory and precompute predictions on decision timestamps
+      - Phase 2 (parallel threads): run coarse + binary parameter search where each candidate uses only precomputed preds
+    """
+
+    base = {
         "compute_frequency": 15,
         "lookback_period": 200,
         "fraction_portfolio_per_trade": 0.1,
@@ -99,585 +362,146 @@ class RandomForestBTCStrategy(Strategy):
         "max_portfolio_exposure_short": 0.5,
         "take_profit_multiplier": 1.2,
         "stop_loss_multiplier": 0.8,
-        # Optimization config
-        "binary_search_iters": BINARY_SEARCH_ITERS,
     }
+    if initial_params:
+        base.update(initial_params)
 
-    def initialize(self):
-        asset_symbol = self.parameters.get("asset_symbol", "BTC")
-        self.asset = Asset(asset_symbol, "crypto")
-        if RandomForestBTCStrategy.shared_predictor is None:
-            raise RuntimeError(
-                "[RF] shared_predictor must be initialized before creating a strategy instance!"
-            )
+    # slice hist_df for requested [start_dt, end_dt]
+    df_slice = hist_df.copy()
+    if df_slice.index.tz is None:
+        df_slice.index = df_slice.index.tz_localize("UTC")
+    df_slice = df_slice.sort_index()
+    df_slice = df_slice[(df_slice.index >= pd.to_datetime(start_dt).tz_localize("UTC")) &
+                        (df_slice.index <= pd.to_datetime(end_dt).tz_localize("UTC"))]
+    if df_slice.empty:
+        raise ValueError("No data in requested [start_dt, end_dt] window")
 
-        self.predictor = RandomForestBTCStrategy.shared_predictor
-        self.current_position = None
-        self.last_compute = None
-        self.set_market("24/7")
-    
-    # -----------------------------
-    # Indicators
-    # -----------------------------
-    def get_data(self, window_size: int) -> pd.DataFrame:
-        data_length = window_size + 40
-        bars = self.get_historical_prices(self.asset, data_length, "minute", quote=self.quote_asset)
-        df = bars.df.copy()
-        df = self._compute_features(df, current_datetime=self.get_datetime())
-        
-        return df.iloc[-window_size:].copy()
-    
-    @staticmethod
-    def _compute_features(df: pd.DataFrame, current_datetime: datetime | None = None) -> pd.DataFrame:
-        df = df.copy()
-        if current_datetime is None:
-            current_datetime = datetime.now(ZoneInfo(TIMEZONE))
+    compute_frequency = int(base.get("compute_frequency", 15))
+    horizon = compute_frequency  # keep parity with earlier logic (predict horizon = compute_frequency)
 
-        times = df.index.to_series()
-        df["timeofday"] = (times.dt.hour * 60) + times.dt.minute
-        df["timeofdaysq"] = df["timeofday"] ** 2
-        df["unixtime"] = df.index.astype(np.int64) // 10 ** 9
-        df["time_from_now"] = current_datetime.timestamp() - df["unixtime"]
+    # Phase 1: train RF & precompute preds
+    logger("Phase 1: training RF and precomputing predictions...")
+    rf_model, hist_df_features, decision_idx, preds = train_model_and_precompute_predictions(
+        hist_df=df_slice,
+        compute_frequency=compute_frequency,
+        horizon=horizon,
+        rf_kwargs=rf_kwargs or {"n_jobs": -1, "n_estimators": 100},
+        feature_fn=feature_fn,
+        current_datetime=end_dt, # ✅ Use end_dt as default reference datetime if not provided
+    )
+    logger(f"Trained RF; decisions count = {len(decision_idx)}")
 
-        df["delta"] = df["close"].pct_change()
-        df["rsi"] = ta.momentum.rsi(df["close"])
-        df["ema"] = ta.trend.ema_indicator(df["close"])
-        df["cmf"] = ta.volume.chaikin_money_flow(df["high"], df["low"], df["close"], df["volume"])
-        df["vwap"] = ta.volume.volume_weighted_average_price(df["high"], df["low"], df["close"], df["volume"])
-        df["bollinger_high"] = ta.volatility.bollinger_hband(df["close"])
-        df["bollinger_low"] = ta.volatility.bollinger_lband(df["close"])
-        df["macd"] = ta.trend.macd(df["close"])
-        ichimoku = ta.trend.IchimokuIndicator(df["high"], df["low"])
-        df["ichimoku_a"] = ichimoku.ichimoku_a()
-        df["ichimoku_b"] = ichimoku.ichimoku_b()
-        df["ichimoku_base"] = ichimoku.ichimoku_base_line()
-        df["ichimoku_conversion"] = ichimoku.ichimoku_conversion_line()
-        df["stoch"] = ta.momentum.stoch(df["high"], df["low"], df["close"])
-        
-        return df.dropna().copy()
+    # prices_df for simulation: use hist_df_features (includes 'close' etc.)
+    prices_df = hist_df_features[["close", "high", "low", "volume"]].copy()
 
-    # -----------------------------
-    # Trading iteration
-    # -----------------------------
-    def on_trading_iteration(self):
-        p = self.parameters.copy()
-        dt = self.get_datetime()
+    # Helper to run candidates in parallel
+    def run_candidate_batch(candidate_params: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        results = []
+        if opt_workers <= 1:
+            # serial
+            for p in candidate_params:
+                res = evaluate_candidate_threadsafe(hist_df_features, prices_df, decision_idx, preds, p, compute_frequency)
+                results.append(res)
+            return results
 
-        if self.last_compute is not None:
-            if dt - self.last_compute < timedelta(minutes=p["compute_frequency"]):
-                return
-        self.last_compute = dt
-
-        train_window_size = p["compute_frequency"] * p["lookback_period"]
-        data = self.get_data(train_window_size)
-        last_price = data["close"].iloc[-1]
-
-        pred = self.predictor.get_cached_prediction(dt)
-        if pred is None:
-            self.predictor.train(data, horizon=p["compute_frequency"])
-            pred = self.predictor.predict(data)
-            self.predictor.cache_prediction(dt, pred)
-
-        expected_change = (pred - last_price) / last_price
-        self.log_message(f"Predicted {pred:.2f}, last {last_price:.2f}, expected {expected_change:.4f}")
-
-        if expected_change > p["price_change_threshold_up"]:
-            self.open_position_with_orders("long", last_price, p, expected_change)
-        elif expected_change < p["price_change_threshold_down"]:
-            self.open_position_with_orders("short", last_price, p, expected_change)
-
-    def on_strategy_end(self):
-        if self.is_backtesting:
-            self.predictor = None
-
-    def on_abrupt_closing(self):
-        # Ensures all positions are closed on abrupt strategy termination.
-        self.sell_all()
-
-    # -----------------------------
-    # Order creation helpers (Lumibot style)
-    # -----------------------------
-    def open_position_with_orders(self, direction: str, price: float, params: dict, expected_change: float):
-        # Calculate sizing
-        value_to_trade = self.portfolio_value * params["fraction_portfolio_per_trade"]
-        quantity = value_to_trade / price
-
-        expected_move = abs(price * expected_change)
-        if expected_move == 0:
-            # fallback small distance
-            expected_move = price * 0.001
-        
-        position = self.get_position(self.asset)
-        if position is None:
-            self.shares_owned = 0
-        else:
-            self.shares_owned = float(position.quantity)
-        
-        asset_value = self.shares_owned * price
-
-        quote_position = self.get_position(self.quote_asset)
-        if quote_position is None:
-            quote_shares_owned = 0
-        else:
-            quote_shares_owned = float(quote_position.quantity)
-        self.log_message(f"Portfolio assets: {self.shares_owned}, quote assets: {quote_shares_owned}, total value: {asset_value + quote_shares_owned}", color="yellow")
-
-        max_position_size_long = params["max_portfolio_exposure_long"] * self.portfolio_value
-        if direction == "long" and (asset_value + value_to_trade) >= max_position_size_long:
-            self.log_message(f"Skip placing the oder because low asset value: {asset_value + value_to_trade} > {max_position_size_long}", color="yellow")
-            return
-        
-        max_position_size_short = params["max_portfolio_exposure_short"] * self.portfolio_value
-        if direction == "short" and (asset_value - value_to_trade) <= -max_position_size_short:
-            self.log_message(f"Skip placing the oder because low asset value: {value_to_trade - asset_value} < {max_position_size_short}", color="yellow")
-            return
-        
-
-        if direction == "long":
-            take_profit_price = price + (expected_move * params["take_profit_multiplier"])
-            stop_loss_price = price - (expected_move * params["stop_loss_multiplier"])
-            entry_side = "buy"
-            exit_side = "sell"
-        else:
-            take_profit_price = price - (expected_move * params["take_profit_multiplier"])
-            stop_loss_price = price + (expected_move * params["stop_loss_multiplier"])
-            entry_side = "sell"
-            exit_side = "buy"
-
-        if self.is_backtesting:
-            order = self.create_order(
-                self.asset,
-                quantity,
-                entry_side,
-                take_profit_price=take_profit_price,
-                stop_loss_price=stop_loss_price,
-                quote=self.quote_asset
-            )
-            self.submit_order(order)
-        else:
-            # # Market entry
-            entry_order = self.create_order(self.asset, quantity, entry_side, quote=self.quote_asset)
-            self.submit_order(entry_order)
-
-            # OCO exit (attach after filled)
-            exit_order = self.create_order(
-                self.asset,
-                quantity,
-                exit_side,
-                take_profit_price=take_profit_price,
-                stop_loss_price=stop_loss_price,
-                position_filled=True,
-                quote=self.quote_asset
-            )
-            self.submit_order(exit_order)
-
-        self.current_position = {
-            "side": direction,
-            "quantity": quantity,
-            "entry_price": price,
-            "tp": take_profit_price,
-            "sl": stop_loss_price,
-        }
-        self.log_message(f"Opened {direction.upper()} {quantity:.6f} @ {price:.2f} TP={take_profit_price:.2f} SL={stop_loss_price:.2f}")
-
-    @staticmethod
-    def optimize_parameters(
-        hist_df: pd.DataFrame,
-        start_dt: datetime,
-        end_dt: datetime,
-        initial_params: dict = None,
-        asset_symbol: str = "BTC",
-        quote_asset_symbol: str = "USDT",
-        benchmark_asset: str = "SPY",
-        params_log: str = "optimized_params.csv",
-        binary_search_iters: int = None,
-        opt_workers: int = None,
-        logger=print,
-        reuse_model=True,   # <-- new flag
-    ):
-        """
-        Static optimizer. Does NOT require creating a strategy instance.
-        This version spawns a new subprocess for every backtest run to avoid long-lived memory leaks.
-        """
-        base = dict(RandomForestBTCStrategy.parameters)
-        if initial_params:
-            base.update(initial_params)
-
-        if binary_search_iters is None:
-            binary_search_iters = int(base.get("binary_search_iters", BINARY_SEARCH_ITERS))
-        if opt_workers is None:
-            opt_workers = int(base.get("opt_workers", 3))
-
-        # create Asset + Data payload for Pandas backtesting
-        asset = Asset(asset_symbol, "crypto")
-        quote_asset = Asset(symbol=quote_asset_symbol, asset_type="forex")
-        pandas_data = {asset: Data(asset, hist_df, timestep="minute", quote=quote_asset)}
-
-        # Ensure feature set matches live trading
-        hist_df_features = RandomForestBTCStrategy._compute_features(hist_df)
-
-        # Train predictor once in parent if reuse_model True (child will still train its own copy to be safe)
-        if reuse_model:
-            prepare_shared_predictor(hist_df_features, compute_frequency=base["compute_frequency"])
-
-        def run_backtest(temp_params):
-            """
-            Spawn a separate process to run the backtest and return the parsed profit.
-            """
-            ctx = mp.get_context("spawn")
-            parent_conn, child_conn = ctx.Pipe(duplex=False)
-
-            # We will send a compact payload to the child: hist_df (features), start/end as iso strings, param dict, symbols
-            payload = {
-                "hist_df": hist_df_features,  # DataFrame will be pickled — acceptable here
-                "start_iso": start_dt.isoformat(),
-                "end_iso": end_dt.isoformat(),
-                "params": temp_params,
-                "asset_symbol": asset_symbol,
-                "quote_asset_symbol": quote_asset_symbol,
-                "benchmark_asset": benchmark_asset,
-            }
-
-            # # 🧹 Clean before launching child
-            # gc.collect()
-            # tracemalloc.reset_peak()   # reset peak usage for this iteration
-
-            # target worker
-            p = ctx.Process(target=_subprocess_backtest_worker, args=(child_conn, payload))
-            p.start()
-            child_conn.close()
-
-            # Wait for a message or timeout
-            profit = -np.inf
-            try:
-                # wait until a result arrives or timeout
-                if parent_conn.poll(BACKTEST_TIMEOUT_SECONDS):
-                    msg = parent_conn.recv()
-                    if isinstance(msg, dict) and msg.get("status") == "ok":
-                        result = msg.get("result")
-                        # parse profit similarly to previous local function
-                        profit = RandomForestBTCStrategy._parse_profit_from_backtest_result(result, logger=logger)
-                    else:
-                        err = msg.get("error", "Unknown error")
-                        logger(f"Backtest subprocess reported error: {err}")
-                        profit = -np.inf
-                else:
-                    logger(f"Backtest subprocess timed out after {BACKTEST_TIMEOUT_SECONDS}s; terminating.")
-                    profit = -np.inf
-            except Exception as e:
-                logger(f"Error receiving result from backtest subprocess: {e}")
-                profit = -np.inf
-            finally:
-                # ensure child is dead
-                if p.is_alive():
-                    try:
-                        p.terminate()
-                    except Exception:
-                        pass
-                p.join(timeout=5)
+        with ThreadPoolExecutor(max_workers=opt_workers) as exe:
+            futures = {exe.submit(evaluate_candidate_threadsafe, hist_df_features, prices_df, decision_idx, preds, p, compute_frequency): p for p in candidate_params}
+            for fut in as_completed(futures):
                 try:
-                    parent_conn.close()
-                except Exception:
-                    pass
+                    results.append(fut.result())
+                except Exception as e:
+                    results.append({"status": "error", "params": futures[fut], "error": str(e)})
+        return results
 
-                # # 🧹 Clean up after child finishes
-                # gc.collect()
-                # tracemalloc.reset_peak()   # optional: reset before next iteration
+    # Parameter search (coarse + binary refinement) similar to original
+    best_params = dict(base)
 
-            return profit
+    for priority in sorted(set(cfg["priority"] for cfg in PARAM_CONFIG)):
+        for cfg in [c for c in PARAM_CONFIG if c["priority"] == priority]:
+            pname = cfg["name"]
 
-        # -----------------------------
-        # Parameter tuning configuration
-        # -----------------------------
-        PARAM_CONFIG = [
-            {"name": "lookback_period", "coarse_grid": [100, 200, 300], "fine_range": (100, 400), "step": 25, "priority": 1},
-            {"name": "price_change_threshold_up", "coarse_grid": [0.003, 0.005, 0.007], "fine_range": (0.002, 0.01), "step": 0.001, "priority": 1},
-            {"name": "price_change_threshold_down", "coarse_grid": [-0.003, -0.005, -0.007], "fine_range": (-0.01, -0.002), "step": 0.001, "priority": 1},
-            {"name": "fraction_portfolio_per_trade", "coarse_grid": [0.8, 0.9, 1.0], "fine_range": (0.5, 1.0), "step": 0.05, "priority": 2},
-            {"name": "take_profit_multiplier", "coarse_grid": [0.8, 1.0, 1.2], "fine_range": (0.5, 1.5), "step": 0.1, "priority": 2},
-            {"name": "stop_loss_multiplier", "coarse_grid": [0.3, 0.5, 0.7], "fine_range": (0.2, 0.8), "step": 0.1, "priority": 2},
-        ]
+            logger(f"\n=== Coarse search for {pname} ===")
+            # build candidate params
+            candidate_params = []
+            for val in cfg["coarse_grid"]:
+                ptest = dict(best_params)
+                ptest[pname] = int(val) if pname == "lookback_period" else float(val)
+                candidate_params.append(ptest)
 
-        best_params = dict(base)
+            results = run_candidate_batch(candidate_params)
+            # Parse total_return or fallback -inf
+            best_val = None
+            best_profit = -np.inf
+            for r in results:
+                if r.get("status") == "ok":
+                    profit = float(r["metrics"]["total_return"])
+                else:
+                    profit = -np.inf
+                val = r["params"][pname]
+                logger(f"  Candidate {pname}={val} -> profit={profit:.6f}")
+                if profit > best_profit:
+                    best_profit = profit
+                    best_val = val
 
-        # Process parameters in order of priority
-        for priority in sorted(set(cfg["priority"] for cfg in PARAM_CONFIG)):
-            for cfg in [c for c in PARAM_CONFIG if c["priority"] == priority]:
-                pname = cfg["name"]
+            best_params[pname] = best_val
+            logger(f"✔ Best coarse {pname}={best_val} profit={best_profit:.6f}")
 
-                # 1) Coarse grid search
-                logger(f"\n=== Coarse search for {pname} ===")
-                best_val, best_profit = None, -np.inf
-                for val in cfg["coarse_grid"]:
+            # Binary refinement
+            low, high = cfg["fine_range"]
+            step = cfg["step"]
+            logger(f"\n--- Refining {pname} in range ({low}, {high}), step={step} ---")
+            for it in range(binary_search_iters):
+                mid = (low + high) / 2.0
+                candidate_vals = [low, mid, high]
+                candidate_params = []
+                for c in candidate_vals:
+                    val = int(round(c)) if pname == "lookback_period" else round(c, 6)
                     ptest = dict(best_params)
-                    ptest[pname] = int(val) if pname == "lookback_period" else float(val)
-                    
-                    # print_mem_usage("Before backtest")
-                    # profit = profile_memory_during_backtest(run_backtest, ptest, label=f"backtest {ptest}")
-                    # print_mem_usage("After backtest")
-                    profit = run_backtest(ptest)
-                    
-                    logger(f"  Candidate {pname}={val} -> profit={profit:.4f}")
-                    if profit > best_profit:
-                        best_val, best_profit = val, profit
-                
-                best_params[pname] = best_val
-                logger(f"✔ Best coarse {pname}={best_val} profit={best_profit:.4f}")
+                    ptest[pname] = val
+                    candidate_params.append(ptest)
 
-                # 2) Binary search refinement inside fine_range
-                low, high = cfg["fine_range"]
-                step = cfg["step"]
+                results = run_candidate_batch(candidate_params)
 
-                logger(f"\n--- Refining {pname} in range ({low}, {high}), step={step} ---")
-                for it in range(binary_search_iters):
-                    mid = (low + high) / 2
-                    candidates = [low, mid, high]
-                    profits = []
-                    logger(f" Iteration {it+1}/{binary_search_iters} candidates: {candidates}")
-
-                    for c in candidates:
-                        val = int(round(c)) if pname == "lookback_period" else round(c, 6)
-                        ptest = dict(best_params)
-                        ptest[pname] = val
-                        
-                        # print_mem_usage("Before backtest")
-                        # profit = profile_memory_during_backtest(run_backtest, ptest, label=f"backtest {ptest}")
-                        # print_mem_usage("After backtest")
-                        profit = run_backtest(ptest)
-                        
-                        profits.append((val, profit))
-                        logger(f"   Candidate {pname}={val} -> profit={profit:.4f}")
-
-                    best_val, best_profit = max(profits, key=lambda x: x[1])
-                    best_params[pname] = best_val
-                    logger(f"✔ Best so far {pname}={best_val}, profit={best_profit:.4f}")
-
-                    # Narrow range based on winner
-                    if best_val == candidates[0]:
-                        high = mid
-                    elif best_val == candidates[2]:
-                        low = mid
+                # evaluate
+                profits = []
+                for r in results:
+                    if r.get("status") == "ok":
+                        profits.append(float(r["metrics"]["total_return"]))
                     else:
-                        low = max(low, mid - step)
-                        high = min(high, mid + step)
+                        profits.append(-np.inf)
 
-                    logger(f" -> New search range ({low}, {high})")
+                for ptest, profit in zip(candidate_params, profits):
+                    logger(f"   Candidate {pname}={ptest[pname]} -> profit={profit:.6f}")
 
-        # Clean up predictor and heavy objects created for optimization
-        RandomForestBTCStrategy.shared_predictor = None
-        gc.collect()
-        
-        return best_params
-    
-    @staticmethod
-    def _parse_profit_from_backtest_result(result, logger=print):
-        """
-        Try several common locations for 'total profit' in different Lumibot versions.
-        Return -np.inf if parsing fails.
-        """
-        try:
-            return float(result['total_return'])
-        except Exception:
-            pass
+                # pick best
+                best_idx = int(np.nanargmax(profits))
+                best_val = candidate_params[best_idx][pname]
+                best_profit = profits[best_idx]
+                best_params[pname] = best_val
+                logger(f"✔ Best so far {pname}={best_val}, profit={best_profit:.6f}")
 
-        logger("Warning: could not parse profit from backtest result; returning -inf")
-        return -np.inf
+                # Narrow range
+                if best_idx == 0:
+                    high = mid
+                elif best_idx == 2:
+                    low = mid
+                else:
+                    low = max(low, mid - step)
+                    high = min(high, mid + step)
 
-# -----------------------------
-# Subprocess worker helper
-# -----------------------------
-def _subprocess_backtest_worker(conn, payload):
-    """
-    Runs inside a child process. Reconstructs the minimal pandas_data and runs the Lumibot backtest.
-    Sends back a dict over `conn` with either {'status': 'ok', 'result': result} or {'status': 'error', 'error': str(...)}
-    """
-    try:
-        # Unpack payload
-        hist_df = payload["hist_df"]
-        start_iso = payload["start_iso"]
-        end_iso = payload["end_iso"]
-        params = payload["params"]
-        asset_symbol = payload["asset_symbol"]
-        quote_asset_symbol = payload["quote_asset_symbol"]
-        benchmark_asset = payload["benchmark_asset"]
+                logger(f" -> New search range ({low}, {high})")
 
-        # Ensure types / datetimes
-        start_dt = pd.to_datetime(start_iso).to_pydatetime()
-        end_dt = pd.to_datetime(end_iso).to_pydatetime()
+    # Final cleanup
+    gc.collect()
 
-        # Recompute features inside the child to be safe
-        hist_df = RandomForestBTCStrategy._compute_features(hist_df)
-
-        # Train a predictor inside the child (so the child owns the ML model memory)
-        predictor = RandomForestPredictor()
-        predictor.train(hist_df, horizon=int(params.get("compute_frequency", 15)))
-
-        # Assign to class shared_predictor for the strategy instances in the child
-        RandomForestBTCStrategy.shared_predictor = predictor
-
-        # Build pandas_data for the child
-        asset = Asset(asset_symbol, "crypto")
-        quote_asset = Asset(symbol=quote_asset_symbol, asset_type="forex")
-        pandas_data = {asset: Data(asset, hist_df, timestep="minute", quote=quote_asset)}
-
-        # Run the backtest
-        result = RandomForestBTCStrategy.backtest(
-            PandasDataBacktesting,
-            start_dt,
-            end_dt,
-            pandas_data=pandas_data,
-            benchmark_asset=benchmark_asset,
-            quote_asset=quote_asset,
-            parameters=params,
-            show_plot=False,
-            save_tearsheet=False,
-            show_tearsheet=False,
-            show_indicators=False,
-            quiet_logs=True,
-            save_stats_file=False,
-        )
-
-        # Send result back
-        conn.send({"status": "ok", "result": result})
-    except Exception as e:
-        tb = traceback.format_exc()
-        conn.send({"status": "error", "error": f"{e}\n{tb}"})
-    finally:
-        try:
-            conn.close()
-        except Exception:
-            pass
-        # force GC in child before exit
-        gc.collect()
-        # exit child
-        os._exit(0)
-
-def prepare_shared_predictor(hist_df: pd.DataFrame, compute_frequency: int) -> RandomForestPredictor:
-    """
-    Initialize and train the shared predictor once in the parent (optional).
-    """
-    predictor = RandomForestPredictor()
-    predictor.train(hist_df, horizon=compute_frequency)
-    RandomForestBTCStrategy.shared_predictor = predictor
-    return predictor
-      
-def run_optimizer(hist_df, start_dt, end_dt, params_log, window_days, asset_symbol, quote_asset_symbol, benchmark_asset_symbol):
-    """Run optimizer for given window and log results"""
-    best_params = RandomForestBTCStrategy.optimize_parameters(
-        hist_df=hist_df,
-        start_dt=start_dt,
-        end_dt=end_dt,
-        asset_symbol=asset_symbol,
-        quote_asset_symbol=quote_asset_symbol,
-        benchmark_asset=benchmark_asset_symbol,
-        params_log=params_log,
-        binary_search_iters=BINARY_SEARCH_ITERS,
-        opt_workers=3,
-        logger=print,
-    )
-
-    # append window_days to the log row
-    row = {
-        "date": end_dt.strftime("%Y-%m-%d"),
-        "window_days": window_days,
-        "lookback_period": int(best_params["lookback_period"]),
-        "price_change_threshold_up": float(best_params["price_change_threshold_up"]),
-        "price_change_threshold_down": float(best_params["price_change_threshold_down"]),
-        "take_profit_factor": float(best_params["take_profit_multiplier"]),
-        "stop_loss_factor": float(best_params["stop_loss_multiplier"]),
+    # Return best_params and optionally diagnostics: retrain RF on final choice and compute its metrics
+    logger("\nOptimization finished. Recomputing final metrics for best_params...")
+    final_metrics = evaluate_candidate_threadsafe(hist_df_features, prices_df, decision_idx, preds, best_params, compute_frequency)
+    return {
+        "best_params": best_params,
+        "final_metrics": final_metrics,
+        "rf_model": rf_model,
+        "decision_idx": decision_idx,
+        "preds": preds,
+        "hist_df_features": hist_df_features,
     }
-
-    header = [
-        "date",
-        "window_days",
-        "lookback_period",
-        "price_change_threshold_up",
-        "price_change_threshold_down",
-        "take_profit_factor",
-        "stop_loss_factor",
-    ]
-
-    file_exists = os.path.exists(params_log)
-    with open(params_log, "a", newline="") as fh:
-        writer = csv.DictWriter(fh, fieldnames=header)
-        if not file_exists:
-            writer.writeheader()
-        writer.writerow(row)
-
-    print(f"Finished optimization for {window_days}-day window ending {end_dt}")
-
-    return best_params
-
-def generate_training_dataset(start, end, loopback_days, step_days, historical_folder, params_log, asset_symbol, quote_asset_symbol, benchmark_asset_symbol):
-    """Run optimizations for sliding windows and generate training data"""
-    binance_symbol = asset_symbol + quote_asset_symbol  # Binance convention
-
-    # load full historical data covering [start, end]
-    full_data = get_historical_data(binance_symbol, "1m", start, end, cache_dir=historical_folder)
-
-    # Ensure DataFrame index is datetime and UTC-aware
-    full_data.index = pd.to_datetime(full_data.index)
-    if full_data.index.tz is None:
-        full_data.index = full_data.index.tz_localize("UTC")
-    full_data = full_data.sort_index()
-
-    current_start = start
-    final_end = end
-
-    while current_start + timedelta(days=loopback_days) <= final_end:
-        window_end = current_start + timedelta(days=loopback_days)
-        if window_end > final_end:
-            break
-
-        # Convert naive datetimes to UTC-aware before slicing
-        current_start_aware = pd.to_datetime(current_start).tz_localize("UTC")
-        window_end_aware = pd.to_datetime(window_end).tz_localize("UTC")
-
-        # Slice DataFrame for this window
-        df_window = full_data[(full_data.index >= current_start_aware) & (full_data.index <= window_end_aware)]
-        if df_window.empty:
-            current_start += timedelta(days=step_days)
-            continue
-
-        try:
-            run_optimizer(
-                df_window,
-                current_start,
-                window_end,
-                params_log,
-                loopback_days,
-                asset_symbol=asset_symbol,
-                quote_asset_symbol=quote_asset_symbol,
-                benchmark_asset_symbol=benchmark_asset_symbol
-            )
-        except Exception as e:
-            print(f"Failed optimization for window ending {window_end}: {e}")
-
-        current_start += timedelta(days=step_days)
-
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Generate dataset of optimized parameters over rolling windows")
-    parser.add_argument("--start", required=True, help="Start date (YYYY-MM-DD)")
-    parser.add_argument("--end", required=True, help="End date (YYYY-MM-DD)")
-    parser.add_argument("--loopback-days", type=int, default=10, help="Window length in days")
-    parser.add_argument("--step-days", type=int, default=1, help="Sliding step size in days")
-    parser.add_argument("--historical-folder", required=True, default="./historical_data", help="Folder with historical data")
-    parser.add_argument("--params-log", required=True, default="./optimized_params.csv", help="Path to CSV log of optimized parameters")
-
-    args = parser.parse_args()
-
-    # Convert string arguments to datetime
-    start_dt = datetime.strptime(args.start, "%Y-%m-%d")
-    end_dt = datetime.strptime(args.end, "%Y-%m-%d")
-
-    generate_training_dataset(
-        start_dt,
-        end_dt,
-        args.loopback_days,
-        args.step_days,
-        args.historical_folder,
-        args.params_log,
-        asset_symbol="BTC",
-        quote_asset_symbol="USDT",
-        benchmark_asset_symbol="SPY"
-    )
