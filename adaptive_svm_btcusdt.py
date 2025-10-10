@@ -3,6 +3,7 @@ import pandas as pd
 from datetime import datetime
 from sklearn.svm import SVR, SVC
 from sklearn.preprocessing import StandardScaler
+import matplotlib.pyplot as plt
 from historical_data import get_historical_data
 
 class AdaptiveSVM:
@@ -226,25 +227,42 @@ def backtest_adaptive_svm(
     pct_profitable = (combined["strategy"] > 0).sum() / combined["strategy"].count()
 
 
-    print("\n\n📊 Backtest Summary")
-    print(f"Asset: {symbol}")
-    print(f"Period: {df.index.min().date()} → {df.index.max().date()}")
-    print(f"Use Volume Features: {use_volume_features}")
-    print(f"Average MAE: {average_mae:.6f}")
-    print(f"Final Cumulative Strategy Return: {combined['cum_strategy'].iloc[-1]:.6f}")
-    print(f"Final Cumulative Buy & Hold Return: {combined['cum_bh'].iloc[-1]:.6f}")
-    print(f"Sharpe Ratio (hourly): {sharpe:.3f}")
-    print(f"Max Drawdown: {max_dd:.2%}")
-    print(f"Short/Long Trade Ratio: {short_long_ratio:.4f}")
-    print(f"Number of Long Trades: {num_long}")
-    print(f"Number of Short Trades: {num_short}")
-    print(f"Average Long Return per Trade: {avg_long_return:.6f}")
-    print(f"Average Short Return per Trade: {avg_short_return:.6f}")
-    print(f"Percent of Profitable Trades: {pct_profitable:.2%}")
+    summary = {
+        "asset": symbol,
+        "period": f"{df.index.min().date()} → {df.index.max().date()}",
+        "use_volume_features": use_volume_features,
+        "average_mae": float(average_mae),
+        "final_cum_strategy_return": float(combined["cum_strategy"].iloc[-1]),
+        "final_cum_bh_return": float(combined["cum_bh"].iloc[-1]),
+        "sharpe_ratio_hourly": float(sharpe),
+        "max_drawdown": float(max_dd),
+        "short_long_ratio": float(short_long_ratio),
+        "num_long_trades": int(num_long),
+        "num_short_trades": int(num_short),
+        "avg_long_return_per_trade": float(avg_long_return),
+        "avg_short_return_per_trade": float(avg_short_return),
+        "percent_profitable_trades": float(pct_profitable),
+    }
 
-    return combined
-
+    return combined, summary
 
 if __name__ == "__main__":
-    results = backtest_adaptive_svm(use_volume_features=True)
-    print(results.tail(50))
+    combined, summary = backtest_adaptive_svm(use_volume_features=True)
+
+    print("\n📊 Backtest Summary:")
+    for k, v in summary.items():
+        if k in ["max_drawdown", "percent_profitable_trades"]:
+            print(f"{k}: {v * 100:.2f}%")
+        else:
+            print(f"{k}: {v}")
+
+    # Plot Strategy vs Buy & Hold
+    plt.figure(figsize=(12, 6))
+    plt.plot(combined.index, combined["cum_bh"], label="Buy & Hold", linewidth=2, alpha=0.7)
+    plt.plot(combined.index, combined["cum_strategy"], label="Strategy", linewidth=2, alpha=0.8)
+    plt.title("Cumulative Returns: Strategy vs Buy & Hold")
+    plt.xlabel("Time")
+    plt.ylabel("Cumulative Return")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.show()

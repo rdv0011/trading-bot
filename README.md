@@ -67,17 +67,17 @@ Do you want me to also **add a visual diagram** showing how the backtesting flow
 adaptive_svm_btcusdt.py, when mode is dynamically chooses as "regression"
 
 📊 Backtest Summary
-Asset: BTCUSDT
-Period: 2024-01-01 → 2025-01-31
-Use Volume Features: True
-Average MAE: 0.999652
-Final Cumulative Strategy Return: 1.746548
-Final Cumulative Buy & Hold Return: 1.596906
-Sharpe Ratio (hourly): 1.519
-Max Drawdown: -23.95%
-Short/Long Trade Ratio: 0.8521
-Number of Long Trades: 4056
-Number of Short Trades: 3456
-Average Long Return per Trade: 0.000159
-Average Short Return per Trade: 0.000008
-Percent of Profitable Trades: 50.21%
+asset: BTCUSDT
+period: 2024-01-01 → 2025-01-31
+use_volume_features: True
+average_mae: 0.9996520700468582
+final_cum_strategy_return: 1.746547817997818
+final_cum_bh_return: 1.59690638219606
+sharpe_ratio_hourly: 1.5188064326012396
+max_drawdown: -23.95%
+short_long_ratio: 0.8520710059171598
+num_long_trades: 4056
+num_short_trades: 3456
+avg_long_return_per_trade: 0.00015901741581557402
+avg_short_return_per_trade: 7.703535819657453e-06
+percent_profitable_trades: 50.21%
