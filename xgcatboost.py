@@ -6,59 +6,10 @@ from xgboost import XGBRegressor
 from catboost import CatBoostRegressor
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-import pickle
-import os
-from pathlib import Path
+from mlio import save_model, save_feature_columns
+from xgcatboostcore import make_features, make_labels, adaptive_thresholding
+
 warnings.filterwarnings("ignore")
-
-# Add after imports at the top
-MODEL_DIR = Path("models")
-MODEL_DIR.mkdir(exist_ok=True)
-
-# =============================================
-# Feature engineering
-# =============================================
-def make_features(df):
-    df = df.copy()
-    df['ret1'] = df['close'].pct_change(1)
-    for l in [1,2,3,5,10]:
-        df[f'ret_lag_{l}'] = df['ret1'].shift(l)
-    for span in [5,15,60,240]:
-        df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
-        df[f'ema_diff_{span}'] = df[f'ema_{span}'] - df['close']
-    df['tr'] = np.maximum(df['high']-df['low'],
-                          np.abs(df['high']-df['close'].shift(1)),
-                          np.abs(df['low']-df['close'].shift(1)))
-    df['atr14'] = df['tr'].rolling(14).mean()
-    df['vol_12'] = df['ret1'].rolling(12).std()
-    df['vol_48'] = df['ret1'].rolling(48).std()
-    df['hour'] = df.index.hour
-    df['dow'] = df.index.weekday
-    df = pd.get_dummies(df, columns=['hour','dow'], drop_first=True)
-    df = df.dropna()
-    return df
-
-# =============================================
-# Label generation (future return)
-# =============================================
-def make_labels(df, H=20):
-    df = df.copy()
-    df['future_close'] = df['close'].shift(-H)
-    df['future_ret'] = (df['future_close'] / df['close']) - 1.0
-    df = df.dropna()
-    return df
-
-# =============================================
-# Adaptive training loop
-# =============================================
-def adaptive_thresholding(pred_series, num_candles=600, label_window=200):
-    if len(pred_series) < num_candles:
-        return np.nan, np.nan
-    sorted_vals = pred_series.tail(num_candles).sort_values(ascending=False)
-    frequency = max(1, int(num_candles / label_window))
-    maxima_sort_threshold = sorted_vals.iloc[:frequency].mean()
-    minima_sort_threshold = sorted_vals.iloc[-frequency:].mean()
-    return maxima_sort_threshold, minima_sort_threshold
 
 # =============================================
 # Update rolling_train_predict to save models
@@ -123,8 +74,8 @@ def rolling_train_predict(df, model_type='xgb', retrain_every=12, window=4032, s
     
     # Save final model and features
     if save_final_model and mdl is not None:
-        model_path = save_model(mdl, model_type)
-        features_path = save_feature_columns(features, model_type)
+        save_model(mdl, model_type)
+        save_feature_columns(features, model_type)
         print(f"💾 Saved final {model_type.upper()} model and features")
     
     return df_res, res_df, mdl, features
@@ -507,257 +458,65 @@ def plot_results(df_xgb, df_cat):
     plt.tight_layout()
     plt.show()
 
-# =============================================
-# Model Persistence Functions
-# =============================================
-def save_model(model, model_type, model_dir=MODEL_DIR):
-    """
-    Save trained model to disk with timestamp.
-    
-    Args:
-        model: Trained XGBoost or CatBoost model
-        model_type: 'xgb' or 'cat'
-        model_dir: Directory to save models
-    
-    Returns:
-        Path to saved model file
-    """
-    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{model_type}_model_{timestamp}.pkl"
-    filepath = model_dir / filename
-    
-    with open(filepath, 'wb') as f:
-        pickle.dump(model, f)
-    
-    print(f"✅ Model saved: {filepath}")
-    return filepath
+if __name__ == "__main__":
+    # =============================================
+    # Download BTC/USDT data from Binance (5m)
+    # =============================================
+    DAYS = 60
+    SAVE_FINAL_MODEL = True
 
-def load_model(filepath):
-    """
-    Load trained model from disk.
-    
-    Args:
-        filepath: Path to saved model file
-    
-    Returns:
-        Loaded model
-    """
-    with open(filepath, 'rb') as f:
-        model = pickle.load(f)
-    
-    print(f"✅ Model loaded: {filepath}")
-    return model
+    exchange = ccxt.binance()
+    symbol = 'BTC/USDT'
+    timeframe = '5m'
+    limit = 1000  # adjust as needed
+    since = exchange.milliseconds() - DAYS * 24 * 60 * 60 * 1000
 
-def save_feature_columns(features, model_type, model_dir=MODEL_DIR):
-    """
-    Save feature column names for consistent prediction.
-    
-    Args:
-        features: List of feature column names
-        model_type: 'xgb' or 'cat'
-        model_dir: Directory to save feature list
-    
-    Returns:
-        Path to saved feature file
-    """
-    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{model_type}_features_{timestamp}.pkl"
-    filepath = model_dir / filename
-    
-    with open(filepath, 'wb') as f:
-        pickle.dump(features, f)
-    
-    print(f"✅ Features saved: {filepath}")
-    return filepath
+    print("Fetching data from Binance...")
 
-def load_feature_columns(filepath):
-    """
-    Load feature column names.
-    
-    Args:
-        filepath: Path to saved feature file
-    
-    Returns:
-        List of feature column names
-    """
-    with open(filepath, 'rb') as f:
-        features = pickle.load(f)
-    
-    return features
+    all_ohlcv = []
 
-# =============================================
-# Prediction Helper Functions
-# =============================================
-class TradingModelPredictor:
-    """
-    Helper class for loading and using trained models in Lumibot strategies.
-    """
-    
-    def __init__(self, model_path, features_path):
-        """
-        Initialize predictor with saved model and features.
-        
-        Args:
-            model_path: Path to saved model file
-            features_path: Path to saved features file
-        """
-        self.model = load_model(model_path)
-        self.features = load_feature_columns(features_path)
-        print(f"✅ Predictor initialized with {len(self.features)} features")
-    
-    def prepare_features(self, df):
-        """
-        Prepare features from raw OHLCV data.
-        
-        Args:
-            df: DataFrame with OHLCV data
-        
-        Returns:
-            DataFrame with features ready for prediction
-        """
-        # Apply same feature engineering as training
-        df = make_features(df)
-        
-        # Ensure all required features exist
-        missing_features = set(self.features) - set(df.columns)
-        if missing_features:
-            raise ValueError(f"Missing features: {missing_features}")
-        
-        return df[self.features]
-    
-    def predict(self, df):
-        """
-        Predict future return for the latest candle.
-        
-        Args:
-            df: DataFrame with OHLCV data (must have at least 240 candles for features)
-        
-        Returns:
-            float: Predicted future return
-        """
-        if len(df) < 240:
-            raise ValueError(f"Need at least 240 candles for feature calculation, got {len(df)}")
-        
-        # Prepare features
-        X = self.prepare_features(df)
-        
-        # Predict on the last row
-        prediction = self.model.predict(X.iloc[[-1]])[0]
-        
-        return prediction
-    
-    def predict_with_signal(self, df, pred_history, num_candles=600, label_window=200):
-        """
-        Predict future return and generate trading signal using adaptive thresholding.
-        
-        Args:
-            df: DataFrame with OHLCV data
-            pred_history: List or Series of recent predictions for threshold calculation
-            num_candles: Number of candles to use for threshold calculation
-            label_window: Window size for threshold calculation
-        
-        Returns:
-            dict: {
-                'prediction': float,
-                'signal': str ('long', 'short', or 'hold'),
-                'max_threshold': float,
-                'min_threshold': float
-            }
-        """
-        # Get prediction
-        prediction = self.predict(df)
-        
-        # Calculate adaptive thresholds
-        pred_series = pd.Series(list(pred_history) + [prediction])
-        max_th, min_th = adaptive_thresholding(pred_series, num_candles, label_window)
-        
-        # Generate signal
-        signal = 'hold'
-        if not np.isnan(max_th):
-            if prediction > max_th:
-                signal = 'long'
-            elif prediction < min_th:
-                signal = 'short'
-        
-        return {
-            'prediction': prediction,
-            'signal': signal,
-            'max_threshold': max_th,
-            'min_threshold': min_th
-        }
+    while True:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+        if not ohlcv:
+            break
+        all_ohlcv += ohlcv
+        since = ohlcv[-1][0] + (5 * 60 * 1000)  # move forward 5 minutes
+        print(f"Fetched {len(all_ohlcv)} candles so far...")
+        time.sleep(exchange.rateLimit / 1000)  # avoid rate limit
 
-# =============================================
-# Download BTC/USDT data from Binance (5m)
-# =============================================
-# exchange = ccxt.binance()
-# symbol = 'BTC/USDT'
-# timeframe = '5m'
-# limit = 1000  # adjust as needed
-# days = 30
-# since = exchange.milliseconds() - days * 24 * 60 * 60 * 1000
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df.drop_duplicates('date').set_index('date').sort_index()
+    print(f"✅ Loaded {len(df)} candles from Binance")
 
-# print("Fetching data from Binance...")
+    df = make_features(df)
 
-# all_ohlcv = []
+    df = make_labels(df, H=20)
+    print("Feature matrix shape:", df.shape)
 
-# while True:
-#     ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
-#     if not ohlcv:
-#         break
-#     all_ohlcv += ohlcv
-#     since = ohlcv[-1][0] + (5 * 60 * 1000)  # move forward 5 minutes
-#     print(f"Fetched {len(all_ohlcv)} candles so far...")
-#     time.sleep(exchange.rateLimit / 1000)  # avoid rate limit
+    print("Running XGBoost adaptive model...")
+    df_xgb, res_xgb, model_xgb, features_xgb = rolling_train_predict(
+        df,
+        'xgb',
+        save_final_model=SAVE_FINAL_MODEL
+    )
 
-# df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
-# df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-# df = df.drop_duplicates('date').set_index('date').sort_index()
-# print(f"✅ Loaded {len(df)} candles from Binance")
+    print("Running CatBoost adaptive model...")
+    df_cat, res_cat, model_cat, features_cat = rolling_train_predict(
+        df,
+        'cat',
+        save_final_model=SAVE_FINAL_MODEL
+    )
 
-# df = make_features(df)
+    df_xgb = simulate_trades(df_xgb)
+    df_cat = simulate_trades(df_cat)
 
-# df = make_labels(df, H=20)
-# print("Feature matrix shape:", df.shape)
+    # Calculate metrics
+    metrics_xgb = calculate_metrics(df_xgb)
+    metrics_cat = calculate_metrics(df_cat)
 
-# print("Running XGBoost adaptive model...")
-# df_xgb, res_xgb, model_xgb, features_xgb = rolling_train_predict(df, 'xgb', save_final_model=True)
-# print("Running CatBoost adaptive model...")
-# df_cat, res_cat, model_cat, features_cat = rolling_train_predict(df, 'cat', save_final_model=True)
-
-# df_xgb = simulate_trades(df_xgb)
-# df_cat = simulate_trades(df_cat)
-
-# Calculate metrics
-# metrics_xgb = calculate_metrics(df_xgb)
-# metrics_cat = calculate_metrics(df_cat)
-
-# =============================================
-# 7. Plot & Display Results
-# =============================================
-# plot_results(df_xgb, df_cat)
-# print_metrics(metrics_xgb, metrics_cat, res_xgb, res_cat)
-
-# Load the predictor
-predictor = TradingModelPredictor(
-    model_path='models/xgb_model_20251015_234550.pkl',
-    features_path='models/xgb_features_20251015_234550.pkl'
-)
-
-# # Prediction example
-# # Fetch fresh data
-exchange = ccxt.binance()
-ohlcv = exchange.fetch_ohlcv('BTC/USDT', '5m', limit=500)
-df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-df = df.set_index('date').sort_index()
-
-# Predict with signal
-pred_history = []  # In real usage, maintain this across calls
-result = predictor.predict_with_signal(df, pred_history)
-
-print(f"\n🔮 PREDICTION RESULT:")
-print(f"   Predicted Return: {result['prediction']:.6f}")
-print(f"   Trading Signal: {result['signal'].upper()}")
-print(f"   Max Threshold: {result['max_threshold']:.6f}")
-print(f"   Min Threshold: {result['min_threshold']:.6f}")
-print(f"   Current BTC Price: ${df['close'].iloc[-1]:,.2f}")
+    # =============================================
+    # 7. Plot & Display Results
+    # =============================================
+    plot_results(df_xgb, df_cat)
+    print_metrics(metrics_xgb, metrics_cat, res_xgb, res_cat)
