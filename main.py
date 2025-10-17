@@ -1,7 +1,7 @@
 import os
 from lumibot.brokers import Ccxt
 from dotenv import load_dotenv
-from mlstrategy import MLTradingStrategy
+from mlstrategy import XGCatBoostStrategy
 from lumibot.traders import Trader
 from lumibot.entities import Asset
 
@@ -41,10 +41,12 @@ if __name__ == "__main__":
         "predict_with_signal_num_candles" : 600,
         "predict_with_signal_label_window" : 200,
         "model_type": "xgb",  # or 'cat' for CatBoost
+        "auto_reload": True,
+        "sleeptime": "5M"  # 5 minutes
     }
 
     broker = Ccxt(BINANCE_CREDS)
-    strategy = MLTradingStrategy(
+    strategy = XGCatBoostStrategy(
         broker=broker,
         quote_asset=quote_asset,
         parameters=parameters,

@@ -56,6 +56,7 @@ def make_labels(df, H=20):
 # =============================================
 def adaptive_thresholding(pred_series, num_candles=600, label_window=200):
     if len(pred_series) < num_candles:
+        print(f"Insufficient data for adaptive thresholding: {len(pred_series)} < 600 candles")
         return np.nan, np.nan
     sorted_vals = pred_series.tail(num_candles).sort_values(ascending=False)
     frequency = max(1, int(num_candles / label_window))
