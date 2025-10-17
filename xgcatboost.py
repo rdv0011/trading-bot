@@ -463,7 +463,7 @@ if __name__ == "__main__":
     # Download BTC/USDT data from Binance (5m)
     # =============================================
     DAYS = 60
-    SAVE_FINAL_MODEL = True
+    SAVE_FINAL_MODEL = True # Models are saved to models/ directory
 
     exchange = ccxt.binance()
     symbol = 'BTC/USDT'

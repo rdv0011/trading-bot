@@ -2,19 +2,18 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: Run driver_rf_btc_param_optimizer.py",
+      "name": "Python: Run Lumibot strategy",
       "type": "debugpy",
       "request": "launch",
-      "program": "${workspaceFolder}/driver_rf_btc_param_optimizer.py",
-      "console": "integratedTerminal",
-      "args": [
-        "--start", "2025-01-01",
-        "--end", "2025-06-30",
-        "--loopback-days", "7",
-        "--step-days", "3",
-        "--historical-folder", "./historical_data",
-        "--params-log", "./optimized_params.csv"
-      ]
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal"
+    }
+    ,{
+      "name": "Python: Train xgboost catboost models",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/xgcatboost.py",
+      "console": "integratedTerminal"
     }
   ]
 }
