@@ -90,8 +90,13 @@ class XGCatBoostStrategy(Strategy):
                 self.log_message("🔄 Model was reloaded with new version!")
                 model_info = self.predictor.get_model_info()
                 self.log_message(f"   New model: {model_info['model_path']}")
-                # Clear prediction history when model changes
-                self.pred_history = []
+                # Reinitialize prediction history when model changes
+                self.log_message("📊 Reinitializing prediction history with new model...")
+                self._initialize_prediction_history()
+                self.log_message("✅ Prediction history reinitialized")
+                # Skip this iteration since we just reloaded - prediction history is fresh
+                return
+ 
             
             # Update prediction history
             self.pred_history.append(prediction)
