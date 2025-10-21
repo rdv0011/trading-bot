@@ -1,6 +1,4 @@
-from httpx import HTTPError, Timeout
-from lumibot.strategies import Strategy
-from lumibot.entities.asset import Asset
+from ccxtstrategy import CCXTStrategy
 import time
 import pandas as pd
 import numpy as np
@@ -12,7 +10,7 @@ TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal p
 BUY_SLIPPAGE = 1.005  # 0.5% slippage on buy orders
 SELL_SLIPPAGE = 0.995  # 0.5% slippage on
 
-class XGCatBoostStrategy(Strategy):
+class XGCatBoostStrategy(CCXTStrategy):
     '''
     Machine Learning Trading Strategy using XGBoost/CatBoost
     '''
@@ -28,13 +26,13 @@ class XGCatBoostStrategy(Strategy):
         )
         
         # Trading parameters
-        self.asset = Asset(symbol=self.parameters.get("asset_symbol", "BTC"), asset_type="crypto") 
-        self.stake_pct = self.parameters.get("stake_pct", 0.20)
+        self.asset = self.parameters.get("asset_symbol", "BTC") 
+        self.stake_pct = self.parameters.get("stake_pct", 0.2)
         self.stop_loss_pct = self.parameters.get("stop_loss_pct", 0.04)
         self.take_profit_pct = self.parameters.get("take_profit_pct", 0.08)
         self.max_hold_hours = self.parameters.get("max_hold_hours", 24)
         self.historical_prices_length = self.parameters.get("historical_prices_length", 500)
-        self.historical_prices_unit = self.parameters.get("historical_prices_unit", "minute")
+        self.historical_prices_timestep = self.parameters.get("historical_prices_timestep", "5m")
         self.predict_with_signal_num_candles = self.parameters.get("predict_with_signal_num_candles", 600)
         self.predict_with_signal_label_window = self.parameters.get("predict_with_signal_label_window", 200)
         
@@ -49,10 +47,9 @@ class XGCatBoostStrategy(Strategy):
         # Model reload tracking
         self.last_model_check = time.time()
         self.model_check_interval = self.parameters.get("model_check_interval", 300)  # Check every 5 minutes
-
         
         # Sleep time between iterations
-        self.sleeptime = self.parameters.get("sleeptime", "5M")  # 5 minutes to match training data
+        self.sleeptime = self.parameters.get("sleeptime", 300)  # 5 minutes to match training data
 
         # Log initial model info
         model_info = self.predictor.get_model_info()
@@ -66,16 +63,8 @@ class XGCatBoostStrategy(Strategy):
 
     def on_trading_iteration(self):
         # Get historical data (need at least 240 candles for features)
-        bars = self._get_historical_prices_with_retry(
-            self.historical_prices_length, 
-            self.historical_prices_unit
-        )
-        df = bars.df
+        df = self.get_historical_prices(self.asset, self.historical_prices_length, self.historical_prices_timestep)
 
-        # Remove timezone info if present to avoid comparison issues
-        if df.index.tz is not None:
-            df.index = df.index.tz_localize(None)
-        
         # Get prediction and signal
         try:
             result = self.predictor.predict_with_signal(
@@ -120,10 +109,10 @@ class XGCatBoostStrategy(Strategy):
         
         # Get current position
         position = self.get_position(self.asset)
-        current_price = self.get_last_price(self.asset, quote=self.quote_asset)
+        current_price = self.get_last_price(self.asset)
 
         # Check if we have a meaningful position
-        has_position = position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY
+        has_position = position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY
 
         # Entry logic
         if not has_position:
@@ -131,166 +120,152 @@ class XGCatBoostStrategy(Strategy):
             if self.entry_price is not None:
                 self.entry_price = None
                 self.entry_time = None
-
+            
             if signal == 'long':
-                # Calculate position size
-                cash = self.get_cash()
-                qty = (cash * self.stake_pct) / current_price
-
-                # Round to exchange precision (Binance BTC)
-                qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
-                
-                # Check minimum order size
-                if qty < MIN_TRADEABLE_QUANTITY:
-                    self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
-                    return
-                
-                # Calculate bracket order prices
-                stop_loss_price = round(current_price * (1 - self.stop_loss_pct), 2)
-                take_profit_price = round(current_price * (1 + self.take_profit_pct), 2)
-                
-                # Place market buy order
-                order = self.create_order(
-                    self.asset,
-                    qty,
-                    "buy",
-                    quote=self.quote_asset
-                )
-                self.submit_order(order)
-
-                # Place stop loss order (stop_limit)
-                stop_order = self.create_order(
-                    self.asset,
-                    qty,
-                    "sell",
-                    stop_price=stop_loss_price,
-                    limit_price=stop_loss_price * SELL_SLIPPAGE,
-                    order_type="stop_limit",
-                    quote=self.quote_asset
-                )
-                self.submit_order(stop_order)
-
-                # Place take profit order (limit)
-                tp_order = self.create_order(
-                    self.asset,
-                    qty,
-                    "sell",
-                    limit_price=take_profit_price,
-                    order_type="limit",
-                    quote=self.quote_asset
-                )
-                self.submit_order(tp_order)
-                
-                self.entry_price = current_price
-                self.entry_time = self.get_datetime()
-                
-                self.log_message(f"🟢 LONG ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.5f}")
-                
+                self._enter_long_position(current_price)
             elif signal == 'short':
-                # Calculate position size for short
-                cash = self.get_cash()
-                qty = (cash * self.stake_pct) / current_price
-
-                # Round to exchange precision (Binance BTC)
-                qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
-                
-                # Check minimum order size
-                if qty < MIN_TRADEABLE_QUANTITY:
-                    self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
-                    return
-                
-                # Calculate exit prices (inverted for short)
-                stop_loss_price = round(current_price * (1 + self.stop_loss_pct), 2)
-                take_profit_price = round(current_price * (1 - self.take_profit_pct), 2)
-                
-                # Place market sell order (short)
-                order = self.create_order(
-                    self.asset,
-                    qty,
-                    "sell",
-                    quote=self.quote_asset
-                )
-                self.submit_order(order)
-
-                # Place stop loss order for short (buy back at higher price)
-                stop_order = self.create_order(
-                    self.asset,
-                    qty,
-                    "buy",
-                    stop_price=stop_loss_price,
-                    limit_price=stop_loss_price * BUY_SLIPPAGE,
-                    order_type="stop_limit",
-                    quote=self.quote_asset
-                )
-                self.submit_order(stop_order)
-
-                # Place take profit order for short (buy back at lower price)
-                tp_order = self.create_order(
-                    self.asset,
-                    qty,
-                    "buy",
-                    limit_price=take_profit_price,
-                    order_type="limit",
-                    quote=self.quote_asset
-                )
-                self.submit_order(tp_order)
-                
-                self.entry_price = current_price
-                self.entry_time = self.get_datetime()
-                
-                self.log_message(f"🔴 SHORT ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.5f}")
+                self._enter_short_position(current_price)
         
         # Exit logic
         elif has_position and self.entry_price is not None:
-            # Determine if current position is long or short
-            is_long = position.quantity > 0
-            
-            # Calculate performance
-            if is_long:
-                perf = (current_price / self.entry_price - 1)
-            else:
-                perf = (self.entry_price / current_price - 1)
-            
-            hold_time = (self.get_datetime() - self.entry_time).total_seconds() / 3600  # hours
-            
-            # Exit conditions
-            should_exit = False
-            exit_reason = ""
-            
-            # Check max hold time
-            if hold_time >= self.max_hold_hours:
-                should_exit = True
-                exit_reason = "MAX HOLD TIME"
-            # Check for signal reversal
-            elif is_long and signal == 'short':
-                should_exit = True
-                exit_reason = "SIGNAL REVERSAL (LONG->SHORT)"
-            elif not is_long and signal == 'long':
-                should_exit = True
-                exit_reason = "SIGNAL REVERSAL (SHORT->LONG)"
-            
-            if should_exit:
-                # Cancel any pending orders (including bracket orders)
-                self.cancel_open_orders()
+            self._check_exit_conditions(position, current_price, signal)
+
+    def _enter_long_position(self, current_price: float):
+        """Enter long position with bracket orders"""
+        # Calculate position size
+        cash = self.get_cash()
+        qty = (cash * self.stake_pct) / current_price
+        qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
+        
+        if qty < MIN_TRADEABLE_QUANTITY:
+            self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+            return
+        
+        # Calculate bracket order prices
+        stop_loss_price = round(current_price * (1 - self.stop_loss_pct), 2)
+        take_profit_price = round(current_price * (1 + self.take_profit_pct), 2)
+        
+        # Place market buy order
+        order = self.create_order(self.asset, qty, "buy")
+        self.submit_order(order)
+
+        # Place stop loss order
+        stop_order = self.create_order(
+            self.asset, qty, "sell",
+            stop_price=stop_loss_price,
+            limit_price=stop_loss_price * SELL_SLIPPAGE,
+            order_type="stop_limit"
+        )
+        self.submit_order(stop_order)
+
+        # Place take profit order
+        tp_order = self.create_order(
+            self.asset, qty, "sell",
+            limit_price=take_profit_price,
+            order_type="limit"
+        )
+        self.submit_order(tp_order)
+        
+        self.entry_price = current_price
+        self.entry_time = self.get_datetime()
+        
+        self.log_message(f"🟢 LONG ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.3f}")
                 
-                 # Double-check position still exists and is above minimum
-                position = self.get_position(self.asset)
-                if position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY:
-                    side = "sell" if is_long else "buy"
-                    order = self.create_order(
-                        self.asset,
-                        abs(position.quantity),
-                        side,
-                        quote=self.quote_asset
-                    )
-                    self.submit_order(order)
-                    
-                    self.log_message(f"🔵 EXIT ({exit_reason}) at {current_price}, PnL: {perf:.2%}")
-                else:
-                    self.log_message(f"✅ Position already closed or too small (possibly by stop/take profit), reason would be: {exit_reason}, PnL: {perf:.2%}")
-                
-                self.entry_price = None
-                self.entry_time = None
+    def _enter_short_position(self, current_price: float):
+        """Enter short position with bracket orders"""
+        # Calculate position size for short
+        cash = self.get_cash()
+        qty = (cash * self.stake_pct) / current_price
+        qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
+        
+        if qty < MIN_TRADEABLE_QUANTITY:
+            self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+            return
+        
+        # Calculate exit prices (inverted for short)
+        stop_loss_price = round(current_price * (1 + self.stop_loss_pct), 2)
+        take_profit_price = round(current_price * (1 - self.take_profit_pct), 2)
+        
+        # Place market sell order (short)
+        order = self.create_order(self.asset, qty, "sell")
+        self.submit_order(order)
+
+        # Place stop loss order for short (buy back at higher price)
+        stop_order = self.create_order(
+            self.asset, qty, "buy",
+            stop_price=stop_loss_price,
+            limit_price=stop_loss_price * BUY_SLIPPAGE,
+            order_type="stop_limit"
+        )
+        self.submit_order(stop_order)
+
+        # Place take profit order for short (buy back at lower price)
+        tp_order = self.create_order(
+            self.asset, qty, "buy",
+            limit_price=take_profit_price,
+            order_type="limit"
+        )
+        self.submit_order(tp_order)
+        
+        self.entry_price = current_price
+        self.entry_time = self.get_datetime()
+        
+        self.log_message(f"🔴 SHORT ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.3f}")
+        
+    def _check_exit_conditions(self, position, current_price: float, signal: str):
+        """Check if position should be exited"""
+        is_long = position > 0
+        
+        # Calculate performance
+        if is_long:
+            perf = (current_price / self.entry_price - 1)
+        else:
+            perf = (self.entry_price / current_price - 1)
+        
+        hold_time = (self.get_datetime() - self.entry_time).total_seconds() / 3600  # hours
+        
+        # Exit conditions
+        should_exit = False
+        exit_reason = ""
+        
+        # Check max hold time
+        if hold_time >= self.max_hold_hours:
+            should_exit = True
+            exit_reason = "MAX HOLD TIME"
+        # Check for signal reversal
+        elif is_long and signal == 'short':
+            should_exit = True
+            exit_reason = "SIGNAL REVERSAL (LONG->SHORT)"
+        elif not is_long and signal == 'long':
+            should_exit = True
+            exit_reason = "SIGNAL REVERSAL (SHORT->LONG)"
+
+        if should_exit:
+            self._exit_position(position, current_price, exit_reason, perf)
+        
+    def _exit_position(self, position, current_price: float, exit_reason: str, perf: float):
+        """Exit current position"""
+        # Cancel any pending orders
+        self.cancel_open_orders()
+        
+        # Double-check position still exists and is above minimum
+        position = self.get_position(self.asset)
+        if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
+            is_long = position > 0
+            side = "sell" if is_long else "buy"
+            order = self.create_order(
+                self.asset,
+                abs(position),
+                side
+            )
+            self.submit_order(order)
+            
+            self.log_message(f"🔵 EXIT ({exit_reason}) at {current_price}, PnL: {perf:.2%}")
+        else:
+            self.log_message(f"✅ Position already closed or too small (possibly by stop/take profit), reason would be: {exit_reason}, PnL: {perf:.2%}")
+        
+        self.entry_price = None
+        self.entry_time = None
 
     def on_abrupt_closing(self):
         """
@@ -300,46 +275,37 @@ class XGCatBoostStrategy(Strategy):
             self.log_message("⚠️  Abrupt closing triggered - closing all positions...")
             
             # Cancel all pending orders
-            self.cancel_open_orders()
+            self.cancel_open_orders(self.asset)
             
             # Get current position
             position = self.get_position(self.asset)
 
-            if position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY:
-                current_price = self.get_last_price(self.asset, quote=self.quote_asset)
-                is_long = position.quantity > 0
+            if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
+                current_price = self.get_last_price(self.asset)
+                is_long = position > 0
 
                 side = "sell" if is_long else "buy"
-                
-                # Double-check position still exists before creating order
-                position = self.get_position(self.asset)
-                if position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY:
-                    order = self.create_order(
-                        self.asset,
-                        abs(position.quantity),
-                        side,
-                        quote=self.quote_asset,
-                        order_type="market"
-                    )
-                    self.submit_order(order)
-                    
-                    position_type = "LONG" if is_long else "SHORT"
-                    self.log_message(f"🔴 EMERGENCY EXIT ({position_type}) at {current_price}")
 
-                    # Calculate final performance if entry price is known
-                    if self.entry_price is not None:
-                        if is_long:
-                            perf = (current_price / self.entry_price - 1)
-                        else:
-                            perf = (self.entry_price / current_price - 1)
-                        self.log_message(f"   Final PnL: {perf:.2%}")
-                else:
-                    self.log_message("✅ Position was already closed or too small (possibly by stop/take profit)")
+                order = self.create_order(
+                    self.asset,
+                    abs(position),
+                    side,
+                    order_type="market"
+                )
+                self.submit_order(order)
+                
+                position_type = "LONG" if is_long else "SHORT"
+                self.log_message(f"🔴 EMERGENCY EXIT ({position_type}) at {current_price}")
+
+                # Calculate final performance if entry price is known
+                if self.entry_price is not None:
+                    if is_long:
+                        perf = (current_price / self.entry_price - 1)
+                    else:
+                        perf = (self.entry_price / current_price - 1)
+                    self.log_message(f"   Final PnL: {perf:.2%}")
             else:
-                if position is not None:
-                    self.log_message(f"✅ Position too small to close: {position.quantity:.8f} BTC (dust)")
-                else:
-                    self.log_message("✅ No positions to close")
+                self.log_message("✅ Position was already closed or too small (possibly by stop/take profit)")
                 
         except Exception as e:
             self.log_message(f"❌ Error during abrupt closing: {e}")
@@ -358,12 +324,7 @@ class XGCatBoostStrategy(Strategy):
             init_length = self.predict_with_signal_num_candles + 250
             
             self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
-            bars = self._get_historical_prices_with_retry(init_length, self.historical_prices_unit)
-            df = bars.df
-            
-            # Remove timezone info
-            if df.index.tz is not None:
-                df.index = df.index.tz_localize(None)
+            df = self.get_historical_prices(self.asset, init_length, self.historical_prices_timestep)
             
             # Generate predictions for each candle (rolling window)
             predictions = []
@@ -411,18 +372,3 @@ class XGCatBoostStrategy(Strategy):
             import traceback
             self.log_message(f"Traceback: {traceback.format_exc()}")
             # Continue with empty history - will accumulate during trading
-    
-    def _get_historical_prices_with_retry(self, length, timestep, retries=3, delay=5):
-        """
-        Fetch historical prices with retry logic for network errors.
-        """
-        for attempt in range(retries):
-            try:
-                return self.get_historical_prices(self.asset, length, timestep)
-            except (HTTPError, Timeout) as e:
-                if attempt < retries - 1:
-                    self.log_message(f"⚠️  Network error fetching prices (attempt {attempt + 1}/{retries}): {e}")
-                    time.sleep(delay)
-                else:
-                    self.log_message(f"❌ Failed to fetch prices after {retries} attempts")
-                    raise

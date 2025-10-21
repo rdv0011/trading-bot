@@ -1,15 +1,17 @@
 name: tradingbot
 channels:
   - conda-forge
+  - defaults
 dependencies:
-  - python=3.11
-  - numpy=1.26.4
-  - pandas>=2.2
-  - scipy=1.13.1
-  - catboost=1.2.5
-  - xgboost>=2.1
-  - ccxt=4.4.90
+  - python=3.10
+  - pandas=2.3.3
+  - numpy=2.3.4
+  - matplotlib=3.10.3
+  - matplotlib-inline=0.1.7
+  - tqdm=4.67.1
+  - psutil=7.0.0
+  - xgboost=3.0.5
+  - catboost=1.2.8
   - pip
   - pip:
-      - git+https://github.com/rdv0011/lumibot.git@fix/binance-limit-assets-asset-symbol
-      - pandas_market_calendars @ git+https://github.com/rsheftel/pandas_market_calendars.git
+      - git+https://github.com/rdv0011/ccxt.git@fix/exchange-fix-logging-format

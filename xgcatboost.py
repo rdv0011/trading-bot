@@ -93,6 +93,8 @@ def simulate_trades(df, pred_col='pred'):
     pnl = []
     pred_hist = []
     entry_index = 0
+    num_candles = 600
+    label_window = 200
     
     # Track individual trades with timestamps
     trades = []
@@ -100,7 +102,10 @@ def simulate_trades(df, pred_col='pred'):
 
     for i in range(len(df)):
         pred_hist.append(df[pred_col].iloc[i])
-        max_th, min_th = adaptive_thresholding(pd.Series(pred_hist))
+        if len(pred_hist) < num_candles:
+            pnl.append(wallet)
+            continue
+        max_th, min_th = adaptive_thresholding(pd.Series(pred_hist), num_candles=num_candles, label_window=label_window)
         price = df['close'].iloc[i]
         timestamp = df.index[i]
 

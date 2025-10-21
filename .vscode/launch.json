@@ -3,20 +3,26 @@
   "configurations": [
     
 
-
-  
     {
-      "name": "Python: Run Lumibot strategy",
+      "name": "Python: Run XGBoost ML strategy",
       "type": "debugpy",
       "request": "launch",
       "justMyCode": false,
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal"
-    }
-    ,{
+    },{
+      "name": "Python: Run CatBoost ML strategy",
+      "type": "debugpy",
+      "request": "launch",
+      "justMyCode": false,
+      "program": "${workspaceFolder}/main.py",
+      "console": "integratedTerminal",
+      "args": ["--model-type=cat"]
+    },{
       "name": "Python: Train xgboost catboost models",
       "type": "debugpy",
       "request": "launch",
+      "justMyCode": false,
       "program": "${workspaceFolder}/xgcatboost.py",
       "console": "integratedTerminal"
     }

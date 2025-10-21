@@ -12,7 +12,7 @@ if __name__ == "__main__":
 
     # --- 1. Connect to Binance ---
     exchange = ccxt.binance({
-        'apiKey': BINANCE_TESTNET_API_KEY,
+        'api_key': BINANCE_TESTNET_API_KEY,
         'secret': BINANCE_TESTNET_API_SECRET,
         'enableRateLimit': True,
         'options': {
