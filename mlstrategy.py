@@ -1,10 +1,16 @@
 from httpx import HTTPError, Timeout
 from lumibot.strategies import Strategy
+from lumibot.entities.asset import Asset
 import time
 import pandas as pd
 import numpy as np
 from mlio import MODEL_DIR
 from tradingmodelpredictor import TradingModelPredictor
+
+MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
+TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
+BUY_SLIPPAGE = 1.005  # 0.5% slippage on buy orders
+SELL_SLIPPAGE = 0.995  # 0.5% slippage on
 
 class XGCatBoostStrategy(Strategy):
     '''
@@ -22,9 +28,10 @@ class XGCatBoostStrategy(Strategy):
         )
         
         # Trading parameters
-        self.symbol = self.parameters.get("asset_symbol", "BTC")
-        self.stake_pct = self.parameters.get("stake_pct", 0.05)
+        self.asset = Asset(symbol=self.parameters.get("asset_symbol", "BTC"), asset_type="crypto") 
+        self.stake_pct = self.parameters.get("stake_pct", 0.20)
         self.stop_loss_pct = self.parameters.get("stop_loss_pct", 0.04)
+        self.take_profit_pct = self.parameters.get("take_profit_pct", 0.08)
         self.max_hold_hours = self.parameters.get("max_hold_hours", 24)
         self.historical_prices_length = self.parameters.get("historical_prices_length", 500)
         self.historical_prices_unit = self.parameters.get("historical_prices_unit", "minute")
@@ -112,63 +119,129 @@ class XGCatBoostStrategy(Strategy):
             return
         
         # Get current position
-        position = self.get_position(self.symbol)
-        current_price = self.get_last_price(self.symbol)
-        
+        position = self.get_position(self.asset)
+        current_price = self.get_last_price(self.asset, quote=self.quote_asset)
+
+        # Check if we have a meaningful position
+        has_position = position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY
+
         # Entry logic
-        if position is None:
+        if not has_position:
+            # Reset entry tracking if position was closed
+            if self.entry_price is not None:
+                self.entry_price = None
+                self.entry_time = None
+
             if signal == 'long':
                 # Calculate position size
                 cash = self.get_cash()
                 qty = (cash * self.stake_pct) / current_price
+
+                # Round to exchange precision (Binance BTC)
+                qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
                 
-                # Place market order
-                order = self.create_order(self.symbol, qty, "buy")
+                # Check minimum order size
+                if qty < MIN_TRADEABLE_QUANTITY:
+                    self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+                    return
+                
+                # Calculate bracket order prices
+                stop_loss_price = round(current_price * (1 - self.stop_loss_pct), 2)
+                take_profit_price = round(current_price * (1 + self.take_profit_pct), 2)
+                
+                # Place market buy order
+                order = self.create_order(
+                    self.asset,
+                    qty,
+                    "buy",
+                    quote=self.quote_asset
+                )
                 self.submit_order(order)
+
+                # Place stop loss order (stop_limit)
+                stop_order = self.create_order(
+                    self.asset,
+                    qty,
+                    "sell",
+                    stop_price=stop_loss_price,
+                    limit_price=stop_loss_price * SELL_SLIPPAGE,
+                    order_type="stop_limit",
+                    quote=self.quote_asset
+                )
+                self.submit_order(stop_order)
+
+                # Place take profit order (limit)
+                tp_order = self.create_order(
+                    self.asset,
+                    qty,
+                    "sell",
+                    limit_price=take_profit_price,
+                    order_type="limit",
+                    quote=self.quote_asset
+                )
+                self.submit_order(tp_order)
                 
                 self.entry_price = current_price
                 self.entry_time = self.get_datetime()
-
-                # Set stop loss
-                stop_loss_price = current_price * (1 - self.stop_loss_pct)
-                stop_order = self.create_order(
-                    self.symbol, 
-                    qty, 
-                    "sell",
-                    stop_price=stop_loss_price,
-                    order_type="stop"
-                )
-                self.submit_order(stop_order)
                 
-                self.log_message(f"🟢 LONG ENTRY at {current_price}")
+                self.log_message(f"🟢 LONG ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.5f}")
                 
             elif signal == 'short':
                 # Calculate position size for short
                 cash = self.get_cash()
                 qty = (cash * self.stake_pct) / current_price
+
+                # Round to exchange precision (Binance BTC)
+                qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
+                
+                # Check minimum order size
+                if qty < MIN_TRADEABLE_QUANTITY:
+                    self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+                    return
+                
+                # Calculate exit prices (inverted for short)
+                stop_loss_price = round(current_price * (1 + self.stop_loss_pct), 2)
+                take_profit_price = round(current_price * (1 - self.take_profit_pct), 2)
                 
                 # Place market sell order (short)
-                order = self.create_order(self.symbol, qty, "sell")
+                order = self.create_order(
+                    self.asset,
+                    qty,
+                    "sell",
+                    quote=self.quote_asset
+                )
                 self.submit_order(order)
+
+                # Place stop loss order for short (buy back at higher price)
+                stop_order = self.create_order(
+                    self.asset,
+                    qty,
+                    "buy",
+                    stop_price=stop_loss_price,
+                    limit_price=stop_loss_price * BUY_SLIPPAGE,
+                    order_type="stop_limit",
+                    quote=self.quote_asset
+                )
+                self.submit_order(stop_order)
+
+                # Place take profit order for short (buy back at lower price)
+                tp_order = self.create_order(
+                    self.asset,
+                    qty,
+                    "buy",
+                    limit_price=take_profit_price,
+                    order_type="limit",
+                    quote=self.quote_asset
+                )
+                self.submit_order(tp_order)
                 
                 self.entry_price = current_price
                 self.entry_time = self.get_datetime()
                 
-                # Set stop loss for short (buy back at higher price)
-                stop_loss_price = current_price * (1 + self.stop_loss_pct)
-                stop_order = self.create_order(
-                    self.symbol, 
-                    qty, 
-                    "buy",
-                    stop_price=stop_loss_price,
-                    order_type="stop"
-                )
-                self.submit_order(stop_order)
-                
-                self.log_message(f"🔴 SHORT ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}")
+                self.log_message(f"🔴 SHORT ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.5f}")
         
         # Exit logic
-        elif position is not None and self.entry_price is not None:
+        elif has_position and self.entry_price is not None:
             # Determine if current position is long or short
             is_long = position.quantity > 0
             
@@ -184,36 +257,37 @@ class XGCatBoostStrategy(Strategy):
             should_exit = False
             exit_reason = ""
             
-            # Check for manual stop loss hit (in case stop order didn't trigger)
-            if is_long and perf <= -self.stop_loss_pct:
-                should_exit = True
-                exit_reason = "STOP LOSS (LONG)"
-            elif not is_long and perf <= -self.stop_loss_pct:
-                should_exit = True
-                exit_reason = "STOP LOSS (SHORT)"
-            elif hold_time >= self.max_hold_hours:
+            # Check max hold time
+            if hold_time >= self.max_hold_hours:
                 should_exit = True
                 exit_reason = "MAX HOLD TIME"
-            elif is_long and signal == 'short':  # Opposite signal for long
+            # Check for signal reversal
+            elif is_long and signal == 'short':
                 should_exit = True
                 exit_reason = "SIGNAL REVERSAL (LONG->SHORT)"
-            elif not is_long and signal == 'long':  # Opposite signal for short
+            elif not is_long and signal == 'long':
                 should_exit = True
                 exit_reason = "SIGNAL REVERSAL (SHORT->LONG)"
             
             if should_exit:
-                # Cancel any pending stop orders
+                # Cancel any pending orders (including bracket orders)
                 self.cancel_open_orders()
                 
-                # Close position
-                if is_long:
-                    self.sell_all()
-                else:
-                    # Close short by buying back
-                    order = self.create_order(self.symbol, abs(position.quantity), "buy")
+                 # Double-check position still exists and is above minimum
+                position = self.get_position(self.asset)
+                if position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY:
+                    side = "sell" if is_long else "buy"
+                    order = self.create_order(
+                        self.asset,
+                        abs(position.quantity),
+                        side,
+                        quote=self.quote_asset
+                    )
                     self.submit_order(order)
-                
-                self.log_message(f"🔵 EXIT ({exit_reason}) at {current_price}, PnL: {perf:.2%}")
+                    
+                    self.log_message(f"🔵 EXIT ({exit_reason}) at {current_price}, PnL: {perf:.2%}")
+                else:
+                    self.log_message(f"✅ Position already closed or too small (possibly by stop/take profit), reason would be: {exit_reason}, PnL: {perf:.2%}")
                 
                 self.entry_price = None
                 self.entry_time = None
@@ -229,31 +303,43 @@ class XGCatBoostStrategy(Strategy):
             self.cancel_open_orders()
             
             # Get current position
-            position = self.get_position(self.symbol)
-            
-            if position is not None:
-                current_price = self.get_last_price(self.symbol)
+            position = self.get_position(self.asset)
+
+            if position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY:
+                current_price = self.get_last_price(self.asset, quote=self.quote_asset)
                 is_long = position.quantity > 0
+
+                side = "sell" if is_long else "buy"
                 
-                if is_long:
-                    # Close long position
-                    self.sell_all()
-                    self.log_message(f"🔴 EMERGENCY EXIT (LONG) at {current_price}")
-                else:
-                    # Close short position
-                    order = self.create_order(self.symbol, abs(position.quantity), "buy")
+                # Double-check position still exists before creating order
+                position = self.get_position(self.asset)
+                if position is not None and abs(position.quantity) >= MIN_TRADEABLE_QUANTITY:
+                    order = self.create_order(
+                        self.asset,
+                        abs(position.quantity),
+                        side,
+                        quote=self.quote_asset,
+                        order_type="market"
+                    )
                     self.submit_order(order)
-                    self.log_message(f"🔴 EMERGENCY EXIT (SHORT) at {current_price}")
-                
-                # Calculate final performance if entry price is known
-                if self.entry_price is not None:
-                    if is_long:
-                        perf = (current_price / self.entry_price - 1)
-                    else:
-                        perf = (self.entry_price / current_price - 1)
-                    self.log_message(f"   Final PnL: {perf:.2%}")
+                    
+                    position_type = "LONG" if is_long else "SHORT"
+                    self.log_message(f"🔴 EMERGENCY EXIT ({position_type}) at {current_price}")
+
+                    # Calculate final performance if entry price is known
+                    if self.entry_price is not None:
+                        if is_long:
+                            perf = (current_price / self.entry_price - 1)
+                        else:
+                            perf = (self.entry_price / current_price - 1)
+                        self.log_message(f"   Final PnL: {perf:.2%}")
+                else:
+                    self.log_message("✅ Position was already closed or too small (possibly by stop/take profit)")
             else:
-                self.log_message("✅ No positions to close")
+                if position is not None:
+                    self.log_message(f"✅ Position too small to close: {position.quantity:.8f} BTC (dust)")
+                else:
+                    self.log_message("✅ No positions to close")
                 
         except Exception as e:
             self.log_message(f"❌ Error during abrupt closing: {e}")
@@ -332,7 +418,7 @@ class XGCatBoostStrategy(Strategy):
         """
         for attempt in range(retries):
             try:
-                return self.get_historical_prices(self.symbol, length, timestep)
+                return self.get_historical_prices(self.asset, length, timestep)
             except (HTTPError, Timeout) as e:
                 if attempt < retries - 1:
                     self.log_message(f"⚠️  Network error fetching prices (attempt {attempt + 1}/{retries}): {e}")

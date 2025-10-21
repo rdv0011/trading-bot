@@ -43,3 +43,7 @@ This will:
 ## 🧠 Usage
 Run your trading strategy:
 python main.py
+
+## Improvements
+1. Implement latency, slippage, and fees for paper trading
+2. Optimize metaparameter: take profit, stop loss ...

@@ -1,10 +1,15 @@
 {
   "version": "0.2.0",
   "configurations": [
+    
+
+
+  
     {
       "name": "Python: Run Lumibot strategy",
       "type": "debugpy",
       "request": "launch",
+      "justMyCode": false,
       "program": "${workspaceFolder}/main.py",
       "console": "integratedTerminal"
     }

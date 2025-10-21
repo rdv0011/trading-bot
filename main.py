@@ -1,4 +1,5 @@
 import os
+import ccxt
 from lumibot.brokers import Ccxt
 from dotenv import load_dotenv
 from mlstrategy import XGCatBoostStrategy
@@ -7,29 +8,49 @@ from lumibot.entities import Asset
 
 load_dotenv()
 
-BINANCE_API_KEY = os.getenv("BINANCE_API_KEY", "")
-BINANCE_API_SECRET = os.getenv("BINANCE_API_SECRET", "")
+BINANCE_TESTNET_API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
+BINANCE_TESTNET_API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
 
 # Initialize and run the strategy
 if __name__ == "__main__":
-            
-    BINANCE_CREDS = {
+
+    BINANCE_SPOT_TESTNET_CREDS = {
         "exchange_id": "binance",
-        "urls": {
-            "api": "https://testnet.binance.vision/api"
-        },
-        "apiKey": BINANCE_API_KEY,
-        "secret": BINANCE_API_SECRET,
+        "apiKey": BINANCE_TESTNET_API_KEY,
+        "secret": BINANCE_TESTNET_API_SECRET,
         "sandbox": True,
         'options': {
-            'defaultType': 'spot',
-            'fetchMarkets': ['spot']
+            'defaultType': 'stop'
+        },
+        'urls': {
+            'api': {
+                "public": "https://testnet.binance.vision/api",
+                "private": "https://testnet.binance.vision/api"
+            }
         }
     }
 
+    BINANCE_FUTURE_TESTNET_CREDS = {
+        "exchange_id": "binance",
+        "apiKey": BINANCE_TESTNET_API_KEY,
+        "secret": BINANCE_TESTNET_API_SECRET,
+        "sandbox": True,
+        'options': {
+            'defaultType': 'future'
+        },
+        'urls': {
+            'api': {
+                'public': 'https://testnet.binancefuture.com/fapi/v1',
+                'private': 'https://testnet.binancefuture.com/fapi/v1'
+            }
+        }
+    }
+
+    broker = Ccxt(BINANCE_FUTURE_TESTNET_CREDS)
+
     base_symbol = "BTC"
     quote_symbol = "USDT"
-    quote_asset = Asset(symbol=quote_symbol, asset_type="forex")
+    quote_asset = Asset(symbol=quote_symbol, asset_type="crypto")
     parameters = {
         "asset_symbol" : base_symbol,
         "stake_pct" : 0.05,
@@ -45,7 +66,6 @@ if __name__ == "__main__":
         "sleeptime": "5M"  # 5 minutes
     }
 
-    broker = Ccxt(BINANCE_CREDS)
     strategy = XGCatBoostStrategy(
         broker=broker,
         quote_asset=quote_asset,
