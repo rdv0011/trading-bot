@@ -49,8 +49,9 @@ if __name__ == "__main__":
     quote_symbol = "USDT"
     parameters = {
         "asset_symbol" : base_symbol,
-        "stake_pct" : 0.2,
-        "stop_loss_pct" : 0.04,
+        "stake_pct" : 0.5,
+        "stop_loss_pct" : 0.01,
+        "take_profit_pct" : 0.02,
         "max_hold_hours" : 24,
         "max_history_size" : 600,
         "historical_prices_length" : 500,

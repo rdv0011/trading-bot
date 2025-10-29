@@ -28,8 +28,8 @@ class XGCatBoostStrategy(CCXTStrategy):
         # Trading parameters
         self.asset = self.parameters.get("asset_symbol", "BTC") 
         self.stake_pct = self.parameters.get("stake_pct", 0.2)
-        self.stop_loss_pct = self.parameters.get("stop_loss_pct", 0.04)
-        self.take_profit_pct = self.parameters.get("take_profit_pct", 0.08)
+        self.stop_loss_pct = self.parameters.get("stop_loss_pct", 0.01)
+        self.take_profit_pct = self.parameters.get("take_profit_pct", 0.02)
         self.max_hold_hours = self.parameters.get("max_hold_hours", 24)
         self.historical_prices_length = self.parameters.get("historical_prices_length", 500)
         self.historical_prices_timestep = self.parameters.get("historical_prices_timestep", "5m")
