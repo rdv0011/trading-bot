@@ -8,7 +8,8 @@ from tradingmodelpredictor import TradingModelPredictor
 MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
 TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
 BUY_SLIPPAGE = 1.005  # 0.5% slippage on buy orders
-SELL_SLIPPAGE = 0.995  # 0.5% slippage on
+SELL_SLIPPAGE = 0.995  # 0.5% slippage on sell orders
+MIN_CANDLES_FOR_FEATURES = 250
 
 class XGCatBoostStrategy(CCXTStrategy):
     '''
@@ -32,7 +33,7 @@ class XGCatBoostStrategy(CCXTStrategy):
         self.take_profit_pct = self.parameters.get("take_profit_pct", 0.02)
         self.max_hold_hours = self.parameters.get("max_hold_hours", 24)
         self.historical_prices_length = self.parameters.get("historical_prices_length", 500)
-        self.historical_prices_timestep = self.parameters.get("historical_prices_timestep", "5m")
+        self.historical_prices_unit = self.parameters.get("historical_prices_unit", "5m")
         self.predict_with_signal_num_candles = self.parameters.get("predict_with_signal_num_candles", 600)
         self.predict_with_signal_label_window = self.parameters.get("predict_with_signal_label_window", 200)
         
@@ -63,7 +64,7 @@ class XGCatBoostStrategy(CCXTStrategy):
 
     def on_trading_iteration(self):
         # Get historical data (need at least 240 candles for features)
-        df = self.get_historical_prices(self.asset, self.historical_prices_length, self.historical_prices_timestep)
+        df = self.get_historical_prices(self.asset, self.historical_prices_length, self.historical_prices_unit)
 
         # Get prediction and signal
         try:
@@ -319,16 +320,15 @@ class XGCatBoostStrategy(CCXTStrategy):
         """
         try:
             # Fetch enough historical data for:
-            # - 600 predictions needed for adaptive thresholding
             # - ~240 candles for feature calculation warmup
-            init_length = self.predict_with_signal_num_candles + 250
+            init_length = self.predict_with_signal_num_candles + MIN_CANDLES_FOR_FEATURES
             
             self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
-            df = self.get_historical_prices(self.asset, init_length, self.historical_prices_timestep)
+            df = self.get_historical_prices(self.asset, init_length, self.historical_prices_unit)
             
             # Generate predictions for each candle (rolling window)
             predictions = []
-            min_candles_for_features = 250  # Ensure enough data for feature engineering
+            min_candles_for_features = MIN_CANDLES_FOR_FEATURES  # Ensure enough data for feature engineering
             
             for i in range(min_candles_for_features, len(df)):
                 # Get data up to current point

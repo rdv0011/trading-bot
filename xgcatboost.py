@@ -11,6 +11,10 @@ from xgcatboostcore import make_features, make_labels, adaptive_thresholding
 
 warnings.filterwarnings("ignore")
 
+SYMBOL = 'BTC/USDT'
+DAYS = 60
+SAVE_FINAL_MODEL = True # Models are saved to models/ directory
+
 # Metaparameters as constants
 STAKE_PCT = 0.5
 STOP_LOSS_PCT = 0.01
@@ -21,6 +25,7 @@ PREDICT_WITH_SIGNAL_LABEL_WINDOW = 200
 MAX_HISTORY_SIZE = 600
 HISTORICAL_PRICES_LENGTH = 500
 HISTORICAL_PRICES_UNIT = "5m"
+HISTORICAL_PRICES_LIMIT = 1000
 
 # =============================================
 # Update rolling_train_predict to save models
@@ -480,13 +485,10 @@ if __name__ == "__main__":
     # =============================================
     # Download BTC/USDT data from Binance (5m)
     # =============================================
-    DAYS = 60
-    SAVE_FINAL_MODEL = True # Models are saved to models/ directory
 
     exchange = ccxt.binance()
-    symbol = 'BTC/USDT'
-    timeframe = '5m'
-    limit = 1000  # adjust as needed
+    timeframe = HISTORICAL_PRICES_UNIT
+    limit = HISTORICAL_PRICES_LIMIT # adjust as needed
     since = exchange.milliseconds() - DAYS * 24 * 60 * 60 * 1000
 
     print("Fetching data from Binance...")
@@ -494,7 +496,7 @@ if __name__ == "__main__":
     all_ohlcv = []
 
     while True:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+        ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=timeframe, since=since, limit=limit)
         if not ohlcv:
             break
         all_ohlcv += ohlcv

@@ -56,7 +56,7 @@ if __name__ == "__main__":
         "max_history_size" : 600,
         "historical_prices_length" : 500,
         "historical_prices_unit" : "5m",
-        "predict_with_signal_num_candles" : 600,
+        "predict_with_signal_num_candles" : 600, # 600 predictions needed for adaptive thresholding
         "predict_with_signal_label_window" : 200,
         "model_type": args.model_type,  # or 'cat' for CatBoost
         "auto_reload": True,
