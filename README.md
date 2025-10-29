@@ -43,16 +43,18 @@ Trading bot uses the latest by date model from the model/ folder
 Run training:
 ```python xgcatboost.py```
 The training script fill remove the oldets models to keep two model versions only to use a minimum file system storage.
-> **_NOTE:_** The traning step shuold be repeated on a daily basic. To do this the crone job can be created to execute run traning script. Run the following ```crontab -e``` and put the following line 
+> **_NOTE:_** The traning step shuold be repeated on a daily basic. To do this the crone job can be created to execute run traning script. Run . ```conda env list``` and copy the path ```/Users/<user_name>/miniconda3/envs/tradingbot```. Run the following ```crontab -e``` and put the following line:
+```shell
+0 2 * * * /bin/bash -i -c "source /Users/<user_name>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<user_name>/Development/trading-bot/xgcatboost.py >> /Users/<user_name>/Development/trading-bot/xgcatboost.log 2>&1"
 ```
-0 2 * * * /usr/bin/python3 /fullpath_to_local_repo/xgcatboost.py >> /fullpath_to_local_repo/xgcatboost.log 2>&1
-```
+Make sure that ```/Users/<user_name>/Development/trading-bot/``` points to the cloned bot repo
+
 Breakdown:
-```
+```shell
 0 2 * * * → Run at 2:00 AM daily
-/usr/bin/python3 → Path to Python
-/fullpath_to_local_repo/xgcatboost.py → Full path to your script
->> /fullpath_to_local_repo/xgcatboost.log 2>&1 → Logs output and errors to a file
+conda activate tradingbot → activates conda environment
+<fullpath_to_local_repo>/xgcatboost.py → Full path to your script
+>> <fullpath_to_local_repo>/xgcatboost.log 2>&1 → Logs output and errors to a file
 ```
 Once trainng is complete and new models are generated the running trading bot will swap the model at runtime automatically.
 
