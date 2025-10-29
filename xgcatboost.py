@@ -19,13 +19,23 @@ SAVE_FINAL_MODEL = True # Models are saved to models/ directory
 STAKE_PCT = 0.5
 STOP_LOSS_PCT = 0.01
 TAKE_PROFIT_PCT = 0.02
-MAX_HOLD_HOURS = 24  # Hours
 PREDICT_WITH_SIGNAL_NUM_CANDLES = 600
 PREDICT_WITH_SIGNAL_LABEL_WINDOW = 200
 MAX_HISTORY_SIZE = 600
 HISTORICAL_PRICES_LENGTH = 500
-HISTORICAL_PRICES_UNIT = "5m"
 HISTORICAL_PRICES_LIMIT = 1000
+MAX_HOLD_HOURS = 24  # Hours
+HISTORICAL_PRICES_TIMEFRAME = "5m"
+# It represents the number of future periods (candles) ahead to predict returns.
+# Given the 5-minute timeframe (HISTORICAL_PRICES_TIMEFRAME = "5m"), H=20 corresponds to 100 minutes (1.67 hours) into the future.
+# This value is likely chosen empirically or based on backtesting to balance prediction accuracy with market dynamics 
+# (e.g., capturing short-term trends without excessive noise). 
+# It aligns with MAX_HOLD_HOURS = 24 (longer holding) but focuses on a specific forward-looking window for labeling.
+# In the code, H=20 is hardcoded as a constant, suggesting it's a tuned hyperparameter. 
+# Adjusting it could impact model performance (e.g., higher H for longer-term predictions, lower for more responsive signals). 
+# If needed, it could be made configurable for experimentation.
+NUMBER_OF_CANDLES_AHEAD = 20 
+##
 
 # =============================================
 # Update rolling_train_predict to save models
@@ -487,7 +497,7 @@ if __name__ == "__main__":
     # =============================================
 
     exchange = ccxt.binance()
-    timeframe = HISTORICAL_PRICES_UNIT
+    timeframe = HISTORICAL_PRICES_TIMEFRAME
     limit = HISTORICAL_PRICES_LIMIT # adjust as needed
     since = exchange.milliseconds() - DAYS * 24 * 60 * 60 * 1000
 
@@ -511,7 +521,7 @@ if __name__ == "__main__":
 
     df = make_features(df)
 
-    df = make_labels(df, H=20)
+    df = make_labels(df, H=NUMBER_OF_CANDLES_AHEAD)
     print("Feature matrix shape:", df.shape)
 
     print("Running XGBoost adaptive model...")
