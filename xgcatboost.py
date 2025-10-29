@@ -11,6 +11,17 @@ from xgcatboostcore import make_features, make_labels, adaptive_thresholding
 
 warnings.filterwarnings("ignore")
 
+# Metaparameters as constants
+STAKE_PCT = 0.5
+STOP_LOSS_PCT = 0.01
+TAKE_PROFIT_PCT = 0.02
+MAX_HOLD_HOURS = 24  # Hours
+PREDICT_WITH_SIGNAL_NUM_CANDLES = 600
+PREDICT_WITH_SIGNAL_LABEL_WINDOW = 200
+MAX_HISTORY_SIZE = 600
+HISTORICAL_PRICES_LENGTH = 500
+HISTORICAL_PRICES_UNIT = "5m"
+
 # =============================================
 # Update rolling_train_predict to save models
 # =============================================
@@ -85,16 +96,18 @@ def rolling_train_predict(df, model_type='xgb', retrain_every=12, window=4032, s
 # =============================================
 def simulate_trades(df, pred_col='pred'):
     wallet = 1.0
-    stake = 0.05
-    stop_loss = -0.04
-    max_hold = 24*60  # minutes
+    stake = STAKE_PCT
+    stop_loss = -STOP_LOSS_PCT
+    take_profit = TAKE_PROFIT_PCT
+    max_hold = MAX_HOLD_HOURS * 60  # Convert hours to minutes
     position = 0
     entry_price = 0
     pnl = []
     pred_hist = []
     entry_index = 0
-    num_candles = 600
-    label_window = 200
+    num_candles = PREDICT_WITH_SIGNAL_NUM_CANDLES
+    label_window = PREDICT_WITH_SIGNAL_LABEL_WINDOW
+
     
     # Track individual trades with timestamps
     trades = []
@@ -125,7 +138,7 @@ def simulate_trades(df, pred_col='pred'):
         # Exit
         if position != 0:
             perf = (price / entry_price - 1) * position
-            if perf <= stop_loss or (i - entry_index)*5 >= max_hold:
+            if perf <= stop_loss or perf >= take_profit or (i - entry_index)*5 >= max_hold:
                 wallet *= (1 + stake * perf)
                 trades.append({'position': position, 'return': perf})
                 trade_markers.append({'timestamp': timestamp, 'price': price, 'type': 'exit', 'position': 'long' if position == 1 else 'short', 'profit': perf > 0})
