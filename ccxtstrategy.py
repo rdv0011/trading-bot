@@ -115,6 +115,9 @@ class CCXTStrategy:
                     import traceback
                     self.log_message(f"Traceback: {traceback.format_exc()}")
                     time.sleep(60)  # Wait before retrying
+        
+        except KeyboardInterrupt:
+            self.log_message("⚠️  Strategy interrupted by user")
                     
         finally:
             self.shutdown()
