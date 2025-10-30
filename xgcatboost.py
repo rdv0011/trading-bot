@@ -6,7 +6,7 @@ from xgboost import XGBRegressor
 from catboost import CatBoostRegressor
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from mlio import MODEL_DIR, save_model, save_feature_columns
+from mlio import save_model, save_feature_columns
 from xgcatboostcore import make_features, make_labels, adaptive_thresholding
 
 warnings.filterwarnings("ignore")
