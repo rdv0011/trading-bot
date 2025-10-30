@@ -1,9 +1,13 @@
 import pickle
 from pathlib import Path
 import pandas as pd
+import os
+import sys
 
-# Add after imports at the top
-MODEL_DIR = Path("models")
+# Detect the directory of the main script (e.g., xgcatboost.py)
+script_path = os.path.abspath(sys.argv[0])
+script_dir = os.path.dirname(script_path)
+MODEL_DIR = Path(script_dir) / "models"
 MODEL_DIR.mkdir(exist_ok=True)
 
 # =============================================
