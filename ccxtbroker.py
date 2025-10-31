@@ -183,6 +183,8 @@ class CCXTBroker:
         """Cancel all open orders for symbol"""
         try:
             open_orders = self.exchange.fetch_open_orders(symbol, params=RETRY_PARAMETERS)
+            if open_orders:
+                self.log_message(f"🟠 Cancelling remaining orders for {symbol}.")
             for order in open_orders:
                 self.cancel_order(symbol, order['id'])
             self.pending_orders.clear()

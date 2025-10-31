@@ -119,6 +119,8 @@ class XGCatBoostStrategy(CCXTStrategy):
         if not has_position:
             # Reset entry tracking if position was closed
             if self.entry_price is not None:
+                # Close any remaining open orders (e.g., stop/take profit) if position closed externally
+                self.cancel_open_orders(self.asset)
                 self.entry_price = None
                 self.entry_time = None
             
