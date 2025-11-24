@@ -64,3 +64,48 @@ To disable this run keepawake/cancelkeepawake.sh
 
 ## Improvements
 Optimize metaparameter: take profit, stop loss ...
+
+
+## Refined Design
+
+Stage 1 — Slice dataset into walkforward windows
+You must split your dataset into:
+An optimization window (training)
+A forward window (production application)
+Repeat through all anchors.
+[ TRAIN ] → best params → label {[FWD]}  
+[ TRAIN ] → best params → label {[FWD]}  
+[ TRAIN ] → best params → label {[FWD]}  
+...
+🚨 Important:
+Training window parameters must be applied only to future candles, never to the train window itself.
+
+Stage 2 — Optimize parameters using only TRAIN window
+For each walkforward iteration:
+train_df = df[train_start : train_end]
+params = argmax(simulate_trades_with_params(train_df, p) for p in grid)
+The simulation uses absolute parameters, not labels.
+The output must be:
+best_param = {
+    "symbol_window": S,
+    "adv_window": A,
+    "threshold": T,
+}
+
+Stage 3 — Label per-candle parameters on only the forward window
+Now assign the chosen parameters to each candle in the FORWARD window only:
+df.loc[forward_start:forward_end, "label_symbol_window"] = S
+df.loc[forward_start:forward_end, "label_adv_window"]    = A
+df.loc[forward_start:forward_end, "label_threshold"]     = T
+Repeat for each walkforward block.
+⬆️ THIS produces true per-candle dynamic parameters.
+This is where your current system fails because you assign parameters to all candles in a block, not per forward window.
+
+Stage 4 — ONE FINAL SIMULATION
+Now run one single simulation on the entire dataframe, using candle-specific parameters:
+simulate_dynamic(df)
+Where each candle uses:
+symbol_window  = df.label_symbol_window[candle]
+adv_window     = df.label_adv_window[candle]
+threshold      = df.label_threshold[candle]
+This is the correct, validated structure.
