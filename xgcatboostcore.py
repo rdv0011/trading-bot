@@ -35,7 +35,7 @@ def make_features(df):
     df['dow_sin'] = np.sin(2 * np.pi * dows / 7)
     df['dow_cos'] = np.cos(2 * np.pi * dows / 7)
     
-    df = df.dropna()
+    df = df.dropna().round(5)
     return df
 
 # =============================================
@@ -55,7 +55,9 @@ def make_labels(df, H=20):
     df = df.copy()
     df['future_close'] = df['close'].shift(-H)
     df['future_ret'] = (df['future_close'] / df['close']) - 1.0
-    df = df.dropna()
+    
+    df = df.dropna().round(5)
+
     return df
 
 def get_features(df):
@@ -250,7 +252,7 @@ def simulate_trades_core(
 
     # Build result DataFrame
     df_result = df_iter.copy()
-    df_result['wallet'] = wallet_history
+    df_result['wallet'] = np.round(wallet_history, 5)
     df_result.attrs['trades'] = trades
     df_result.attrs['trade_markers'] = trade_markers
 

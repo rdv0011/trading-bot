@@ -1,21 +1,18 @@
 # xgcatboostlabeling.py
 # Produces trained XGBoost/CatBoost models and a labeled historical price dataset
 
-import ccxt
-from flask import json
 import pandas as pd
 import numpy as np
-import time, warnings
+import warnings
 from catboost import CatBoostRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
-from xgcatboost import TRAINING_WINDOW_DAYS
 from xgcatboostcore import make_features, make_labels
 from xgcatboostcore import get_features, simulate_trades_core
 from xgcatboostcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
 from xgcatboostcore import PREDICT_WITH_SIGNAL_NUM_CANDLES, OBJECTIVE_METRIC
-from mlio import LABEL_DIR, load_model, save_model
+from mlio import LABEL_DIR, download_historical_prices, load_featured_df, load_labels, load_model, save_model, save_featured_df, save_labels
 from itertools import product
 import inspect
 import ast
@@ -25,12 +22,13 @@ from typing import Tuple, Optional
 warnings.filterwarnings("ignore")
 
 SYMBOL = 'BTC/USDT'
-TRAINING_WINDOW_DAYS = 20 # How far to the past to fetch data and train ML model on
-SAVE_FINAL_MODEL = True # Models are saved to models/ directory
+WHOLE_WINDOW_DAYS = 60  # total days to fetch (train + test)
+TRAINING_FRACTION = 0.8  # fraction used for training after labeling
+WHOLE_WINDOW_MILLISECONDS = WHOLE_WINDOW_DAYS * 24 * 60 * 60 * 1000
 
+SAVE_FINAL_MODEL = True # Models are saved to models/ directory
 # Metaparameters as constants
 MAX_HISTORY_SIZE = 600
-TRAINING_WINDOW_MILLISECONDS = TRAINING_WINDOW_DAYS * 24 * 60 * 60 * 1000
 HISTORICAL_PRICES_LENGTH = 500
 HISTORICAL_PRICES_LIMIT = 1000
 HISTORICAL_PRICES_TIMEFRAME = "5m"
@@ -126,7 +124,7 @@ def walkforward_label_forward_windows(
             "date": df.index[end_idx - 1],
             "best_param_idx": best_param_idx,
             "best_param": best_param,
-            "best_metric": best_metric,
+            "best_metric": round(best_metric, 5),
         })
 
         df_hist = (
@@ -209,7 +207,7 @@ def rolling_train_predict_multi(
     retrain_every = 1  # Retrain every N candles for speed
 
     # Train model on rolling window
-    for i in tqdm(range(w, n), desc=f"Training {model_type.upper()}", unit="candle"):
+    for i in tqdm(range(w, n), desc=f"Labeling with predictions {model_type.upper()}", unit="candle"):
         if i % retrain_every == 0 or mdl is None:
             train_df = df.iloc[i-w:i]
             X_train, y_train = train_df[features], train_df[target_col]
@@ -230,6 +228,8 @@ def rolling_train_predict_multi(
     # The result size will be n - window
     df_out = df.iloc[window:].copy()
     df_out[signal_col] = preds
+
+    df_out = df_out.round(5)
 
     return df_out
 
@@ -261,7 +261,7 @@ def label_and_evaluate_intervals(
     for hours in sorted(set(intervals_hours)):
 
         window_size = int(hours * candles_per_hour)
-        step = max(1, window_size)
+        step = min(12, window_size)
         
         print(f"\n--- Labeling for {hours}h horizon ({window_size} candles), step={step} ---")
 
@@ -272,6 +272,7 @@ def label_and_evaluate_intervals(
             signal_col=signal_col,
             window_size=window_size,
             timeframe_minutes=timeframe_minutes,
+            step=step,
         )
 
         all_labels[hours] = labels_df
@@ -314,8 +315,8 @@ def label_and_evaluate_intervals(
         row = {
             'interval_hours': hours,
             'horizon_candles': window_size,
-            f"{model_type}_objective": metrics_dyn.get(OBJECTIVE_METRIC, np.nan),
-            f"{model_type}_final_wallet": metrics_dyn.get('final_wallet', np.nan),
+            f"{model_type}_objective": round(metrics_dyn.get(OBJECTIVE_METRIC, np.nan), 5),
+            f"{model_type}_final_wallet": round(metrics_dyn.get('final_wallet', np.nan), 5),
             f"{model_type}_num_trades": metrics_dyn.get('trades_count', 0),
         }
         summary_rows.append(row)
@@ -364,11 +365,10 @@ def train_best_param_multi_model(
     )
 
     # -------- Extract raw target keys --------
-    target_keys = set()
+    target_keys = []
     df["best_param"].dropna().apply(
-        lambda d: target_keys.update(d.keys()) if isinstance(d, dict) else None
+        lambda d: [target_keys.append(k) for k in d.keys() if k not in target_keys]
     )
-    target_keys = list(target_keys)
 
     # -------- Build raw value lists for each key BEFORE creating any columns --------
     values_per_key = {k: [] for k in target_keys}
@@ -480,43 +480,69 @@ def train_best_param_multi_model(
     print("\n✅ Training complete.")
     return multi_model, predictor, rmse_per_target, metadata_out
 
-def _predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFrame, target_keys: Optional[list] = None):
+def _predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFrame):
     """
     Returns a list of dicts (one per X row) mapping target_keys to predicted values.
-    Handles callable or sklearn-like model.predict. Missing keys are filled with None.
+    Handles callable or sklearn-like model.predict. Missing keys are filled either from:
+      - metadata['removed_targets'], or
+      - None (if missing)
     """
-    # Get raw predictions
+    # -------------------------
+    # 1. Run model prediction
+    # -------------------------
     try:
         raw_preds = model(X) if callable(model) else model.predict(X)
     except Exception:
         raw_preds = model.predict(X.values)
 
-    # If model already returned list of dicts
-    if isinstance(raw_preds, (list, np.ndarray)) and len(raw_preds) > 0 and isinstance(raw_preds[0], dict):
+    # If model returned list of dicts
+    if (
+        isinstance(raw_preds, (list, np.ndarray))
+        and len(raw_preds) > 0
+        and isinstance(raw_preds[0], dict)
+    ):
         return list(raw_preds)
 
+    # Convert to 2D numpy array
     arr = np.atleast_2d(np.asarray(raw_preds))
     n_rows, n_cols = arr.shape
 
-    # Determine target keys
-    if target_keys is None:
-        if metadata and "valid_targets" in metadata:
-            target_keys = [k[len("target_"):] if k.startswith("target_") else k for k in metadata["valid_targets"]]
-        else:
-            target_keys = [f"param_{i}" for i in range(n_cols)]
+    # -------------------------
+    # 2. Determine correct keys
+    # -------------------------
+    meta_tkeys = metadata.get("target_keys") if metadata else None
+    meta_valid  = metadata.get("valid_targets") if metadata else None
+    meta_removed = metadata.get("removed_targets") if metadata else {}
 
-    # Determine which output column maps to which key
-    col_to_key = target_keys[:n_cols] if n_cols <= len(target_keys) else [f"param_{i}" for i in range(n_cols)]
+    # Final full keys (all parameters including removed ones)
+    target_keys = meta_tkeys or meta_valid or [f"param_{i}" for i in range(n_cols)]
 
-    # Build list of dicts
+    # These are the keys actually predicted by the ML model
+    valid_keys = meta_valid or target_keys
+
+    # Column-to-key mapping for predicted values
+    col_to_key = valid_keys[:n_cols]
+
+    # -------------------------
+    # 3. Build result dicts
+    # -------------------------
     dicts = []
     for r in range(n_rows):
+
+        # Initialize full dict with None
         d = {k: None for k in target_keys}
+
+        # Fill predicted values
         for j, key in enumerate(col_to_key):
             try:
                 d[key] = float(arr[r, j])
             except Exception:
                 d[key] = None
+
+        # Insert constant removed targets
+        for removed_key, constant_value in meta_removed.items():
+            d[removed_key] = constant_value
+
         dicts.append(d)
 
     return dicts
@@ -525,9 +551,6 @@ def run_simulation_from_predicted_dfs(
     predicted_dfs: pd.DataFrame,
     model,
     metadata,
-    feature_cols: Optional[list],
-    target_keys: Optional[list],
-    removed_targets: Optional[dict],
     model_type: str = "cat",
     signal_col: str = SIGNAL_COLUMN,
     close_col: str = "close",
@@ -536,264 +559,215 @@ def run_simulation_from_predicted_dfs(
     df_hist = predicted_dfs[:PREDICT_WITH_SIGNAL_NUM_CANDLES].copy()
     df_live = predicted_dfs[PREDICT_WITH_SIGNAL_NUM_CANDLES:].copy()
 
+    target_keys = metadata["target_keys"]
+    removed_targets = metadata.get("removed_targets", {})
+    feature_cols = metadata["feature_cols"]
+
     X_live = df_live[feature_cols].fillna(0)
 
     # 1) Predict variable targets
     param_dicts = _predict_param_dicts_from_model(
-        model, metadata, X_live, target_keys=target_keys
+        model, metadata, X_live
     )
-
-    # 2) Ensure list length matches df_live
-    if len(param_dicts) != len(df_live):
-        if len(param_dicts) == 1:
-            param_dicts = param_dicts * len(df_live)
-        else:
-            pad_dict = {k: None for k in target_keys}
-            target_n = len(df_live)
-            param_dicts = (param_dicts[:target_n] + [pad_dict] * target_n)[:target_n]
-
-    # ----------------------------------------------------------------------
-    # ⭐ NEW PART: Combine model outputs with removed constant targets
-    # ----------------------------------------------------------------------
-
-    # Convert removed targets from "target_xxx" → "xxx"
-    removed_clean = {}
-    if removed_targets:
-        for k, v in removed_targets.items():
-            removed_clean[k] = v
-
-    # Build the final full param dict for each row
-    full_param_dicts = []
-
-    for d in param_dicts:
-        full = {}
-
-        # Fill parameters in correct canonical order
-        for key in target_keys:
-            if key in d and d[key] is not None:
-                # model predicted this parameter
-                full[key] = d[key]
-            elif key in removed_clean:
-                # constant (removed) parameter value
-                full[key] = removed_clean[key]
-            else:
-                # missing / unknown parameter → fallback
-                full[key] = None
-
-        full_param_dicts.append(full)
-
-    # ----------------------------------------------------------------------
-    # Use full params
-    # ----------------------------------------------------------------------
-    params_series = full_param_dicts
 
     df_result, metrics = simulate_trades_core(
         df=df_live,
         df_hist=df_hist,
         signal_col=signal_col,
         close_col=close_col,
-        params=params_series,
+        params=param_dicts,
     )
 
     df_result.attrs["sim_meta"] = {
         "model_type": model_type,
         "feature_cols": feature_cols,
         "target_keys": target_keys,
-        "removed_targets": removed_clean,
+        "removed_targets": removed_targets,
         "n_live_rows": len(df_live),
         "n_hist_rows": len(df_hist),
     }
 
     return df_result, metrics
 
+def build_param_grid_with_relation(
+        stakes, 
+        stop_losses, 
+        max_hold_hours
+        ):
+    """
+    Build all combinations of stake_pct, stop_loss_pct, max_hold_hours,
+    with the relation take_profit_pct = 2 * stop_loss_pct.
+    """
+    grid = []
+    for s, sl, mh in product(stakes, stop_losses, max_hold_hours):
+        grid.append({
+            'stake_pct': float(s),
+            'stop_loss_pct': float(sl),
+            'take_profit_pct': float(2 * sl),
+            'max_hold_hours': float(mh)
+        })
+    return grid
+
+def build_feature_dataset(df_raw, horizon):
+    df = make_features(df_raw)
+    df = make_labels(df, H=horizon)
+    return df
+
 # ==================================================================================
 # Configuration
 # ==================================================================================
 
 LOAD_HISTORICAL_DATA_FROM_CSV = True
-USE_SAVED_PREDICTIONS = True   # ← switch this to False to retrain
-USE_SAVED_LABELED_DATA = True
-USE_TRAINED_MODEL = True
+USE_SAVED_ROLLING_PREDICTIONS = True
+USE_SAVED_LABELED_DATA = False
+USE_SAVED_TRAINED_MODEL = False
+MODEL_TYPE = 'cat'
+MODEL_CLS = CatBoostRegressor
 
 # ==================================================================================
 # Main script
 # ==================================================================================
 if __name__ == "__main__":
 
-    if LOAD_HISTORICAL_DATA_FROM_CSV and os.path.exists(os.path.join(LABEL_DIR, f"df_featured.csv")):
-        print(f"[DEBUG] Loading historical data from CSV: {os.path.join(LABEL_DIR, f'df_featured.csv')}")
-        df = pd.read_csv(
-            os.path.join(LABEL_DIR, f"df_featured.csv"),
-            parse_dates=['date'],
-            index_col='date'
+    # Load or fetch full historical data
+    featured_filename = "df_featured.csv"
+    df_full = None
+    if LOAD_HISTORICAL_DATA_FROM_CSV:
+        df_full = load_featured_df(featured_filename)
+
+    if df_full is None:
+        df_raw = download_historical_prices(
+            SYMBOL,
+            HISTORICAL_PRICES_TIMEFRAME,
+            HISTORICAL_PRICES_LIMIT,
+            WHOLE_WINDOW_MILLISECONDS
         )
-        print(f"✅ Loaded {len(df)} candles from CSV")
+
+        df_full = build_feature_dataset(df_raw, NUMBER_OF_CANDLES_AHEAD)
+        save_featured_df(df_full, featured_filename)
+
+    # Generate rolling predictions on FULL dataset (Label engine)
+    rolling_pred_filename = f"df_{MODEL_TYPE}_predictions_full.csv"
+
+    if USE_SAVED_ROLLING_PREDICTIONS:
+        predicted_dfs_full = load_featured_df(rolling_pred_filename)
     else:
-        # Fetch historical data from exchange   
-        exchange = ccxt.binance()
-        timeframe = HISTORICAL_PRICES_TIMEFRAME
-        limit = HISTORICAL_PRICES_LIMIT
-        since = exchange.milliseconds() - TRAINING_WINDOW_MILLISECONDS
+        predicted_dfs_full = None
 
-        print("Fetching data from Binance...")
-
-        all_ohlcv = []
-
-        while True:
-            ohlcv = exchange.fetch_ohlcv(SYMBOL, timeframe=timeframe, since=since, limit=limit)
-            if not ohlcv:
-                break
-            all_ohlcv += ohlcv
-            since = ohlcv[-1][0] + (5 * 60 * 1000)
-            print(f"Fetched {len(all_ohlcv)} candles so far...")
-            time.sleep(exchange.rateLimit / 1000)
-
-        df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df = df.drop_duplicates('date').set_index('date').sort_index()
-        print(f"✅ Loaded {len(df)} candles from Binance")
-        df = make_features(df)
-        df = make_labels(df, H=NUMBER_OF_CANDLES_AHEAD)
-        print("Feature matrix shape:", df.shape)
-        df.to_csv(os.path.join(LABEL_DIR, f"df_featured.csv"), index=True)
-
-    def build_param_grid_with_relation(
-            stakes, 
-            stop_losses, 
-            max_hold_hours
-            ):
-        """
-        Build all combinations of stake_pct, stop_loss_pct, max_hold_hours,
-        with the relation take_profit_pct = 2 * stop_loss_pct.
-        """
-        grid = []
-        for s, sl, mh in product(stakes, stop_losses, max_hold_hours):
-            grid.append({
-                'stake_pct': float(s),
-                'stop_loss_pct': float(sl),
-                'take_profit_pct': float(2 * sl),
-                'max_hold_hours': float(mh)
-            })
-        return grid
-    
-    # Define the ranges
-    stake_values = [0.3, 0.5, 0.7]
-    stop_loss_values = [0.005, 0.01, 0.02]
-    max_hold_values = [1, 2, 4, 8, 16, 24]
-
-    # Build all combinations keeping take_profit_pct = 2 * stop_loss_pct
-    param_grid = build_param_grid_with_relation(
-        stakes=stake_values,
-        stop_losses=stop_loss_values,
-        max_hold_hours=max_hold_values
-    )
-
-    MODEL_TYPE = 'cat'
-    MODEL_CLS = CatBoostRegressor
-
-    label_csv_path = os.path.join(LABEL_DIR, f"df_{MODEL_TYPE}_predictions.csv")
-
-    if USE_SAVED_PREDICTIONS and os.path.exists(label_csv_path):
-        print(f"[DEBUG] Loading predicted_dfs from: {label_csv_path}")
-        predicted_dfs = pd.read_csv(
-            label_csv_path,
-            parse_dates=['date'],
-            index_col='date'
-        )
-    else:
-        # # Run rolling per-candle predictions
-        predicted_dfs = rolling_train_predict_multi(
-            df = df,
+    if predicted_dfs_full is None:
+        predicted_dfs_full = rolling_train_predict_multi(
+            df=df_full,
             model_cls=MODEL_CLS,
             model_type=MODEL_TYPE,
             model_params={'iterations': 500, 'verbose': False},
-            features=get_features(df),
+            features=get_features(df_full),
             target_col=TARGET_COLUMN,
             signal_col=SIGNAL_COLUMN,
             window=MAX_HISTORY_SIZE
-            )
-        
-        # Define the path to save
-        output_path = os.path.join(LABEL_DIR, f"df_{MODEL_TYPE}_predictions.csv")
+        )
 
-        # Save the DataFrame
-        predicted_dfs.to_csv(output_path, index=True)  # keep the index (dates)
+        save_featured_df(predicted_dfs_full, rolling_pred_filename)
 
-        print(f"Saved rolling predictions to {output_path}")
+    # Meta-parameter optimization (walk-forward) on FULL predicted dataset ---
+    dyn_filename = f"{MODEL_TYPE}_dyn_best_params_label_full.csv"
 
-    # -------------------------
-    # Walk-forward labeling using model signals (pred column)
-    # -------------------------
-    
-    dyn_path = f"{LABEL_DIR}/{MODEL_TYPE}_dyn_best_params_label.csv"
-    df_dyn_best = None
-    
-    if USE_SAVED_LABELED_DATA and os.path.exists(dyn_path):
-        if os.path.exists(dyn_path):
-            print(f"[DEBUG] Loading df_dyn_best from: {dyn_path}")
-            df_dyn_best = pd.read_csv(
-                dyn_path,
-                parse_dates=['date'],
-                index_col='date'
-            )
+    if USE_SAVED_LABELED_DATA:
+        print(f"[DEBUG] Loading labeled dataset from: {dyn_filename}")
+        df_dyn_best_full = load_labels(dyn_filename)
     else:
-        # define the intervals you want to test (hours). Keep 24 for daily to compare
-        intervals_to_test = (24,)
-
-        #DEBUG
-        # param_grid = param_grid[:1]  # limit to first 10 for faster testing
-        ########
+        # build param grid
+        stake_values = [0.3, 0.5, 0.7]
+        stop_loss_values = [
+            0.0025,
+            0.005,
+            0.01,
+            0.015,
+            0.02,
+            0.03,
+            0.05,
+            0.075,
+            0.10
+        ]
+        max_hold_values = [1, 2, 4, 8, 16, 24]
+        param_grid = build_param_grid_with_relation(
+            stakes=stake_values,
+            stop_losses=stop_loss_values,
+            max_hold_hours=max_hold_values
+        )
 
         summary_df, all_labels, all_results, best_hours, best_labels = label_and_evaluate_intervals(
-            df=predicted_dfs,
+            df=predicted_dfs_full,
             model_type=MODEL_TYPE,
             param_grid=param_grid,
-            intervals_hours=intervals_to_test,
+            intervals_hours=(24,),
             timeframe_minutes=int(HISTORICAL_PRICES_TIMEFRAME.strip('m')),
         )
 
-        # Save the summary table
-        summary_path = f"{LABEL_DIR}/{MODEL_TYPE}_best_params_label_summary.csv"
-        summary_df.to_csv(summary_path, index=True)
-        print(f"\nSaved interval summary to {summary_path}")
+        summary_filename = f"{MODEL_TYPE}_best_params_label_summary_full.csv"
+        save_labels(summary_df, summary_filename)
+        print(f"Saved labeling summary to {summary_filename}")
 
-        # Save the best interval labels (walk-forward labels DataFrame)
         if best_labels is not None:
-            label_path = f"{LABEL_DIR}/{MODEL_TYPE}_best_params_label.csv"
-            best_labels.to_csv(label_path, index=True)
-            print(f"Saved best-interval labels to {label_path}")
+            labels_filename = f"{MODEL_TYPE}_best_params_label_full.csv"
+            save_labels(best_labels, labels_filename)
+            print(f"Saved best-interval labels to {labels_filename}")
         if best_hours is not None and best_hours in all_results:
-            _, df_dyn_best, _ = all_results[best_hours]
-            df_dyn_best.to_csv(dyn_path, index=True)
-            print(f"Saved best-interval simulation DataFrame to {dyn_path}")
+            _, df_dyn_best_full, _ = all_results[best_hours]
+            dyn_filename = f"{MODEL_TYPE}_dyn_best_params_label_full.csv"
+            save_labels(df_dyn_best_full, dyn_filename)
+            print(f"Saved full dyn best params DF to {dyn_filename}")
 
-    multi_model, metadata = None, None
-    
-    if USE_TRAINED_MODEL:
-        # Load model and metadata
-        multi_model, metadata, _ = load_model(MODEL_TYPE)
-    else:
-        # -------------------------
-        # Train multi-output model to predict best parameters
-        # -------------------------
-        multi_model, predictor, rmse_per_target, metadata = train_best_param_multi_model(df_dyn_best)
-        # Save the trained multi-output model and metadata
+    # At this point df_dyn_best_full is the fully labeled dataset (features + rolling predictions + best_param per row)
+
+    # Split labeled dataset into train / test (chronological split) ---
+    df_labeled = df_dyn_best_full.copy()
+    n_total = len(df_labeled)
+    n_train = int(np.floor(n_total * TRAINING_FRACTION))
+
+    df_train = df_labeled.iloc[:n_train].copy()
+    df_test = df_labeled.iloc[n_train:].copy()
+
+    print(f"Split labeled dataset: total={n_total}, train={len(df_train)}, test={len(df_test)}")
+
+    # Train meta-model on TRAIN portion (predict best_param) ---
+    multi_model = None
+    metadata = None
+
+    if USE_SAVED_TRAINED_MODEL:
+        try:
+            multi_model, metadata, _ = load_model(MODEL_TYPE)
+            print("Loaded trained meta-model from disk")
+        except Exception as e:
+            print(f"Could not load saved model: {e} — will train new one.")
+            multi_model = None
+
+    if multi_model is None:
+        multi_model, predictor, rmse_per_target, metadata = train_best_param_multi_model(df_train)
         try:
             saved_path = save_model(multi_model, model_type=MODEL_TYPE, keep_count=2, metadata=metadata)
             print(f"Model saved to: {saved_path}")
         except Exception as e:
             print(f"Warning: failed to save model: {e}")
 
-    # Determine target keys dynamically from metadata
-    target_keys = metadata["target_keys"]
+    # Predict meta-parameters on TEST set and simulate trading on TEST only ---
+    df_result_test, metrics_test = run_simulation_from_predicted_dfs(
+        predicted_dfs=df_test,
+        model=multi_model,
+        metadata=metadata,
+        model_type=MODEL_TYPE,
+        signal_col=SIGNAL_COLUMN,
+        close_col="close",
+    )
 
-    removed_targets = metadata.get("removed_targets", {})
+    print("=== Final TEST set simulation metrics ===")
+    print(metrics_test)
 
-    # Determine features to use
-    feature_cols = metadata["feature_cols"]
+    # Save final test sim
+    try:
+        out_sim = os.path.join(LABEL_DIR, f"{MODEL_TYPE}_final_test_sim.csv")
+        df_result_test.to_csv(out_sim)
+        print(f"Saved final test simulation to {out_sim}")
+    except Exception:
+        pass
 
-    df_result, metrics = run_simulation_from_predicted_dfs(
-        df_dyn_best, multi_model, metadata, model_type=MODEL_TYPE,
-        signal_col=SIGNAL_COLUMN, close_col="close",
-        feature_cols=feature_cols, target_keys=target_keys,removed_targets=removed_targets)
-    print(metrics)
+    print("Pipeline completed: labeling (full) → split → train → test simulation (final)")

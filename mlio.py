@@ -1,17 +1,17 @@
-import pickle
 from pathlib import Path
 import pandas as pd
 import os
 import sys
-import os, json, hashlib
-import numpy as np
+import os, json
 import time
-import threading
-from typing import Any, Dict, List
 from datetime import datetime
 import joblib, glob
+import ccxt
 
-# Detect the directory of the main script (e.g., xgcatboost.py)
+# =============================================
+# IO directories configuration
+# =============================================
+# Detect the directory of the main script
 script_path = os.path.abspath(sys.argv[0])
 script_dir = os.path.dirname(script_path)
 MODEL_DIR = Path(script_dir) / "models"
@@ -19,9 +19,6 @@ MODEL_DIR.mkdir(exist_ok=True)
 
 LABEL_DIR = Path(script_dir) / "labeleddata"
 LABEL_DIR.mkdir(exist_ok=True)
-
-PREDICTIONS_DIR = Path(script_dir) / "predictions"
-PREDICTIONS_DIR.mkdir(exist_ok=True)
 
 
 # =============================================
@@ -136,67 +133,6 @@ def load_model(model_type, model_dir=MODEL_DIR):
 
     return model, metadata, model_path
 
-def save_feature_columns(features, model_type, model_dir=MODEL_DIR, keep_count=2):
-    """
-    Save feature column names for consistent prediction.
-    Keeps only the most recent feature files to save disk space.
-    
-    Args:
-        features: List of feature column names
-        model_type: 'xgb' or 'cat'
-        model_dir: Directory to save feature list
-        keep_count: Number of recent feature files to keep (default: 2)
-    
-    Returns:
-        Path to saved feature file
-    """
-    timestamp = pd.Timestamp.now().strftime('%Y%m%d_%H%M%S')
-    filename = f"{model_type}_features_{timestamp}.pkl"
-    filepath = model_dir / filename
-    
-    with open(filepath, 'wb') as f:
-        pickle.dump(features, f)
-    
-    print(f"✅ Features saved: {filepath}")
-    
-    # Cleanup old feature files
-    _cleanup_old_files(f"{model_type}_features_*.pkl", model_dir, keep_count)
-    
-    return filepath
-
-def load_feature_columns(filepath=None, model_type=None, model_dir=MODEL_DIR):
-    """
-    Load feature column names.
-    
-    Args:
-        filepath: Path to saved feature file (optional)
-        model_type: 'xgb' or 'cat' - required if filepath is None
-        model_dir: Directory containing feature files
-    
-    Returns:
-        List of feature column names
-    """
-    if filepath is None:
-        if model_type is None:
-            raise ValueError("Either filepath or model_type must be provided")
-        
-        # Find the most recent feature file
-        pattern = f"{model_type}_features_*.pkl"
-        files = list(model_dir.glob(pattern))
-        
-        if not files:
-            raise FileNotFoundError(f"No feature files found matching pattern: {pattern}")
-        
-        # Sort by modification time (newest first)
-        files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-        filepath = files[0]
-        print(f"📂 Loading latest features: {filepath.name}")
-    
-    with open(filepath, 'rb') as f:
-        features = pickle.load(f)
-    
-    return features
-
 def get_latest_model_paths(model_type, model_dir=MODEL_DIR):
     """
     Get paths to the latest model and features files.
@@ -224,147 +160,72 @@ def get_latest_model_paths(model_type, model_dir=MODEL_DIR):
     
     return str(model_path), str(features_path)
 
-def hash_model_params(params: Dict[str, Any]) -> str:
-    """Stable hash for model parameters."""
-    s = json.dumps(params, sort_keys=True)
-    return hashlib.md5(s.encode()).hexdigest()[:8]
-
-
-def hash_df_deterministic(df: pd.DataFrame, feature_cols: list[str]) -> str:
+def load_featured_df(filename):
     """
-    Deterministic hash of a DataFrame using only specified feature columns.
-
-    Args:
-        df (pd.DataFrame): Input DataFrame.
-        feature_cols (list[str]): Columns to include in the hash.
-
-    Returns:
-        str: Deterministic hash string.
+    Loads featured dataframe from LABEL_DIR/filename.
+    Returns df or None.
     """
-    if df is None or df.empty or not feature_cols:
-        return "none"
+    path = LABEL_DIR / filename
 
-    # Select only feature columns
-    df_features = df[feature_cols].copy()
+    if path.exists():
+        print(f"[DEBUG] Loading data from: {path}")
+        df = pd.read_csv(path, parse_dates=['date'], index_col='date')
+        print(f"✅ Loaded {len(df)} candles from CSV")
+        return df
 
-    # Ensure deterministic column order
-    df_features = df_features[sorted(df_features.columns)]
+    return None
 
-    # Normalize dtypes
-    for c in df_features.columns:
-        if pd.api.types.is_numeric_dtype(df_features[c]):
-            df_features[c] = df_features[c].astype(np.float64)
-        elif pd.api.types.is_datetime64_any_dtype(df_features[c]):
-            df_features[c] = df_features[c].astype("int64")  # nanoseconds since epoch
-        else:
-            df_features[c] = df_features[c].astype("string")
-
-    # Convert to deterministic bytes
-    hash_vals = pd.util.hash_pandas_object(df_features, index=False).values
-    return hashlib.md5(hash_vals.tobytes()).hexdigest()
-
-
-def make_cache_key(timestamp: Any, df_window: pd.DataFrame, feature_cols: List[str]) -> str:
+def save_featured_df(df, filename):
     """
-    Generate a deterministic cache key using the timestamp and feature columns of a DataFrame.
-
-    Args:
-        timestamp (Any): Prediction timestamp.
-        df_window (pd.DataFrame): Rolling window of data.
-        feature_cols (list[str]): Columns to include in the hash.
-
-    Returns:
-        str: Deterministic cache key.
+    Saves dataframe into LABEL_DIR/filename.
     """
-    # Normalize timestamp
-    if timestamp is None:
-        ts_str = "none"
-    elif isinstance(timestamp, pd.Timestamp):
-        ts_str = timestamp.isoformat()  # deterministic ISO format
-    else:
-        ts_str = str(timestamp)
+    path = LABEL_DIR / filename
+    df.to_csv(path, index=True)
+    print(f"✅ Saved {len(df)} candles to {path}")
 
-    # Compute deterministic hash of features
-    data_hash = hash_df_deterministic(df_window, feature_cols)[:8]  # short hash
-    return f"{ts_str}_{data_hash}"
+def download_historical_prices(symbol, timeframe, limit, window_ms):
+    exchange = ccxt.binance()
+    since = exchange.milliseconds() - window_ms
 
-class JSONModelCache:
-    def __init__(self, model_type: str, model_params: Dict[str, Any], autosave_interval: int = 120):
-        """
-        In-memory JSON cache for model predictions, one file per model configuration.
-        """
-        self.model_type = model_type
-        self.model_params = model_params
-        self.model_hash = hash_model_params(model_params)
-        self.path = PREDICTIONS_DIR / f"cache_{model_type}_{self.model_hash}.json"
-        self.autosave_interval = autosave_interval
-        self.cache = {}
-        self.lock = threading.Lock()
-        self.meta = {
-            "model_type": model_type,
-            "params": model_params
-        }
+    print("Fetching data from Binance...")
+    all_ohlcv = []
 
-        self._load()
-        if autosave_interval > 0:
-            self._start_autosave_thread()
+    while True:
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
+        if not ohlcv:
+            break
 
-    # Core
+        all_ohlcv.extend(ohlcv)
+        since = ohlcv[-1][0] + (5 * 60 * 1000)
+        print(f"Fetched {len(all_ohlcv)} candles so far...")
 
-    def _load(self):
-        """Load cache file if exists."""
-        if not os.path.exists(self.path):
-            print(f"🆕 New cache for {self.model_type} ({self.model_hash})")
-            return
+        time.sleep(exchange.rateLimit / 1000)
 
-        try:
-            with open(self.path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            self.cache = data.get("data", {})
-            self.meta = data.get("meta", self.meta)
-            print(f"✅ Loaded {len(self.cache)} cached entries from {self.path}")
-        except Exception as e:
-            print(f"⚠️ Failed to load cache {self.path}: {e}")
+    df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
+    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
 
-    def _save(self):
-        """Save to JSON atomically."""
-        tmp = self.path.with_suffix(self.path.suffix + ".tmp")
-        with self.lock:
-            payload = {"meta": self.meta, "data": self.cache}
-            with open(tmp, "w", encoding="utf-8") as f:
-                json.dump(payload, f, indent=2, ensure_ascii=False)
-            os.replace(tmp, self.path)
+    df = (
+        df.drop_duplicates('date')
+          .set_index('date')
+          .sort_index()
+    )
 
-    def _start_autosave_thread(self):
-        """Background thread to autosave cache."""
-        def autosaver():
-            while True:
-                time.sleep(self.autosave_interval)
-                try:
-                    self._save()
-                except Exception as e:
-                    print(f"⚠️ Autosave failed: {e}")
-        t = threading.Thread(target=autosaver, daemon=True)
-        t.start()
+    return df
 
-    # API
+def save_model(model, filename):
+    path = MODEL_DIR / filename
+    joblib.dump(model, path)
+    return path
 
-    def get(self, key: str) -> Any:
-        return self.cache.get(key)
+def load_model(filename):
+    path = MODEL_DIR / filename
+    return joblib.load(path)
 
-    def set(self, key: str, value: Any):
-        with self.lock:
-            self.cache[key] = value
+def save_labels(df, filename):
+    path = LABEL_DIR / filename
+    df.to_csv(path, index=True)
+    return path
 
-    def flush(self):
-        """Force immediate save."""
-        self._save()
-
-    def __contains__(self, key):
-        return key in self.cache
-
-    def __len__(self):
-        return len(self.cache)
-
-    def __repr__(self):
-        return f"<JSONModelCache {self.model_type}:{self.model_hash} ({len(self.cache)} entries)>"
+def load_labels(filename):
+    path = LABEL_DIR / filename
+    return pd.read_csv(path, parse_dates=['date'], index_col='date')
