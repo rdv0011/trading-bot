@@ -94,7 +94,28 @@ def save_model(model, model_type, model_dir=MODEL_DIR, keep_count=2, metadata=No
     print(f"[save_model] Saved model to {model_fname} (kept {min(keep_count, len(files))} newest).")
     return model_fname
 
-def load_model(model_type, model_dir=MODEL_DIR):
+def load_model(model_path, model_meta_path):
+    # Load model
+    try:
+        model = joblib.load(model_path)
+    except Exception as e:
+        raise RuntimeError(f"Failed to load model from {model_path}: {e}")
+
+    # Load metadata
+    metadata = None
+    if os.path.exists(model_meta_path):
+        try:
+            with open(model_meta_path, "r") as f:
+                metadata = json.load(f)
+        except Exception:
+            # Non-fatal – model still loads
+            metadata = None
+
+    print(f"[load_model] Loaded model: {model_path}, meta info: {model_meta_path}")
+
+    return model, metadata
+
+def get_latest_model_paths(model_type, model_dir=MODEL_DIR):
     """
     Load the most recent saved model of the given type ('xgb' or 'cat').
 
@@ -112,53 +133,8 @@ def load_model(model_type, model_dir=MODEL_DIR):
     # Most recent model file
     model_path = files[0]
     meta_path = os.path.splitext(model_path)[0] + ".meta.json"
-
-    # Load model
-    try:
-        model = joblib.load(model_path)
-    except Exception as e:
-        raise RuntimeError(f"Failed to load model from {model_path}: {e}")
-
-    # Load metadata
-    metadata = None
-    if os.path.exists(meta_path):
-        try:
-            with open(meta_path, "r") as f:
-                metadata = json.load(f)
-        except Exception:
-            # Non-fatal – model still loads
-            metadata = None
-
-    print(f"[load_model] Loaded model: {model_path}")
-
-    return model, metadata, model_path
-
-def get_latest_model_paths(model_type, model_dir=MODEL_DIR):
-    """
-    Get paths to the latest model and features files.
     
-    Args:
-        model_type: 'xgb' or 'cat'
-        model_dir: Directory containing model files
-    
-    Returns:
-        tuple: (model_path, features_path)
-    """
-    # Find latest model
-    model_files = list(model_dir.glob(f"{model_type}_model_*.pkl"))
-    if not model_files:
-        raise FileNotFoundError(f"No model files found for type: {model_type}")
-    model_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    model_path = model_files[0]
-    
-    # Find latest features
-    feature_files = list(model_dir.glob(f"{model_type}_features_*.pkl"))
-    if not feature_files:
-        raise FileNotFoundError(f"No feature files found for type: {model_type}")
-    feature_files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    features_path = feature_files[0]
-    
-    return str(model_path), str(features_path)
+    return model_path, meta_path
 
 def load_featured_df(filename):
     """
@@ -216,10 +192,6 @@ def save_model(model, filename):
     path = MODEL_DIR / filename
     joblib.dump(model, path)
     return path
-
-def load_model(filename):
-    path = MODEL_DIR / filename
-    return joblib.load(path)
 
 def save_labels(df, filename):
     path = LABEL_DIR / filename

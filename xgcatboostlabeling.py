@@ -8,16 +8,16 @@ from catboost import CatBoostRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
-from xgcatboostcore import make_features, make_labels
-from xgcatboostcore import get_features, simulate_trades_core
+from xgcatboostcore import make_features, make_labels, predict_param_dicts_from_model, resolve_model_class
+from xgcatboostcore import get_features, simulate_trades_core, create_model
 from xgcatboostcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
-from xgcatboostcore import PREDICT_WITH_SIGNAL_NUM_CANDLES, OBJECTIVE_METRIC
-from mlio import LABEL_DIR, download_historical_prices, load_featured_df, load_labels, load_model, save_model, save_featured_df, save_labels
+from xgcatboostcore import PREDICT_WITH_SIGNAL_NUM_CANDLES, OBJECTIVE_METRIC, NUMBER_OF_CANDLES_AHEAD
+from mlio import LABEL_DIR, download_historical_prices, load_featured_df, load_labels
+from mlio import load_model, save_model, save_featured_df, save_labels, get_latest_model_paths
 from itertools import product
-import inspect
 import ast
 import os
-from typing import Tuple, Optional
+from typing import Tuple
 
 warnings.filterwarnings("ignore")
 
@@ -32,7 +32,6 @@ MAX_HISTORY_SIZE = 600
 HISTORICAL_PRICES_LENGTH = 500
 HISTORICAL_PRICES_LIMIT = 1000
 HISTORICAL_PRICES_TIMEFRAME = "5m"
-NUMBER_OF_CANDLES_AHEAD = 20
 WALKFORWARD_EVAL_HORIZON = 288  # how many candles ahead to simulate strategy performance
 #OBJECTIVE_METRIC = 'sharpe_ratio_hourly'  # Smooth risk-adjusted equity curve
 #OBJECTIVE_METRIC = 'profit_factor'  # Balance of risk and reward
@@ -143,30 +142,8 @@ def walkforward_label_forward_windows(
 
     return labels_df
 
-def create_model(model_cls, random_seed, model_params):
-    """Safely instantiate model, passing the appropriate seed parameter if supported."""
-    # Get constructor signature
-    try:
-        sig = inspect.signature(model_cls)
-        params = sig.parameters.keys()
-    except (TypeError, ValueError):
-        params = []
-
-    # Choose appropriate seed parameter name
-    seed_args = {}
-    if 'random_state' in params:
-        seed_args['random_state'] = random_seed
-    elif 'random_seed' in params:
-        seed_args['random_seed'] = random_seed
-    elif 'seed' in params:
-        seed_args['seed'] = random_seed
-
-    # Merge parameters safely
-    return model_cls(**seed_args, **model_params)
-
 def rolling_train_predict_multi(
         df,
-        model_cls,
         model_type,
         model_params,
         features,
@@ -202,6 +179,7 @@ def rolling_train_predict_multi(
     else:
         w = window
 
+    model_cls = resolve_model_class(model_type)
     preds = []
     mdl = None
     retrain_every = 1  # Retrain every N candles for speed
@@ -480,73 +458,6 @@ def train_best_param_multi_model(
     print("\n✅ Training complete.")
     return multi_model, predictor, rmse_per_target, metadata_out
 
-def _predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFrame):
-    """
-    Returns a list of dicts (one per X row) mapping target_keys to predicted values.
-    Handles callable or sklearn-like model.predict. Missing keys are filled either from:
-      - metadata['removed_targets'], or
-      - None (if missing)
-    """
-    # -------------------------
-    # 1. Run model prediction
-    # -------------------------
-    try:
-        raw_preds = model(X) if callable(model) else model.predict(X)
-    except Exception:
-        raw_preds = model.predict(X.values)
-
-    # If model returned list of dicts
-    if (
-        isinstance(raw_preds, (list, np.ndarray))
-        and len(raw_preds) > 0
-        and isinstance(raw_preds[0], dict)
-    ):
-        return list(raw_preds)
-
-    # Convert to 2D numpy array
-    arr = np.atleast_2d(np.asarray(raw_preds))
-    n_rows, n_cols = arr.shape
-
-    # -------------------------
-    # 2. Determine correct keys
-    # -------------------------
-    meta_tkeys = metadata.get("target_keys") if metadata else None
-    meta_valid  = metadata.get("valid_targets") if metadata else None
-    meta_removed = metadata.get("removed_targets") if metadata else {}
-
-    # Final full keys (all parameters including removed ones)
-    target_keys = meta_tkeys or meta_valid or [f"param_{i}" for i in range(n_cols)]
-
-    # These are the keys actually predicted by the ML model
-    valid_keys = meta_valid or target_keys
-
-    # Column-to-key mapping for predicted values
-    col_to_key = valid_keys[:n_cols]
-
-    # -------------------------
-    # 3. Build result dicts
-    # -------------------------
-    dicts = []
-    for r in range(n_rows):
-
-        # Initialize full dict with None
-        d = {k: None for k in target_keys}
-
-        # Fill predicted values
-        for j, key in enumerate(col_to_key):
-            try:
-                d[key] = float(arr[r, j])
-            except Exception:
-                d[key] = None
-
-        # Insert constant removed targets
-        for removed_key, constant_value in meta_removed.items():
-            d[removed_key] = constant_value
-
-        dicts.append(d)
-
-    return dicts
-
 def run_simulation_from_predicted_dfs(
     predicted_dfs: pd.DataFrame,
     model,
@@ -566,7 +477,7 @@ def run_simulation_from_predicted_dfs(
     X_live = df_live[feature_cols].fillna(0)
 
     # 1) Predict variable targets
-    param_dicts = _predict_param_dicts_from_model(
+    param_dicts = predict_param_dicts_from_model(
         model, metadata, X_live
     )
 
@@ -735,7 +646,8 @@ if __name__ == "__main__":
 
     if USE_SAVED_TRAINED_MODEL:
         try:
-            multi_model, metadata, _ = load_model(MODEL_TYPE)
+            model_path, meta_path = get_latest_model_paths(MODEL_TYPE)
+            multi_model, metadata = load_model(model_path, meta_path)
             print("Loaded trained meta-model from disk")
         except Exception as e:
             print(f"Could not load saved model: {e} — will train new one.")

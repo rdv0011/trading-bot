@@ -1,15 +1,15 @@
 from ccxtstrategy import CCXTStrategy
 import time
-import pandas as pd
-import numpy as np
 from mlio import MODEL_DIR
 from tradingmodelpredictor import TradingModelPredictor
+from xgcatboostcore import MAX_HISTORY_SIZE, PREDICT_WITH_SIGNAL_LABEL_WINDOW, PREDICT_WITH_SIGNAL_NUM_CANDLES
+from xgcatboostcore import TARGET_COLUMN, NUMBER_OF_CANDLES_AHEAD, MIN_CANDLES_FOR_FEATURES
+from xgcatboostcore import get_features, make_features, make_labels
 
 MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
 TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
 BUY_SLIPPAGE = 1.005  # 0.5% slippage on buy orders
 SELL_SLIPPAGE = 0.995  # 0.5% slippage on sell orders
-MIN_CANDLES_FOR_FEATURES = 250
 
 class XGCatBoostStrategy(CCXTStrategy):
     '''
@@ -17,29 +17,13 @@ class XGCatBoostStrategy(CCXTStrategy):
     '''
     
     def initialize(self):
-        # Load trained model
-        self.predictor = TradingModelPredictor(
-            model_dir=self.parameters.get("model_dir", MODEL_DIR),
-            model_path=self.parameters.get("model_path", None),
-            features_path=self.parameters.get("features_path", None),
-            model_type=self.parameters.get("model_type", "xgb"),
-            auto_reload = self.parameters.get("auto_reload", True)
-        )
-        
         # Trading parameters
-        self.asset = self.parameters.get("asset_symbol", "BTC") 
-        self.stake_pct = self.parameters.get("stake_pct", 0.2)
-        self.stop_loss_pct = self.parameters.get("stop_loss_pct", 0.01)
-        self.take_profit_pct = self.parameters.get("take_profit_pct", 0.02)
-        self.max_hold_hours = self.parameters.get("max_hold_hours", 24)
+        self.asset = self.parameters.get("asset_symbol", "BTC")
         self.historical_prices_length = self.parameters.get("historical_prices_length", 500)
         self.historical_prices_unit = self.parameters.get("historical_prices_unit", "5m")
-        self.predict_with_signal_num_candles = self.parameters.get("predict_with_signal_num_candles", 600)
-        self.predict_with_signal_label_window = self.parameters.get("predict_with_signal_label_window", 200)
-        
-        # Prediction history for adaptive thresholding
-        self.pred_history = []
-        self.max_history_size = self.parameters.get("max_history_size", 600)
+        self.predict_with_signal_num_candles = self.parameters.get("predict_with_signal_num_candles", PREDICT_WITH_SIGNAL_NUM_CANDLES)
+        self.predict_with_signal_label_window = self.parameters.get("predict_with_signal_label_window", PREDICT_WITH_SIGNAL_LABEL_WINDOW)
+        self.max_history_size = self.parameters.get("max_history_size", MAX_HISTORY_SIZE)
         
         # Position tracking
         self.entry_price = None
@@ -52,61 +36,79 @@ class XGCatBoostStrategy(CCXTStrategy):
         # Sleep time between iterations
         self.sleeptime = self.parameters.get("sleeptime", 300)  # 5 minutes to match training data
 
+        # Prediction history for adaptive thresholding
+        init_length = (
+            MIN_CANDLES_FOR_FEATURES
+            + self.predict_with_signal_num_candles
+            + NUMBER_OF_CANDLES_AHEAD
+        )
+        self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
+        
+        df_hist = self.get_historical_prices(self.asset, init_length, self.historical_prices_unit)
+        df_hist = make_features(df_hist)
+        df_hist = make_labels(df_hist, H=NUMBER_OF_CANDLES_AHEAD)
+        features = get_features(df_hist)
+
+        self.predictor = TradingModelPredictor(
+            model_dir=self.parameters.get("model_dir", MODEL_DIR),
+            model_type=self.parameters.get("model_type", "cat"),
+            model_params=self.parameters.get("model_params", {'iterations': 500, 'verbose': False}),
+            df_hist = df_hist,
+            features=features,
+            min_candles_for_features=MIN_CANDLES_FOR_FEATURES,
+            num_candles=self.predict_with_signal_num_candles,
+            label_window=self.predict_with_signal_label_window,
+            max_history_size=self.max_history_size,
+            target_col=TARGET_COLUMN,
+        )
+
         # Log initial model info
         model_info = self.predictor.get_model_info()
-        self.log_message(f"🤖 Strategy initialized with {model_info['model_type'].upper()} model")
-        self.log_message(f"   Model: {model_info['model_path']}")
-        self.log_message(f"   Features: {model_info['num_features']}")
-        self.log_message(f"   Auto-reload: {model_info['auto_reload']}")
- 
-        # Pre-populate prediction history with historical data
-        self._initialize_prediction_history()
+        self.log_message(f"🤖 Strategy initialized")
+        for key, value in model_info.items():
+            pretty_key = key.replace("_", " ").title()
+            self.log_message(f"   {pretty_key}: {value}")
 
     def on_trading_iteration(self):
         # Get historical data (need at least 240 candles for features)
         df = self.get_historical_prices(self.asset, self.historical_prices_length, self.historical_prices_unit)
 
-        # Get prediction and signal
+        # Update dynamic meta parameters from model
         try:
-            result = self.predictor.predict_with_signal(
-                df, 
-                self.pred_history,
-                num_candles=self.predict_with_signal_num_candles,
-                label_window=self.predict_with_signal_label_window,
-                check_reload=True
+            meta_params = self.predictor.predict_meta_params(df)
+            self.stake_pct = meta_params["stake_pct"]
+            self.stop_loss_pct = meta_params["stop_loss_pct"]
+            self.take_profit_pct = meta_params["take_profit_pct"]
+            self.max_hold_hours = meta_params["max_hold_hours"]
+            self.log_message(
+                f"Updated meta parameters: stake_pct={self.stake_pct:.3f}, "
+                f"stop_loss_pct={self.stop_loss_pct:.3f}, take_profit_pct={self.take_profit_pct:.3f}, "
+                f"max_hold_hours={self.max_hold_hours:.1f}"
             )
-            
-            prediction = result['prediction']
-            signal = result['signal']
-            max_threshold = result['max_threshold']
-            min_threshold = result['min_threshold']
-            model_reloaded = result['model_reloaded']
-
-            # Log if model was reloaded
-            if model_reloaded:
-                self.log_message("🔄 Model was reloaded with new version!")
-                model_info = self.predictor.get_model_info()
-                self.log_message(f"   New model: {model_info['model_path']}")
-                # Reinitialize prediction history when model changes
-                self.log_message("📊 Reinitializing prediction history with new model...")
-                self._initialize_prediction_history()
-                self.log_message("✅ Prediction history reinitialized")
-                # Skip this iteration since we just reloaded - prediction history is fresh
-                return
- 
-            
-            # Update prediction history
-            self.pred_history.append(prediction)
-            if len(self.pred_history) > self.max_history_size:
-                self.pred_history.pop(0)
-
-            self.log_message(f"Prediction: {prediction:.6f}, Signal: {signal}, Max Threshold: {max_threshold:.6f}, Min Threshold: {min_threshold:.6f}")
-
         except Exception as e:
-            self.log_message(f"Error in prediction: {e}")
-            import traceback
-            self.log_message(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"⚠️ Failed to update meta parameters, using previous values: {e}")
+
+
+        # Get prediction and signal
+        if len(df) < 240:
+            print(f"Need at least 240 candles, got {len(df)}")
             return
+    
+        df = make_features(df)
+        df = make_labels(df, H=NUMBER_OF_CANDLES_AHEAD)
+        features = get_features(df)
+
+        result = self.predictor.predict_with_signal(
+            df, 
+            features=features,
+        )
+        
+        prediction = result['prediction']
+        signal = result['signal']
+        max_threshold = result['max_threshold']
+        min_threshold = result['min_threshold']
+
+        self.log_message(f"Prediction: {prediction:.6f}, Signal: {signal}, Max Threshold: {max_threshold:.6f}, Min Threshold: {min_threshold:.6f}")
         
         # Get current position
         position = self.get_position(self.asset)
@@ -314,63 +316,3 @@ class XGCatBoostStrategy(CCXTStrategy):
             self.log_message(f"❌ Error during abrupt closing: {e}")
             import traceback
             self.log_message(f"Traceback: {traceback.format_exc()}")
-
-    def _initialize_prediction_history(self):
-        """
-        Pre-populate prediction history with historical predictions
-        to enable immediate adaptive thresholding.
-        """
-        try:
-            # Fetch enough historical data for:
-            # - ~240 candles for feature calculation warmup
-            init_length = self.predict_with_signal_num_candles + MIN_CANDLES_FOR_FEATURES
-            
-            self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
-            df = self.get_historical_prices(self.asset, init_length, self.historical_prices_unit)
-            
-            # Generate predictions for each candle (rolling window)
-            predictions = []
-            min_candles_for_features = MIN_CANDLES_FOR_FEATURES  # Ensure enough data for feature engineering
-            
-            for i in range(min_candles_for_features, len(df)):
-                # Get data up to current point
-                df_slice = df.iloc[:i+1]
-                
-                try:
-                    # Get prediction without signal calculation
-                    result = self.predictor.predict_with_signal(
-                        df_slice, 
-                        predictions,
-                        num_candles=min(len(predictions), self.predict_with_signal_num_candles),
-                        label_window=self.predict_with_signal_label_window,
-                        check_reload=False  # Don't check for reload during initialization
-                    )
-                    predictions.append(result['prediction'])
-                except Exception as e:
-                    self.log_message(f"⚠️  Error generating historical prediction at index {i}: {e}")
-                    continue
-            
-            # Keep only the most recent predictions
-            self.pred_history = predictions[-self.max_history_size:]
-            self.log_message(f"✅ Initialized prediction history with {len(self.pred_history)} predictions")
-            
-            # Verify adaptive thresholding will work
-            if len(self.pred_history) >= self.predict_with_signal_num_candles:
-                from xgcatboostcore import adaptive_thresholding
-                max_th, min_th = adaptive_thresholding(
-                    pd.Series(self.pred_history),
-                    num_candles=self.predict_with_signal_num_candles,
-                    label_window=self.predict_with_signal_label_window
-                )
-                if not np.isnan(max_th):
-                    self.log_message(f"✅ Adaptive thresholding ready (max: {max_th:.6f}, min: {min_th:.6f})")
-                else:
-                    self.log_message("⚠️  Adaptive thresholding returned NaN - check parameters")
-            else:
-                self.log_message(f"⚠️  Only {len(self.pred_history)} predictions - need {self.predict_with_signal_num_candles}")
-                
-        except Exception as e:
-            self.log_message(f"⚠️  Failed to initialize prediction history: {e}")
-            import traceback
-            self.log_message(f"Traceback: {traceback.format_exc()}")
-            # Continue with empty history - will accumulate during trading

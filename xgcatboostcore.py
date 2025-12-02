@@ -1,11 +1,16 @@
+from typing import Optional
 import numpy as np
 import pandas as pd
+import inspect
 
 TARGET_COLUMN = 'future_ret'
 SIGNAL_COLUMN = 'pred'
 SEED_BASE = 42
+NUMBER_OF_CANDLES_AHEAD = 20
 PREDICT_WITH_SIGNAL_NUM_CANDLES = 600
+MAX_HISTORY_SIZE = 600
 PREDICT_WITH_SIGNAL_LABEL_WINDOW = 200
+MIN_CANDLES_FOR_FEATURES = 250
 OBJECTIVE_METRIC = "objective_score" # Composite metric better for ML training
 
 # =============================================
@@ -287,7 +292,7 @@ def caculate_metrics(trades, wallet, expected_trades=10):
             'win_rate': 0.0,
             'downside': 0.0,
             'activity': 0.0,
-            'final_wallet': wallet,
+            'final_wallet': round(wallet, 5),
             'trades_count': 0,
             OBJECTIVE_METRIC: -0.1,
         }
@@ -327,3 +332,118 @@ def caculate_metrics(trades, wallet, expected_trades=10):
     }
 
     return objective_metric, metrics
+
+def create_model(model_cls, random_seed, model_params):
+    """Safely instantiate model, passing the appropriate seed parameter if supported."""
+    # Get constructor signature
+    try:
+        sig = inspect.signature(model_cls)
+        params = sig.parameters.keys()
+    except (TypeError, ValueError):
+        params = []
+
+    # Choose appropriate seed parameter name
+    seed_args = {}
+    if 'random_state' in params:
+        seed_args['random_state'] = random_seed
+    elif 'random_seed' in params:
+        seed_args['random_seed'] = random_seed
+    elif 'seed' in params:
+        seed_args['seed'] = random_seed
+
+    # Merge parameters safely
+    return model_cls(**seed_args, **model_params)
+
+def resolve_model_class(model_type):
+    """
+    Resolve the appropriate model class based on self.model_type.
+    Supports: 'cat', 'xgb'
+    """
+
+    model_map = {
+        "cat": ("catboost", "CatBoostRegressor"),
+        "xgb": ("xgboost", "XGBRegressor"),
+    }
+
+    key = model_type.lower()
+
+    if key not in model_map:
+        raise ValueError(
+            f"Unknown model_type '{model_type}'. "
+            f"Supported values: {list(model_map.keys())}"
+        )
+
+    module_name, class_name = model_map[key]
+
+    # Dynamically import module & class
+    module = __import__(module_name, fromlist=[class_name])
+    model_class = getattr(module, class_name)
+
+    return model_class
+
+def predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFrame):
+    """
+    Returns a list of dicts (one per X row) mapping target_keys to predicted values.
+    Handles callable or sklearn-like model.predict. Missing keys are filled either from:
+      - metadata['removed_targets'], or
+      - None (if missing)
+    """
+    # -------------------------
+    # 1. Run model prediction
+    # -------------------------
+    try:
+        raw_preds = model(X) if callable(model) else model.predict(X)
+    except Exception:
+        raw_preds = model.predict(X.values)
+
+    # If model returned list of dicts
+    if (
+        isinstance(raw_preds, (list, np.ndarray))
+        and len(raw_preds) > 0
+        and isinstance(raw_preds[0], dict)
+    ):
+        return list(raw_preds)
+
+    # Convert to 2D numpy array
+    arr = np.atleast_2d(np.asarray(raw_preds))
+    n_rows, n_cols = arr.shape
+
+    # -------------------------
+    # 2. Determine correct keys
+    # -------------------------
+    meta_tkeys = metadata.get("target_keys") if metadata else None
+    meta_valid  = metadata.get("valid_targets") if metadata else None
+    meta_removed = metadata.get("removed_targets") if metadata else {}
+
+    # Final full keys (all parameters including removed ones)
+    target_keys = meta_tkeys or meta_valid or [f"param_{i}" for i in range(n_cols)]
+
+    # These are the keys actually predicted by the ML model
+    valid_keys = meta_valid or target_keys
+
+    # Column-to-key mapping for predicted values
+    col_to_key = valid_keys[:n_cols]
+
+    # -------------------------
+    # 3. Build result dicts
+    # -------------------------
+    dicts = []
+    for r in range(n_rows):
+
+        # Initialize full dict with None
+        d = {k: None for k in target_keys}
+
+        # Fill predicted values
+        for j, key in enumerate(col_to_key):
+            try:
+                d[key] = float(arr[r, j])
+            except Exception:
+                d[key] = None
+
+        # Insert constant removed targets
+        for removed_key, constant_value in meta_removed.items():
+            d[removed_key] = constant_value
+
+        dicts.append(d)
+
+    return dicts

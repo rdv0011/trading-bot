@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--model-type",
         choices=["xgb", "cat"],
-        default="xgb",
+        default="cat",
         help="Select the model type to use."
     )
     args = parser.parse_args()
