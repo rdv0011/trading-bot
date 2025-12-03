@@ -157,7 +157,6 @@ def rolling_train_predict_multi(
 
     Args:
         df (pd.DataFrame): Input dataframe with features and target.
-        model_cls (type): Model class (e.g., XGBRegressor, CatBoostRegressor, etc.).
         model_type (str): String identifier for the model type.
         model_params (dict): Parameters for model initialization.
         features (callable): features columns from df.
@@ -528,12 +527,11 @@ def build_feature_dataset(df_raw, horizon):
 # Configuration
 # ==================================================================================
 
-LOAD_HISTORICAL_DATA_FROM_CSV = True
-USE_SAVED_ROLLING_PREDICTIONS = True
+LOAD_HISTORICAL_DATA_FROM_CSV = False
+USE_SAVED_ROLLING_PREDICTIONS = False
 USE_SAVED_LABELED_DATA = False
 USE_SAVED_TRAINED_MODEL = False
 MODEL_TYPE = 'cat'
-MODEL_CLS = CatBoostRegressor
 
 # ==================================================================================
 # Main script
@@ -568,7 +566,6 @@ if __name__ == "__main__":
     if predicted_dfs_full is None:
         predicted_dfs_full = rolling_train_predict_multi(
             df=df_full,
-            model_cls=MODEL_CLS,
             model_type=MODEL_TYPE,
             model_params={'iterations': 500, 'verbose': False},
             features=get_features(df_full),

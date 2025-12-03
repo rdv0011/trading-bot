@@ -1,6 +1,5 @@
 from tqdm import tqdm
 from mlio import load_model, get_latest_model_paths
-from xgcatboostcore import MIN_CANDLES_FOR_FEATURES
 from xgcatboostcore import SEED_BASE, create_model, adaptive_thresholding
 from xgcatboostcore import resolve_model_class, TARGET_COLUMN, predict_param_dicts_from_model
 import pandas as pd
