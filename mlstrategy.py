@@ -11,6 +11,10 @@ TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal p
 BUY_SLIPPAGE = 1.005  # 0.5% slippage on buy orders
 SELL_SLIPPAGE = 0.995  # 0.5% slippage on sell orders
 
+class MissingHistoricalDataError(Exception):
+    """Raised when get_historical_prices() returns None"""
+    pass
+
 class XGCatBoostStrategy(CCXTStrategy):
     '''
     Machine Learning Trading Strategy using XGBoost/CatBoost
@@ -45,6 +49,13 @@ class XGCatBoostStrategy(CCXTStrategy):
         self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
         
         df_hist = self.get_historical_prices(self.asset, init_length, self.historical_prices_unit)
+        if df_hist is None or len(df_hist) == 0:
+            msg = (
+                f"❌ Initialization aborted: get_historical_prices() returned None or empty "
+                f"for asset={self.asset}, candles={init_length}, interval={self.historical_prices_unit}"
+            )
+            self.log_message(msg)
+            raise MissingHistoricalDataError(msg)
         df_hist = make_features(df_hist)
         df_hist = make_labels(df_hist, H=NUMBER_OF_CANDLES_AHEAD)
         features = get_features(df_hist)
@@ -72,6 +83,13 @@ class XGCatBoostStrategy(CCXTStrategy):
     def on_trading_iteration(self):
         # Get historical data (need at least 240 candles for features)
         df = self.get_historical_prices(self.asset, self.historical_prices_length, self.historical_prices_unit)
+
+        if df is None or len(df) == 0:
+            self.log_message(
+                f"❌ Skipping iteration: get_historical_prices() returned None or empty "
+                f"for asset={self.asset}, candles={self.historical_prices_length}, interval={self.historical_prices_unit}"
+            )
+            return
 
         # Update dynamic meta parameters from model
         try:

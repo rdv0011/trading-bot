@@ -383,11 +383,11 @@ def resolve_model_class(model_type):
 
 def predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFrame):
     """
-    Returns a list of dicts (one per X row) mapping target_keys to predicted values.
-    Handles callable or sklearn-like model.predict. Missing keys are filled either from:
-      - metadata['removed_targets'], or
-      - None (if missing)
+    Returns a SINGLE dict mapping target_keys to predicted values.
+    Handles callable or sklearn-like model.predict.
+    Safely extracts a single prediction even if the model returns multiple.
     """
+
     # -------------------------
     # 1. Run model prediction
     # -------------------------
@@ -396,54 +396,58 @@ def predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFr
     except Exception:
         raw_preds = model.predict(X.values)
 
-    # If model returned list of dicts
-    if (
-        isinstance(raw_preds, (list, np.ndarray))
-        and len(raw_preds) > 0
-        and isinstance(raw_preds[0], dict)
-    ):
-        return list(raw_preds)
+    # -------------------------
+    # 2. Normalize to one prediction
+    # -------------------------
 
-    # Convert to 2D numpy array
-    arr = np.atleast_2d(np.asarray(raw_preds))
-    n_rows, n_cols = arr.shape
+    # Case A: model returned list of dicts → take first dict
+    if isinstance(raw_preds, (list, np.ndarray)) and len(raw_preds) > 0:
+        if isinstance(raw_preds[0], dict):
+            return raw_preds[0]
+
+    # Case B: model returned list of arrays → take first prediction
+    # e.g., [array([0.1, 0.3, 0.8])]
+    if isinstance(raw_preds, (list, np.ndarray)) and len(raw_preds) > 0:
+        try:
+            single_pred = np.asarray(raw_preds[0])
+        except Exception:
+            single_pred = np.asarray(raw_preds)
+    else:
+        # Fallback: assume the output itself is an array
+        single_pred = np.asarray(raw_preds)
+
+    # Ensure the result is 1D
+    single_pred = np.atleast_1d(single_pred)
 
     # -------------------------
-    # 2. Determine correct keys
+    # 3. Determine correct keys
     # -------------------------
-    meta_tkeys = metadata.get("target_keys") if metadata else None
-    meta_valid  = metadata.get("valid_targets") if metadata else None
+    meta_tkeys   = metadata.get("target_keys") if metadata else None
+    meta_valid   = metadata.get("valid_targets") if metadata else None
     meta_removed = metadata.get("removed_targets") if metadata else {}
 
-    # Final full keys (all parameters including removed ones)
+    n_cols = single_pred.shape[0]
+
     target_keys = meta_tkeys or meta_valid or [f"param_{i}" for i in range(n_cols)]
+    valid_keys  = meta_valid or target_keys
 
-    # These are the keys actually predicted by the ML model
-    valid_keys = meta_valid or target_keys
-
-    # Column-to-key mapping for predicted values
+    # Only assign keys for which predictions exist
     col_to_key = valid_keys[:n_cols]
 
     # -------------------------
-    # 3. Build result dicts
+    # 4. Build single result dict
     # -------------------------
-    dicts = []
-    for r in range(n_rows):
+    result = {k: None for k in target_keys}
 
-        # Initialize full dict with None
-        d = {k: None for k in target_keys}
+    # Fill predictions
+    for j, key in enumerate(col_to_key):
+        try:
+            result[key] = float(single_pred[j])
+        except Exception:
+            result[key] = None
 
-        # Fill predicted values
-        for j, key in enumerate(col_to_key):
-            try:
-                d[key] = float(arr[r, j])
-            except Exception:
-                d[key] = None
+    # Add any constant removed targets
+    for removed_key, constant_value in meta_removed.items():
+        result[removed_key] = constant_value
 
-        # Insert constant removed targets
-        for removed_key, constant_value in meta_removed.items():
-            d[removed_key] = constant_value
-
-        dicts.append(d)
-
-    return dicts
+    return result

@@ -653,7 +653,7 @@ if __name__ == "__main__":
     if multi_model is None:
         multi_model, predictor, rmse_per_target, metadata = train_best_param_multi_model(df_train)
         try:
-            saved_path = save_model(multi_model, model_type=MODEL_TYPE, keep_count=2, metadata=metadata)
+            saved_path = save_model(model=multi_model, metadata=metadata, model_type=MODEL_TYPE)
             print(f"Model saved to: {saved_path}")
         except Exception as e:
             print(f"Warning: failed to save model: {e}")

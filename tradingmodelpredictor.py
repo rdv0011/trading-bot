@@ -82,8 +82,6 @@ class TradingModelPredictor:
         Returns:
             bool: True if a new model was loaded, False otherwise
         """
-        if not self.auto_reload:
-            return False
         
         try:
             # Get latest model paths
@@ -258,15 +256,12 @@ class TradingModelPredictor:
             'auto_reload': self.auto_reload
         }
     
-    def predict_meta_params(self, df, check_reload=True):
+    def predict_meta_params(self, df):
         """
         Predict meta parameters using the *metadata-trained* model.
         """
-
-        if len(df) < 2:
-            raise ValueError(f"Need at least 2 candles, got {len(df)}")
         
-        if check_reload and self.auto_reload:
+        if self.auto_reload:
             self.check_for_new_model()
 
         # Use the EXACT feature_cols used in labeling
@@ -285,13 +280,4 @@ class TradingModelPredictor:
         # Predict only last row
         X_last = X_live.iloc[[-1]]
 
-        param_dicts = predict_param_dicts_from_model(self.model, self.metadata, X_last)
-        meta_params = param_dicts[0]
-
-        defaults = {
-            "stake_pct": 0.3,
-            "stop_loss_pct": 0.01,
-            "take_profit_pct": 0.02,
-            "max_hold_hours": 16.0
-        }
-        return {k: meta_params.get(k, defaults[k]) for k in defaults}
+        return predict_param_dicts_from_model(self.model, self.metadata, X_last)

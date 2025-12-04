@@ -20,35 +20,10 @@ MODEL_DIR.mkdir(exist_ok=True)
 LABEL_DIR = Path(script_dir) / "labeleddata"
 LABEL_DIR.mkdir(exist_ok=True)
 
-
 # =============================================
 # Model Persistence Functions
 # =============================================
-def _cleanup_old_files(pattern, model_dir, keep_count=2):
-    """
-    Remove old files, keeping only the most recent ones.
-    
-    Args:
-        pattern: Glob pattern to match files
-        model_dir: Directory containing files
-        keep_count: Number of most recent files to keep
-    """
-    files = list(model_dir.glob(pattern))
-    if len(files) <= keep_count:
-        return
-    
-    # Sort by modification time (newest first)
-    files.sort(key=lambda x: x.stat().st_mtime, reverse=True)
-    
-    # Remove older files
-    for old_file in files[keep_count:]:
-        old_file.unlink()
-        print(f"🗑️  Removed old file: {old_file.name}")
-
-# =============================================
-# Model Persistence Functions
-# =============================================
-def save_model(model, model_type, model_dir=MODEL_DIR, keep_count=2, metadata=None):
+def save_model(model, metadata, model_type, model_dir=MODEL_DIR, keep_count=2):
     """
     Save trained model to disk with timestamp.
     Keeps only the most recent models to save disk space.
@@ -187,11 +162,6 @@ def download_historical_prices(symbol, timeframe, limit, window_ms):
     )
 
     return df
-
-def save_model(model, filename):
-    path = MODEL_DIR / filename
-    joblib.dump(model, path)
-    return path
 
 def save_labels(df, filename):
     path = LABEL_DIR / filename
