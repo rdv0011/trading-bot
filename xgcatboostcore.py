@@ -91,37 +91,20 @@ def adaptive_thresholding(df, num_candles=PREDICT_WITH_SIGNAL_NUM_CANDLES, label
     minima_sort_threshold = sorted_vals.iloc[-frequency:].mean()
     return maxima_sort_threshold, minima_sort_threshold
 
-def _get_params_from_set(param_set, idx=None):
-    """
-    Get parameters from param_set (dict or list/tuple of dicts) by index.
-
-    If param_set is a list/tuple, idx selects the element. If idx is out of bounds or None, 
-    the first element is used. If param_set is a single dict, it is returned directly.
-
-    Returns a dict with all expected keys filled with defaults if missing.
-    """
-    # Default values
-    default_values = {
-        "stake_pct": 0.01,
-        "stop_loss_pct": 0.02,
-        "take_profit_pct": 0.04,
-        "max_hold_hours": 4,
-    }
-
-    # Select the dict
-    if isinstance(param_set, (list, tuple)):
-        if idx is None or idx < 0 or idx >= len(param_set):
-            selected = param_set[0]
-        else:
-            selected = param_set[idx]
-    elif isinstance(param_set, dict):
-        selected = param_set
-    else:
-        raise ValueError("param_set must be a dict or a list/tuple of dicts")
-
-    # Apply defaults for missing keys
-    return {k: selected.get(k, v) for k, v in default_values.items()}
-
+def get_param_row(param_list, idx):
+    # Case 1: param_list is a single dict → treat as list of one
+    if isinstance(param_list, dict):
+        return param_list
+    
+    # Case 2: param_list is a list of dicts
+    if isinstance(param_list, list):
+        if not param_list:
+            return None  # or raise an error
+        
+        # Safe index: return first item if index out of range
+        return param_list[idx] if -len(param_list) <= idx < len(param_list) else param_list[0]
+    
+    raise TypeError("param_list must be a dict or list of dicts")
 
 def simulate_trades_core(
     df,
@@ -129,7 +112,7 @@ def simulate_trades_core(
     signal_col,
     close_col='close',
     timeframe_minutes=1,
-    params=None,
+    param_list=None,
 ):
     """
     Simulate trades on the DataFrame with adaptive thresholds.
@@ -152,7 +135,8 @@ def simulate_trades_core(
 
     # Use historical data for adaptive thresholds if provided
     adaptive_source = df_hist[signal_col].tolist()
-
+    entry_stake = None
+    
     for i, (timestamp, row) in enumerate(df_iter.iterrows()):
         price = row[close_col]
         signal_value = row[signal_col]
@@ -168,9 +152,12 @@ def simulate_trades_core(
 
         adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds))
 
-        # Get per-row parameters safely
-        param_row = _get_params_from_set(params, i)
-        stake = param_row["stake_pct"]
+        # Get per-row parameters
+        # For labeling we use a single set of params across the whole walkforward optimization window
+        # which is a subset of initial df
+        param_row = get_param_row(param_list, i)
+        stake_short = param_row["stake_short_pct"]
+        stake_long = param_row["stake_long_pct"]
         stop_loss = param_row["stop_loss_pct"]
         take_profit = param_row["take_profit_pct"]
         max_hold = param_row["max_hold_hours"]
@@ -182,6 +169,7 @@ def simulate_trades_core(
             if enter_long or enter_short:
                 position = 1 if enter_long else -1
                 entry_price = price
+                entry_stake = stake_long if position == 1 else stake_short
                 entry_index = i
                 entry_time = timestamp
                 trade_markers.append({
@@ -193,23 +181,28 @@ def simulate_trades_core(
 
         # Exit logic
         if position != 0 and entry_index is not None:
-            perf = (price / entry_price - 1.0) * position
+            # Raw performance (unweighted)
+            perf_raw = (price / entry_price - 1.0) * position
             elapsed_minutes = (i - entry_index) * max(float(timeframe_minutes), 1.0)
-            exit_on_stop = perf <= -stop_loss
-            exit_on_take = perf >= take_profit
+            exit_on_stop = perf_raw <= -stop_loss
+            exit_on_take = perf_raw >= take_profit
             exit_on_time = elapsed_minutes >= max_hold * 60
 
             if exit_on_stop or exit_on_take or exit_on_time:
-                wallet *= (1.0 + stake * perf)
+                # Realized return considering stake
+                perf = perf_raw * entry_stake
+                # Update wallet using realized return
+                wallet *= (1.0 + perf)
                 exit_reason = 'stop_loss' if exit_on_stop else ('take_profit' if exit_on_take else 'max_hold')
                 trades.append({
                     'position': position,
+                    'return_raw': perf_raw,
                     'return': perf,
                     'entry_timestamp': entry_time,
                     'exit_timestamp': timestamp,
                     'entry_price': entry_price,
                     'exit_price': price,
-                    'stake_pct': stake,
+                    'stake_pct': entry_stake,
                     'exit_reason': exit_reason,
                 })
                 trade_markers.append({
@@ -223,6 +216,7 @@ def simulate_trades_core(
 
                 position = 0
                 entry_price = 0.0
+                entry_stake = None
                 entry_index = None
                 entry_time = None
 
@@ -233,16 +227,18 @@ def simulate_trades_core(
     if position != 0 and entry_index is not None:
         final_price = df_iter[close_col].iloc[-1]
         final_timestamp = df_iter.index[-1]
-        perf = (final_price / entry_price - 1.0) * position
-        wallet *= (1.0 + stake * perf)
+        perf_raw = (final_price / entry_price - 1.0) * position
+        perf = perf_raw * entry_stake
+        wallet *= (1.0 + perf)
         trades.append({
             'position': position,
+            'return_raw': perf_raw,
             'return': perf,
             'entry_timestamp': entry_time,
             'exit_timestamp': final_timestamp,
             'entry_price': entry_price,
             'exit_price': final_price,
-            'stake_pct': stake,
+            'stake_pct': entry_stake,
             'exit_reason': 'final_close',
         })
         trade_markers.append({

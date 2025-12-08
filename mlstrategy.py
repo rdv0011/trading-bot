@@ -94,12 +94,15 @@ class XGCatBoostStrategy(CCXTStrategy):
         # Update dynamic meta parameters from model
         try:
             meta_params = self.predictor.predict_meta_params(df)
-            self.stake_pct = meta_params["stake_pct"]
+            self.stake_long_pct = meta_params["stake_long_pct"]
+            self.stake_short_pct = meta_params["stake_short_pct"]
             self.stop_loss_pct = meta_params["stop_loss_pct"]
             self.take_profit_pct = meta_params["take_profit_pct"]
             self.max_hold_hours = meta_params["max_hold_hours"]
+
             self.log_message(
-                f"Updated meta parameters: stake_pct={self.stake_pct:.3f}, "
+                f"Updated meta parameters: stake_long_pct={self.stake_long_pct:.3f}, "
+                f"stake_short_pct={self.stake_short_pct:.3f}, "
                 f"stop_loss_pct={self.stop_loss_pct:.3f}, take_profit_pct={self.take_profit_pct:.3f}, "
                 f"max_hold_hours={self.max_hold_hours:.1f}"
             )
@@ -157,7 +160,7 @@ class XGCatBoostStrategy(CCXTStrategy):
         """Enter long position with bracket orders"""
         # Calculate position size
         cash = self.get_cash()
-        qty = (cash * self.stake_pct) / current_price
+        qty = (cash * self.stake_long_pct) / current_price
         qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
         
         if qty < MIN_TRADEABLE_QUANTITY:
@@ -198,7 +201,7 @@ class XGCatBoostStrategy(CCXTStrategy):
         """Enter short position with bracket orders"""
         # Calculate position size for short
         cash = self.get_cash()
-        qty = (cash * self.stake_pct) / current_price
+        qty = (cash * self.stake_short_pct) / current_price
         qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
         
         if qty < MIN_TRADEABLE_QUANTITY:

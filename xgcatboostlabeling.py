@@ -22,7 +22,7 @@ from typing import Tuple
 warnings.filterwarnings("ignore")
 
 SYMBOL = 'BTC/USDT'
-WHOLE_WINDOW_DAYS = 60  # total days to fetch (train + test)
+WHOLE_WINDOW_DAYS = 45  # total days to fetch (train + test)
 TRAINING_FRACTION = 0.8  # fraction used for training after labeling
 WHOLE_WINDOW_MILLISECONDS = WHOLE_WINDOW_DAYS * 24 * 60 * 60 * 1000
 
@@ -37,55 +37,49 @@ WALKFORWARD_EVAL_HORIZON = 288  # how many candles ahead to simulate strategy pe
 #OBJECTIVE_METRIC = 'profit_factor'  # Balance of risk and reward
 #OBJECTIVE_METRIC = 'sortino_ratio_hourly'  # Focus on avoiding downside volatility
 
-DEFAULT_LABEL_PARAMS = {
-    'stake_pct': 0.5,
-    'stop_loss_pct': 0.01,
-    'take_profit_pct': 0.02,
-    'max_hold_hours': 24,
-}
-
 def walkforward_label_forward_windows(
     df,
     param_grid,
     signal_col,
-    window_size,
-    timeframe_minutes,
-    step=120,
-    default_param_set=None
+    window_size: int,
+    timeframe_minutes: int,
+    step: int
 ):
     """
     Walk-forward parameter selection using trading simulation.
 
-    If no trades occur (metric cannot be computed), the function
-    uses best parameters from previous iteration or `default_param_set`.
+    Keeps four rolling indices:
+        hist_start, hist_end  → df_hist slice
+        live_start, live_end  → df_live slice
+
+    The window advances by `step`.
     """
     labels = []
 
-    # If no default provided, use first param-grid entry
-    if default_param_set is None:
-        default_param_set = param_grid[0]
-
-    prev_best_param = default_param_set
+    prev_best_param = param_grid[0]
     prev_best_idx = 0
     prev_best_metric = -np.inf
 
-    df_hist = df[:PREDICT_WITH_SIGNAL_NUM_CANDLES].copy()
-    df_live = df[PREDICT_WITH_SIGNAL_NUM_CANDLES:].copy()
+    # ---- INITIAL INDICES ----
+    live_start = PREDICT_WITH_SIGNAL_NUM_CANDLES   # start of df_live portion
+    live_end = live_start + window_size            # first test window
 
-    for start_idx in tqdm(
-        range(0, len(df_live) - window_size, step),
-        desc="Walkforward optimization",
-        total=((len(df_live) - window_size) // step) + 1,
+    total_steps = ((len(df) - live_end) // step) + 1
+
+    for _ in tqdm(
+        range(total_steps),
+        desc="Walkforward optimization"
     ):
-        end_idx = start_idx + window_size
-        df_test = df_live.iloc[start_idx:end_idx]
+        # Slice dynamically without recreating df_hist/df_live
+        df_hist = df.iloc[:live_start]
+        df_test = df.iloc[live_start:live_end]
 
         best_metric = -np.inf
         best_param = None
         best_param_idx = None
 
-        # Evaluate parameters
-        for idx, param_set in enumerate(param_grid):
+        # --- Evaluate all parameter sets ---
+        for idx, params in enumerate(param_grid):
 
             _, metrics = simulate_trades_core(
                 df=df_test,
@@ -93,51 +87,46 @@ def walkforward_label_forward_windows(
                 signal_col=signal_col,
                 close_col='close',
                 timeframe_minutes=timeframe_minutes,
-                params=param_set,
+                param_list=params,
             )
 
             metric_value = metrics.get(OBJECTIVE_METRIC, np.nan)
 
-            # Accept as best if higher
+            # Select best
             if metric_value > best_metric:
                 best_metric = metric_value
-                best_param = param_set
+                best_param = params
                 best_param_idx = idx
 
-            # Basic early-stopping logic
-            if metric_value < best_metric:
-                continue
-
-        # If no valid best_param found → fallback to previous or default
+        # Fallback if needed
         if best_param is None:
             best_param = prev_best_param
             best_param_idx = prev_best_idx
             best_metric = prev_best_metric
 
-        # Store current best as "previous best" for next iteration
+        # Store previous best
         prev_best_param = best_param
         prev_best_idx = best_param_idx
         prev_best_metric = best_metric
 
+        # Save result
         labels.append({
-            "date": df.index[end_idx - 1],
+            "date": df.index[live_end - 1],
             "best_param_idx": best_param_idx,
             "best_param": best_param,
             "best_metric": round(best_metric, 5),
         })
 
-        df_hist = (
-            pd.concat([df_hist, df_test], ignore_index=False)
-              .iloc[-PREDICT_WITH_SIGNAL_NUM_CANDLES:]
-        )
+        live_start += step                      # shift live window
+        live_end = live_start + window_size
 
-        # Convert to DataFrame that is already date-indexed
+        # Stop if we exceed df
+        if live_end > len(df):
+            break
+
+    # --- Create final labels dataframe ---
     labels_df = pd.DataFrame(labels)
-
-    # Ensure date is datetime
     labels_df["date"] = pd.to_datetime(labels_df["date"])
-
-    # Use date as index from now on
     labels_df = labels_df.set_index("date").sort_index()
 
     return labels_df
@@ -214,7 +203,7 @@ def label_and_evaluate_intervals(
     df,
     model_type,
     param_grid,
-    intervals_hours=(1, 2, 4),
+    intervals_hours,
     timeframe_minutes=5,
     signal_col=SIGNAL_COLUMN,
 ):
@@ -238,7 +227,7 @@ def label_and_evaluate_intervals(
     for hours in sorted(set(intervals_hours)):
 
         window_size = int(hours * candles_per_hour)
-        step = min(12, window_size)
+        step = window_size // 10
         
         print(f"\n--- Labeling for {hours}h horizon ({window_size} candles), step={step} ---")
 
@@ -269,7 +258,7 @@ def label_and_evaluate_intervals(
             direction='backward'
         ).sort_values('date')
 
-        param_series = df_merged['best_param'].tolist()
+        param_list = df_merged['best_param'].tolist()
 
         df_merged = df_merged.set_index("date").sort_index()
 
@@ -282,7 +271,7 @@ def label_and_evaluate_intervals(
             signal_col=signal_col,
             close_col='close',
             timeframe_minutes=timeframe_minutes,
-            params=param_series,
+            param_list=param_list,
         )
 
         # Store results using already-indexed labels_df
@@ -323,7 +312,6 @@ def label_and_evaluate_intervals(
 
 def train_best_param_multi_model(
     predicted_dfs,
-    feature_cols=None,
     test_size=0.2,
     random_state=SEED_BASE,
 ):
@@ -383,12 +371,11 @@ def train_best_param_multi_model(
         )
 
     # -------- Auto detect features --------
-    if feature_cols is None:
-        exclude = ["best_param"] + [f"target_{k}" for k in target_keys]
-        feature_cols = [
-            c for c in df.columns
-            if c not in exclude and np.issubdtype(df[c].dtype, np.number)
-        ]
+    exclude = ["best_param"] + [f"target_{k}" for k in target_keys]
+    feature_cols = [
+        c for c in df.columns
+        if c not in exclude and np.issubdtype(df[c].dtype, np.number)
+    ]
 
     print(f"📊 Using {len(feature_cols)} input features")
 
@@ -424,28 +411,6 @@ def train_best_param_multi_model(
         rmse_per_target[key] = rmse
         print(f"   {key}: {rmse:.6f}")
 
-    # -------- Predictor wrapper reconstructs full best_param dict --------
-    def predictor(X_input):
-        preds = multi_model.predict(X_input)
-        if preds.ndim == 1:
-            preds = preds.reshape(1, -1)
-
-        full_rows = []
-        for r in preds:
-            d = {}
-            pi = 0
-
-            for key in target_keys:
-                if key in valid_keys:
-                    d[key] = float(r[pi])
-                    pi += 1
-                else:
-                    d[key] = removed_keys[key]  # constant parameter
-
-            full_rows.append(d)
-
-        return full_rows if len(full_rows) > 1 else full_rows[0]
-
     # -------- Metadata --------
     metadata_out = {
         "feature_cols": feature_cols,
@@ -455,7 +420,7 @@ def train_best_param_multi_model(
     }
 
     print("\n✅ Training complete.")
-    return multi_model, predictor, rmse_per_target, metadata_out
+    return multi_model, rmse_per_target, metadata_out
 
 def run_simulation_from_predicted_dfs(
     predicted_dfs: pd.DataFrame,
@@ -476,7 +441,7 @@ def run_simulation_from_predicted_dfs(
     X_live = df_live[feature_cols].fillna(0)
 
     # 1) Predict variable targets
-    param_dicts = predict_param_dicts_from_model(
+    params = predict_param_dicts_from_model(
         model, metadata, X_live
     )
 
@@ -485,7 +450,7 @@ def run_simulation_from_predicted_dfs(
         df_hist=df_hist,
         signal_col=signal_col,
         close_col=close_col,
-        params=param_dicts,
+        param_list=params,
     )
 
     df_result.attrs["sim_meta"] = {
@@ -500,18 +465,20 @@ def run_simulation_from_predicted_dfs(
     return df_result, metrics
 
 def build_param_grid_with_relation(
-        stakes, 
+        stake_values_short, 
+        stake_values_long,
         stop_losses, 
         max_hold_hours
         ):
     """
-    Build all combinations of stake_pct, stop_loss_pct, max_hold_hours,
+    Build all combinations of stake_short_pct, stake_long_pct, stop_loss_pct, max_hold_hours,
     with the relation take_profit_pct = 2 * stop_loss_pct.
     """
     grid = []
-    for s, sl, mh in product(stakes, stop_losses, max_hold_hours):
+    for svs, svl, sl, mh in product(stake_values_short, stake_values_long, stop_losses, max_hold_hours):
         grid.append({
-            'stake_pct': float(s),
+            'stake_short_pct': float(svs),
+            'stake_long_pct': float(svl),
             'stop_loss_pct': float(sl),
             'take_profit_pct': float(2 * sl),
             'max_hold_hours': float(mh)
@@ -584,7 +551,10 @@ if __name__ == "__main__":
         df_dyn_best_full = load_labels(dyn_filename)
     else:
         # build param grid
-        stake_values = [0.3, 0.5, 0.7]
+        # You may benefit from a rise to 120k, but avoid heavy exposure due to possible crash to 80k
+        stake_values_long = [0.10, 0.15, 0.25]
+        # Short risk is asymmetric: downside limited, upside unlimited; keep smaller size
+        stake_values_short = [0.05, 0.10, 0.15]
         stop_loss_values = [
             0.0025,
             0.005,
@@ -598,7 +568,8 @@ if __name__ == "__main__":
         ]
         max_hold_values = [1, 2, 4, 8, 16, 24]
         param_grid = build_param_grid_with_relation(
-            stakes=stake_values,
+            stake_values_short=stake_values_short,
+            stake_values_long=stake_values_long,
             stop_losses=stop_loss_values,
             max_hold_hours=max_hold_values
         )
@@ -651,7 +622,7 @@ if __name__ == "__main__":
             multi_model = None
 
     if multi_model is None:
-        multi_model, predictor, rmse_per_target, metadata = train_best_param_multi_model(df_train)
+        multi_model, rmse_per_target, metadata = train_best_param_multi_model(df_train)
         try:
             saved_path = save_model(model=multi_model, metadata=metadata, model_type=MODEL_TYPE)
             print(f"Model saved to: {saved_path}")
