@@ -12,6 +12,4 @@ dependencies:
   - psutil=7.0.0
   - xgboost=3.0.5
   - catboost=1.2.8
-  - pip
-  - pip:
-      - git+https://github.com/rdv0011/ccxt.git@fix/exchange-fix-logging-format
+  - python-binance=1.0.33
