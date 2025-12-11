@@ -138,7 +138,7 @@ class XGCatBoostStrategy(BaseStrategy):
         has_position = position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY
 
         # Entry logic
-        if not has_position:
+        if not has_position and signal != "hold":
             # Reset entry tracking if position was closed
             if self.entry_price is not None:
                 # Close any remaining open orders (e.g., stop/take profit) if position closed externally
@@ -147,7 +147,6 @@ class XGCatBoostStrategy(BaseStrategy):
                 self.entry_time = None
             
             self._enter_position(current_price, signal=signal)
-        
         # Exit logic
         elif has_position and self.entry_price is not None:
             self._check_exit_conditions(position, current_price, signal)
