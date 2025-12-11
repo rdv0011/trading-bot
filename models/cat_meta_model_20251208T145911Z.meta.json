@@ -34,17 +34,17 @@
     "wallet"
   ],
   "target_keys": [
-    "stake_short_pct",
-    "stake_long_pct",
-    "stop_loss_pct",
-    "take_profit_pct",
+    "stake_short_frac",
+    "stake_long_frac",
+    "stop_loss_frac",
+    "take_profit_frac",
     "max_hold_hours"
   ],
   "valid_targets": [
-    "stake_short_pct",
-    "stake_long_pct",
-    "stop_loss_pct",
-    "take_profit_pct",
+    "stake_short_frac",
+    "stake_long_frac",
+    "stop_loss_frac",
+    "take_profit_frac",
     "max_hold_hours"
   ],
   "removed_targets": {}

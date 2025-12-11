@@ -156,10 +156,10 @@ def simulate_trades_core(
         # For labeling we use a single set of params across the whole walkforward optimization window
         # which is a subset of initial df
         param_row = get_param_row(param_list, i)
-        stake_short = param_row["stake_short_pct"]
-        stake_long = param_row["stake_long_pct"]
-        stop_loss = param_row["stop_loss_pct"]
-        take_profit = param_row["take_profit_pct"]
+        stake_short = param_row["stake_short_frac"]
+        stake_long = param_row["stake_long_frac"]
+        stop_loss = param_row["stop_loss_frac"]
+        take_profit = param_row["take_profit_frac"]
         max_hold = param_row["max_hold_hours"]
 
         # Entry logic
@@ -202,7 +202,7 @@ def simulate_trades_core(
                     'exit_timestamp': timestamp,
                     'entry_price': entry_price,
                     'exit_price': price,
-                    'stake_pct': entry_stake,
+                    'stake_frac': entry_stake,
                     'exit_reason': exit_reason,
                 })
                 trade_markers.append({
@@ -238,7 +238,7 @@ def simulate_trades_core(
             'exit_timestamp': final_timestamp,
             'entry_price': entry_price,
             'exit_price': final_price,
-            'stake_pct': entry_stake,
+            'stake_frac': entry_stake,
             'exit_reason': 'final_close',
         })
         trade_markers.append({

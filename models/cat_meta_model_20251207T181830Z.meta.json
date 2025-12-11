@@ -1,0 +1,51 @@
+{
+  "feature_cols": [
+    "timestamp",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "ret1",
+    "ret_lag_1",
+    "ret_lag_2",
+    "ret_lag_3",
+    "ret_lag_5",
+    "ret_lag_10",
+    "ema_5",
+    "ema_diff_5",
+    "ema_15",
+    "ema_diff_15",
+    "ema_60",
+    "ema_diff_60",
+    "ema_240",
+    "ema_diff_240",
+    "tr",
+    "atr14",
+    "vol_12",
+    "vol_48",
+    "hour_sin",
+    "hour_cos",
+    "dow_sin",
+    "dow_cos",
+    "future_close",
+    "future_ret",
+    "pred",
+    "wallet"
+  ],
+  "target_keys": [
+    "stake_short_frac",
+    "stake_long_frac",
+    "stop_loss_frac",
+    "take_profit_frac",
+    "max_hold_hours"
+  ],
+  "valid_targets": [
+    "stake_short_frac",
+    "stake_long_frac",
+    "stop_loss_frac",
+    "take_profit_frac",
+    "max_hold_hours"
+  ],
+  "removed_targets": {}
+}

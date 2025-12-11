@@ -471,16 +471,16 @@ def build_param_grid_with_relation(
         max_hold_hours
         ):
     """
-    Build all combinations of stake_short_pct, stake_long_pct, stop_loss_pct, max_hold_hours,
-    with the relation take_profit_pct = 2 * stop_loss_pct.
+    Build all combinations of stake_short_frac, stake_long_frac, stop_loss_frac, max_hold_hours,
+    with the relation take_profit_frac = 2 * stop_loss_frac.
     """
     grid = []
     for svs, svl, sl, mh in product(stake_values_short, stake_values_long, stop_losses, max_hold_hours):
         grid.append({
-            'stake_short_pct': float(svs),
-            'stake_long_pct': float(svl),
-            'stop_loss_pct': float(sl),
-            'take_profit_pct': float(2 * sl),
+            'stake_short_frac': float(svs),
+            'stake_long_frac': float(svl),
+            'stop_loss_frac': float(sl),
+            'take_profit_frac': float(2 * sl),
             'max_hold_hours': float(mh)
         })
     return grid

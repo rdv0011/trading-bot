@@ -1,4 +1,4 @@
-from ccxtstrategy import CCXTStrategy
+from basestrategy import BaseStrategy
 import time
 from mlio import MODEL_DIR
 from tradingmodelpredictor import TradingModelPredictor
@@ -15,7 +15,7 @@ class MissingHistoricalDataError(Exception):
     """Raised when get_historical_prices() returns None"""
     pass
 
-class XGCatBoostStrategy(CCXTStrategy):
+class XGCatBoostStrategy(BaseStrategy):
     '''
     Machine Learning Trading Strategy using XGBoost/CatBoost
     '''
@@ -94,21 +94,20 @@ class XGCatBoostStrategy(CCXTStrategy):
         # Update dynamic meta parameters from model
         try:
             meta_params = self.predictor.predict_meta_params(df)
-            self.stake_long_pct = meta_params["stake_long_pct"]
-            self.stake_short_pct = meta_params["stake_short_pct"]
-            self.stop_loss_pct = meta_params["stop_loss_pct"]
-            self.take_profit_pct = meta_params["take_profit_pct"]
+            self.stake_long_frac = meta_params["stake_long_frac"]
+            self.stake_short_frac = meta_params["stake_short_frac"]
+            self.stop_loss_frac = meta_params["stop_loss_frac"]
+            self.take_profit_frac = meta_params["take_profit_frac"]
             self.max_hold_hours = meta_params["max_hold_hours"]
 
             self.log_message(
-                f"Updated meta parameters: stake_long_pct={self.stake_long_pct:.3f}, "
-                f"stake_short_pct={self.stake_short_pct:.3f}, "
-                f"stop_loss_pct={self.stop_loss_pct:.3f}, take_profit_pct={self.take_profit_pct:.3f}, "
+                f"Updated meta parameters: stake_long_frac={self.stake_long_frac:.3f}, "
+                f"stake_short_frac={self.stake_short_frac:.3f}, "
+                f"stop_loss_frac={self.stop_loss_frac:.3f}, take_profit_frac={self.take_profit_frac:.3f}, "
                 f"max_hold_hours={self.max_hold_hours:.1f}"
             )
         except Exception as e:
             self.log_message(f"⚠️ Failed to update meta parameters, using previous values: {e}")
-
 
         # Get prediction and signal
         if len(df) < 240:
@@ -147,96 +146,57 @@ class XGCatBoostStrategy(CCXTStrategy):
                 self.entry_price = None
                 self.entry_time = None
             
-            if signal == 'long':
-                self._enter_long_position(current_price)
-            elif signal == 'short':
-                self._enter_short_position(current_price)
+            self._enter_position(current_price, signal=signal)
         
         # Exit logic
         elif has_position and self.entry_price is not None:
             self._check_exit_conditions(position, current_price, signal)
 
-    def _enter_long_position(self, current_price: float):
-        """Enter long position with bracket orders"""
+    def _enter_position(self, current_price: float, signal: str):
+        """
+        Enter long or short position with bracket orders.
+        signal: "long" or "short"
+        """
+        signal = signal.lower()
+        if signal not in ["long", "short"]:
+            self.log_message(f"❌ Invalid signal '{signal}', must be 'long' or 'short'")
+            return
+
+        # Determine stake fraction based on signal
+        stake_frac = self.stake_long_frac if signal == "long" else self.stake_short_frac
         # Calculate position size
         cash = self.get_cash()
-        qty = (cash * self.stake_long_pct) / current_price
+        qty = (cash * stake_frac) / current_price
         qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
-        
+
         if qty < MIN_TRADEABLE_QUANTITY:
-            self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+            self.log_message(f"⚠️ Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
             return
-        
-        # Calculate bracket order prices
-        stop_loss_price = round(current_price * (1 - self.stop_loss_pct), 2)
-        take_profit_price = round(current_price * (1 + self.take_profit_pct), 2)
-        
-        # Place market buy order
-        order = self.create_order(self.asset, qty, "buy")
-        self.submit_order(order)
 
-        # Place stop loss order
-        stop_order = self.create_order(
-            self.asset, qty, "sell",
-            stop_price=stop_loss_price,
-            limit_price=stop_loss_price * SELL_SLIPPAGE,
-            order_type="stop_limit"
+        # Open position with bracket orders
+        res = self.open_position_with_bracket(
+            self.asset,
+            signal,
+            qty,
+            tp_frac=self.take_profit_frac,
+            sl_frac=self.stop_loss_frac
         )
-        self.submit_order(stop_order)
 
-        # Place take profit order
-        tp_order = self.create_order(
-            self.asset, qty, "sell",
-            limit_price=take_profit_price,
-            order_type="limit"
-        )
-        self.submit_order(tp_order)
-        
-        self.entry_price = current_price
-        self.entry_time = self.get_datetime()
-        
-        self.log_message(f"🟢 LONG ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.3f}")
-                
-    def _enter_short_position(self, current_price: float):
-        """Enter short position with bracket orders"""
-        # Calculate position size for short
-        cash = self.get_cash()
-        qty = (cash * self.stake_short_pct) / current_price
-        qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
-        
-        if qty < MIN_TRADEABLE_QUANTITY:
-            self.log_message(f"⚠️  Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+        if not res.success:
+            self.log_message(
+                f"⚠️ {'LONG' if signal == 'long' else 'SHORT'} ENTRY failed: {res.error}"
+            )
             return
-        
-        # Calculate exit prices (inverted for short)
-        stop_loss_price = round(current_price * (1 + self.stop_loss_pct), 2)
-        take_profit_price = round(current_price * (1 - self.take_profit_pct), 2)
-        
-        # Place market sell order (short)
-        order = self.create_order(self.asset, qty, "sell")
-        self.submit_order(order)
 
-        # Place stop loss order for short (buy back at higher price)
-        stop_order = self.create_order(
-            self.asset, qty, "buy",
-            stop_price=stop_loss_price,
-            limit_price=stop_loss_price * BUY_SLIPPAGE,
-            order_type="stop_limit"
-        )
-        self.submit_order(stop_order)
+        # Extract entry price
+        entry_price = res.data.get("entry_price")
 
-        # Place take profit order for short (buy back at lower price)
-        tp_order = self.create_order(
-            self.asset, qty, "buy",
-            limit_price=take_profit_price,
-            order_type="limit"
-        )
-        self.submit_order(tp_order)
-        
-        self.entry_price = current_price
-        self.entry_time = self.get_datetime()
-        
-        self.log_message(f"🔴 SHORT ENTRY at {current_price}, Stop Loss at {stop_loss_price:.2f}, Take Profit at {take_profit_price:.2f}, Qty: {qty:.3f}")
+        if entry_price is not None and entry_price > 0:
+            self.entry_price = entry_price
+            self.entry_time = self.get_datetime()
+            self.log_message(f"{'🟢 LONG' if signal == 'long' else '🔴 SHORT'} ENTRY {entry_price}, Qty: {qty:.3f}")
+        else:
+            self.log_message(f"⚠️ {'LONG' if signal == 'long' else 'SHORT'} ENTRY failed, no entry_price.")
         
     def _check_exit_conditions(self, position, current_price: float, signal: str):
         """Check if position should be exited"""
@@ -267,25 +227,16 @@ class XGCatBoostStrategy(CCXTStrategy):
             exit_reason = "SIGNAL REVERSAL (SHORT->LONG)"
 
         if should_exit:
-            self._exit_position(position, current_price, exit_reason, perf)
+            self._close_orders_position(position, current_price, exit_reason, perf)
         
-    def _exit_position(self, position, current_price: float, exit_reason: str, perf: float):
+    def _close_orders_position(self, position, current_price: float, exit_reason: str, perf: float):
         """Exit current position"""
         # Cancel any pending orders
-        self.cancel_open_orders()
+        self.cancel_open_orders(self.asset)
         
         # Double-check position still exists and is above minimum
-        position = self.get_position(self.asset)
         if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
-            is_long = position > 0
-            side = "sell" if is_long else "buy"
-            order = self.create_order(
-                self.asset,
-                abs(position),
-                side
-            )
-            self.submit_order(order)
-            
+            self.broker.close_position(self.asset, position)
             self.log_message(f"🔵 EXIT ({exit_reason}) at {current_price}, PnL: {perf:.2%}")
         else:
             self.log_message(f"✅ Position already closed or too small (possibly by stop/take profit), reason would be: {exit_reason}, PnL: {perf:.2%}")
@@ -309,19 +260,9 @@ class XGCatBoostStrategy(CCXTStrategy):
             if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
                 current_price = self.get_last_price(self.asset)
                 is_long = position > 0
-
-                side = "sell" if is_long else "buy"
-
-                order = self.create_order(
-                    self.asset,
-                    abs(position),
-                    side,
-                    order_type="market"
-                )
-                self.submit_order(order)
-                
                 position_type = "LONG" if is_long else "SHORT"
                 self.log_message(f"🔴 EMERGENCY EXIT ({position_type}) at {current_price}")
+                self.close_position(self.asset, position)
 
                 # Calculate final performance if entry price is known
                 if self.entry_price is not None:

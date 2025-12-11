@@ -1,16 +1,13 @@
 import os
 from dotenv import load_dotenv
 from mlstrategy import XGCatBoostStrategy
-from ccxtbroker import CCXTBroker
+from binancetbroker import BinanceBroker
 import argparse
 
 load_dotenv()
 
 BINANCE_TESTNET_API_KEY = os.getenv("BINANCE_TESTNET_API_KEY", "")
 BINANCE_TESTNET_API_SECRET = os.getenv("BINANCE_TESTNET_API_SECRET", "")
-
-BINANCE_TESTNET_CATBOOST_API_KEY = os.getenv("BINANCE_TESTNET_CATBOOST_API_KEY", "")
-BINANCE_TESTNET_CATBOOST_API_SECRET = os.getenv("BINANCE_TESTNET_CATBOOST_API_SECRET", "")
 
 # Initialize and run the strategy
 if __name__ == "__main__":
@@ -24,34 +21,20 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
-    if args.model_type == "cat":
-        BINANCE_TESTNET_API_KEY = BINANCE_TESTNET_CATBOOST_API_KEY
-        BINANCE_TESTNET_API_SECRET = BINANCE_TESTNET_CATBOOST_API_SECRET
-        print("Using CatBoost model for trading.")
-    else:
-        print("Using XGBoost model for trading.")
-
     broker_config = {
-        'exchange': {
-            'id': 'binance',
-            'api_key': BINANCE_TESTNET_API_KEY,
-            'secret': BINANCE_TESTNET_API_SECRET,
-            'sandbox': True,  # Set to False for live trading
-            'options': {
-                'defaultType': 'future'
-            }
-        }
+        'api_key': BINANCE_TESTNET_API_KEY,
+        'api_secret': BINANCE_TESTNET_API_SECRET,
     }
 
-    broker = CCXTBroker(broker_config)
+    broker = BinanceBroker(broker_config)
 
     base_symbol = "BTC"
     quote_symbol = "USDT"
     parameters = {
         "asset_symbol" : base_symbol,
-        "stake_pct" : 0.5,
-        "stop_loss_pct" : 0.01,
-        "take_profit_pct" : 0.02,
+        "stake_frac" : 0.5,
+        "stop_loss_frac" : 0.01,
+        "take_profit_frac" : 0.02,
         "max_hold_hours" : 24,
         "max_history_size" : 600,
         "historical_prices_length" : 500,
