@@ -8,16 +8,17 @@ from catboost import CatBoostRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
-from xgcatboostcore import make_features, make_labels, predict_param_dicts_from_model, resolve_model_class
-from xgcatboostcore import get_features, simulate_trades_core, create_model
+from xgcatboostcore import predict_param_dicts_from_model, resolve_model_class
+from xgcatboostcore import get_features, simulate_trades_core, create_model, build_feature_dataset
 from xgcatboostcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
-from xgcatboostcore import PREDICT_WITH_SIGNAL_NUM_CANDLES, OBJECTIVE_METRIC, NUMBER_OF_CANDLES_AHEAD
+from xgcatboostcore import OBJECTIVE_METRIC
 from mlio import LABEL_DIR, download_historical_prices, load_featured_df, load_labels
 from mlio import load_model, save_model, save_featured_df, save_labels, get_latest_model_paths
 from itertools import product
 import ast
 import os
 from typing import Tuple
+from timeframe_config import TIMEFRAMES
 
 warnings.filterwarnings("ignore")
 
@@ -25,13 +26,13 @@ SYMBOL = 'BTC/USDT'
 WHOLE_WINDOW_DAYS = 45  # total days to fetch (train + test)
 TRAINING_FRACTION = 0.8  # fraction used for training after labeling
 WHOLE_WINDOW_MILLISECONDS = WHOLE_WINDOW_DAYS * 24 * 60 * 60 * 1000
+TF_NAME = "5m"  # switch here only the timeframe for labeling and model training
+tf_cfg = TIMEFRAMES[TF_NAME]
 
 SAVE_FINAL_MODEL = True # Models are saved to models/ directory
 # Metaparameters as constants
-MAX_HISTORY_SIZE = 600
 HISTORICAL_PRICES_LENGTH = 500
 HISTORICAL_PRICES_LIMIT = 1000
-HISTORICAL_PRICES_TIMEFRAME = "5m"
 WALKFORWARD_EVAL_HORIZON = 288  # how many candles ahead to simulate strategy performance
 #OBJECTIVE_METRIC = 'sharpe_ratio_hourly'  # Smooth risk-adjusted equity curve
 #OBJECTIVE_METRIC = 'profit_factor'  # Balance of risk and reward
@@ -61,7 +62,7 @@ def walkforward_label_forward_windows(
     prev_best_metric = -np.inf
 
     # ---- INITIAL INDICES ----
-    live_start = PREDICT_WITH_SIGNAL_NUM_CANDLES   # start of df_live portion
+    live_start = tf_cfg.adaptive_history_candles   # start of df_live portion
     live_end = live_start + window_size            # first test window
 
     total_steps = ((len(df) - live_end) // step) + 1
@@ -85,9 +86,9 @@ def walkforward_label_forward_windows(
                 df=df_test,
                 df_hist=df_hist,
                 signal_col=signal_col,
-                close_col='close',
-                timeframe_minutes=timeframe_minutes,
+                tf_cfg=tf_cfg,
                 param_list=params,
+                close_col='close',
             )
 
             metric_value = metrics.get(OBJECTIVE_METRIC, np.nan)
@@ -262,16 +263,16 @@ def label_and_evaluate_intervals(
 
         df_merged = df_merged.set_index("date").sort_index()
 
-        df_hist = df_merged.iloc[:PREDICT_WITH_SIGNAL_NUM_CANDLES].copy()
+        df_hist = df_merged.iloc[:tf_cfg.adaptive_history_candles].copy()
 
         # --- Simulate ---
         df_sim, metrics_dyn = simulate_trades_core(
             df=df_merged,
             df_hist=df_hist,
             signal_col=signal_col,
-            close_col='close',
-            timeframe_minutes=timeframe_minutes,
+            tf_cfg=tf_cfg,
             param_list=param_list,
+            close_col='close',
         )
 
         # Store results using already-indexed labels_df
@@ -431,8 +432,8 @@ def run_simulation_from_predicted_dfs(
     close_col: str = "close",
 ) -> Tuple[pd.DataFrame, dict]:
 
-    df_hist = predicted_dfs[:PREDICT_WITH_SIGNAL_NUM_CANDLES].copy()
-    df_live = predicted_dfs[PREDICT_WITH_SIGNAL_NUM_CANDLES:].copy()
+    df_hist = predicted_dfs[:tf_cfg.adaptive_history_candles].copy()
+    df_live = predicted_dfs[tf_cfg.adaptive_history_candles:].copy()
 
     target_keys = metadata["target_keys"]
     removed_targets = metadata.get("removed_targets", {})
@@ -449,8 +450,9 @@ def run_simulation_from_predicted_dfs(
         df=df_live,
         df_hist=df_hist,
         signal_col=signal_col,
-        close_col=close_col,
+        tf_cfg=tf_cfg,
         param_list=params,
+        close_col=close_col,
     )
 
     df_result.attrs["sim_meta"] = {
@@ -485,11 +487,6 @@ def build_param_grid_with_relation(
         })
     return grid
 
-def build_feature_dataset(df_raw, horizon):
-    df = make_features(df_raw)
-    df = make_labels(df, H=horizon)
-    return df
-
 # ==================================================================================
 # Configuration
 # ==================================================================================
@@ -514,12 +511,12 @@ if __name__ == "__main__":
     if df_full is None:
         df_raw = download_historical_prices(
             SYMBOL,
-            HISTORICAL_PRICES_TIMEFRAME,
+            tf_cfg.name,
             HISTORICAL_PRICES_LIMIT,
             WHOLE_WINDOW_MILLISECONDS
         )
 
-        df_full = build_feature_dataset(df_raw, NUMBER_OF_CANDLES_AHEAD)
+        df_full = build_feature_dataset(df_raw, tf_cfg)
         save_featured_df(df_full, featured_filename)
 
     # Generate rolling predictions on FULL dataset (Label engine)
@@ -538,7 +535,7 @@ if __name__ == "__main__":
             features=get_features(df_full),
             target_col=TARGET_COLUMN,
             signal_col=SIGNAL_COLUMN,
-            window=MAX_HISTORY_SIZE
+            window=tf_cfg.max_history_candles
         )
 
         save_featured_df(predicted_dfs_full, rolling_pred_filename)
@@ -579,7 +576,7 @@ if __name__ == "__main__":
             model_type=MODEL_TYPE,
             param_grid=param_grid,
             intervals_hours=(24,),
-            timeframe_minutes=int(HISTORICAL_PRICES_TIMEFRAME.strip('m')),
+            timeframe_minutes=tf_cfg.minutes,
         )
 
         summary_filename = f"{MODEL_TYPE}_best_params_label_summary_full.csv"

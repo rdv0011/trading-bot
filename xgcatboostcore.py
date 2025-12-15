@@ -6,47 +6,47 @@ import inspect
 TARGET_COLUMN = 'future_ret'
 SIGNAL_COLUMN = 'pred'
 SEED_BASE = 42
-NUMBER_OF_CANDLES_AHEAD = 20
-PREDICT_WITH_SIGNAL_NUM_CANDLES = 600
-MAX_HISTORY_SIZE = 600
-PREDICT_WITH_SIGNAL_LABEL_WINDOW = 200
-MIN_CANDLES_FOR_FEATURES = 250
 OBJECTIVE_METRIC = "objective_score" # Composite metric better for ML training
 
 # =============================================
 # Feature engineering
 # =============================================
-def make_features(df):
+def make_features(df, tf_cfg):
     df = df.copy()
+
     df['ret1'] = df['close'].pct_change(1)
-    for l in [1,2,3,5,10]:
+    for l in [1, 2, 3, 5, 10]:
         df[f'ret_lag_{l}'] = df['ret1'].shift(l)
-    for span in [5,15,60,240]:
+
+    for span in tf_cfg.ema_spans:
         df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
         df[f'ema_diff_{span}'] = df[f'ema_{span}'] - df['close']
-    df['tr'] = np.maximum(df['high']-df['low'],
-                          np.abs(df['high']-df['close'].shift(1)),
-                          np.abs(df['low']-df['close'].shift(1)))
+
+    df['tr'] = np.maximum(
+        df['high'] - df['low'],
+        np.abs(df['high'] - df['close'].shift(1)),
+        np.abs(df['low'] - df['close'].shift(1)),
+    )
+
     df['atr14'] = df['tr'].rolling(14).mean()
     df['vol_12'] = df['ret1'].rolling(12).std()
     df['vol_48'] = df['ret1'].rolling(48).std()
-    
-    # --- Cyclical time encoding ---
-    hours = df.index.hour
+
+    # Cyclical time encoding (works for all TFs)
+    hours = df.index.hour + df.index.minute / 60
     dows = df.index.dayofweek
 
     df['hour_sin'] = np.sin(2 * np.pi * hours / 24)
     df['hour_cos'] = np.cos(2 * np.pi * hours / 24)
     df['dow_sin'] = np.sin(2 * np.pi * dows / 7)
     df['dow_cos'] = np.cos(2 * np.pi * dows / 7)
-    
-    df = df.dropna().round(5)
-    return df
+
+    return df.dropna().round(5)
 
 # =============================================
 # Label generation (future return)
 # =============================================
-def make_labels(df, H=20):
+def make_labels(df, tf_cfg):
     """
     Adds future returns to dataframe for supervised learning.
 
@@ -58,11 +58,15 @@ def make_labels(df, H=20):
         df with columns 'future_close' and 'future_ret'
     """
     df = df.copy()
+    H = tf_cfg.label_horizon_candles
     df['future_close'] = df['close'].shift(-H)
     df['future_ret'] = (df['future_close'] / df['close']) - 1.0
     
-    df = df.dropna().round(5)
+    return df.dropna().round(5)
 
+def build_feature_dataset(df_raw, tf_cfg):
+    df = make_features(df_raw, tf_cfg)
+    df = make_labels(df, tf_cfg)
     return df
 
 def get_features(df):
@@ -81,15 +85,23 @@ def get_features(df):
 # =============================================
 # Adaptive training loop
 # =============================================
-def adaptive_thresholding(df, num_candles=PREDICT_WITH_SIGNAL_NUM_CANDLES, label_window=PREDICT_WITH_SIGNAL_LABEL_WINDOW):
-    if len(df) < num_candles:
-        print(f"Insufficient data for adaptive thresholding: {len(df)} < {num_candles} candles")
+def adaptive_thresholding(
+    series,
+    tf_cfg
+):
+    num_candles = tf_cfg.adaptive_history_candles
+    label_window = tf_cfg.label_window_candles
+
+    if len(series) < num_candles:
         return np.nan, np.nan
-    sorted_vals = df.tail(num_candles).sort_values(ascending=False)
-    frequency = max(1, int(num_candles / label_window))
-    maxima_sort_threshold = sorted_vals.iloc[:frequency].mean()
-    minima_sort_threshold = sorted_vals.iloc[-frequency:].mean()
-    return maxima_sort_threshold, minima_sort_threshold
+
+    sorted_vals = series.tail(num_candles).sort_values(ascending=False)
+    freq = max(1, int(num_candles / label_window))
+
+    return (
+        sorted_vals.iloc[:freq].mean(),
+        sorted_vals.iloc[-freq:].mean()
+    )
 
 def get_param_row(param_list, idx):
     # Case 1: param_list is a single dict → treat as list of one
@@ -110,9 +122,9 @@ def simulate_trades_core(
     df,
     df_hist,
     signal_col,
-    close_col='close',
-    timeframe_minutes=1,
-    param_list=None,
+    tf_cfg,
+    param_list,
+    close_col="close",
 ):
     """
     Simulate trades on the DataFrame with adaptive thresholds.
@@ -121,6 +133,7 @@ def simulate_trades_core(
 
     params can be a dict, list of dicts, or pandas Series of dicts.
     """
+    timeframe_minutes = tf_cfg.minutes
     df_iter = df.copy()
     wallet = 1.0
     wallet_history = []
@@ -142,15 +155,16 @@ def simulate_trades_core(
         signal_value = row[signal_col]
 
         # Adaptive thresholds
-        hist_for_thresholds = adaptive_source + pred_hist[-PREDICT_WITH_SIGNAL_NUM_CANDLES:]
+        hist_len = tf_cfg.adaptive_history_candles
+        hist_for_thresholds = adaptive_source + pred_hist[-hist_len:]
         hist_for_thresholds.append(signal_value)
 
-        if len(hist_for_thresholds) < PREDICT_WITH_SIGNAL_NUM_CANDLES:
+        if len(hist_for_thresholds) < hist_len:
             wallet_history.append(wallet)
             pred_hist.append(signal_value)
             continue
 
-        adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds))
+        adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds),tf_cfg)
 
         # Get per-row parameters
         # For labeling we use a single set of params across the whole walkforward optimization window
