@@ -14,32 +14,37 @@ OBJECTIVE_METRIC = "objective_score" # Composite metric better for ML training
 def make_features(df, tf_cfg):
     df = df.copy()
 
+    # Returns and lags
     df['ret1'] = df['close'].pct_change(1)
     for l in [1, 2, 3, 5, 10]:
         df[f'ret_lag_{l}'] = df['ret1'].shift(l)
 
-    for span in tf_cfg.ema_spans:
+    # EMA features for trend detection (include 20 & 100 for detect_regime)
+    ema_spans = set(tf_cfg.ema_spans + [20, 100])
+    for span in ema_spans:
         df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
         df[f'ema_diff_{span}'] = df[f'ema_{span}'] - df['close']
 
+    # ATR and volatility
     df['tr'] = np.maximum(
         df['high'] - df['low'],
         np.abs(df['high'] - df['close'].shift(1)),
         np.abs(df['low'] - df['close'].shift(1)),
     )
-
     df['atr14'] = df['tr'].rolling(14).mean()
     df['vol_12'] = df['ret1'].rolling(12).std()
     df['vol_48'] = df['ret1'].rolling(48).std()
 
-    # Cyclical time encoding (works for all TFs)
+    # Cyclical time encoding
     hours = df.index.hour + df.index.minute / 60
     dows = df.index.dayofweek
-
     df['hour_sin'] = np.sin(2 * np.pi * hours / 24)
     df['hour_cos'] = np.cos(2 * np.pi * hours / 24)
     df['dow_sin'] = np.sin(2 * np.pi * dows / 7)
     df['dow_cos'] = np.cos(2 * np.pi * dows / 7)
+
+    # Precompute regime
+    df['regime'] = df.apply(detect_regime, axis=1)
 
     return df.dropna().round(5)
 
@@ -118,6 +123,21 @@ def get_param_row(param_list, idx):
     
     raise TypeError("param_list must be a dict or list of dicts")
 
+def detect_regime(row) -> str:
+    """
+    Returns: 'trend', 'chop', 'high_vol'
+    """
+    atr = max(row["atr14"], 1e-8)
+
+    trend_strength = abs(row["ema_20"] - row["ema_100"]) / atr
+    vol_ratio = row["vol_12"] / max(row["vol_48"], 1e-8)
+
+    if trend_strength < 0.6:
+        return "chop"
+    if vol_ratio > 1.4:
+        return "high_vol"
+    return "trend"
+
 def simulate_trades_core(
     df,
     df_hist,
@@ -127,11 +147,10 @@ def simulate_trades_core(
     close_col="close",
 ):
     """
-    Simulate trades on the DataFrame with adaptive thresholds.
-
-    If no trades occur, returns default metrics to avoid NaNs for ML pipelines.
-
-    params can be a dict, list of dicts, or pandas Series of dicts.
+    Regime-aware trade simulation with dynamic stake scaling:
+    - trend: full stake
+    - high_vol: reduced stake (e.g., 0.5x)
+    - chop: skip trades (0 stake)
     """
     timeframe_minutes = tf_cfg.minutes
     df_iter = df.copy()
@@ -146,13 +165,22 @@ def simulate_trades_core(
     entry_index = None
     entry_time = None
 
-    # Use historical data for adaptive thresholds if provided
     adaptive_source = df_hist[signal_col].tolist()
     entry_stake = None
-    
+
+    # Regime multipliers
+    regime_stake_mult = {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.0}
+
     for i, (timestamp, row) in enumerate(df_iter.iterrows()):
         price = row[close_col]
         signal_value = row[signal_col]
+        regime = row['regime']
+
+        # Skip trades if zero stake
+        if regime_stake_mult.get(regime, 0.0) == 0.0:
+            wallet_history.append(wallet)
+            pred_hist.append(signal_value)
+            continue
 
         # Adaptive thresholds
         hist_len = tf_cfg.adaptive_history_candles
@@ -164,14 +192,12 @@ def simulate_trades_core(
             pred_hist.append(signal_value)
             continue
 
-        adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds),tf_cfg)
+        adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds), tf_cfg)
 
-        # Get per-row parameters
-        # For labeling we use a single set of params across the whole walkforward optimization window
-        # which is a subset of initial df
+        # Get parameters
         param_row = get_param_row(param_list, i)
-        stake_short = param_row["stake_short_frac"]
-        stake_long = param_row["stake_long_frac"]
+        stake_short = param_row["stake_short_frac"] * regime_stake_mult[regime]
+        stake_long = param_row["stake_long_frac"] * regime_stake_mult[regime]
         stop_loss = param_row["stop_loss_frac"]
         take_profit = param_row["take_profit_frac"]
         max_hold = param_row["max_hold_hours"]
@@ -191,11 +217,12 @@ def simulate_trades_core(
                     'price': price,
                     'type': 'entry',
                     'position': 'long' if position == 1 else 'short',
+                    'regime': regime,
+                    'stake': entry_stake
                 })
 
         # Exit logic
         if position != 0 and entry_index is not None:
-            # Raw performance (unweighted)
             perf_raw = (price / entry_price - 1.0) * position
             elapsed_minutes = (i - entry_index) * max(float(timeframe_minutes), 1.0)
             exit_on_stop = perf_raw <= -stop_loss
@@ -203,9 +230,7 @@ def simulate_trades_core(
             exit_on_time = elapsed_minutes >= max_hold * 60
 
             if exit_on_stop or exit_on_take or exit_on_time:
-                # Realized return considering stake
                 perf = perf_raw * entry_stake
-                # Update wallet using realized return
                 wallet *= (1.0 + perf)
                 exit_reason = 'stop_loss' if exit_on_stop else ('take_profit' if exit_on_take else 'max_hold')
                 trades.append({
@@ -218,6 +243,7 @@ def simulate_trades_core(
                     'exit_price': price,
                     'stake_frac': entry_stake,
                     'exit_reason': exit_reason,
+                    'regime': regime
                 })
                 trade_markers.append({
                     'timestamp': timestamp,
@@ -226,6 +252,7 @@ def simulate_trades_core(
                     'position': 'long' if position == 1 else 'short',
                     'profit': perf > 0,
                     'reason': exit_reason,
+                    'regime': regime
                 })
 
                 position = 0
@@ -237,7 +264,7 @@ def simulate_trades_core(
         wallet_history.append(wallet)
         pred_hist.append(signal_value)
 
-    # Close final open position
+    # Close final position
     if position != 0 and entry_index is not None:
         final_price = df_iter[close_col].iloc[-1]
         final_timestamp = df_iter.index[-1]
@@ -254,6 +281,7 @@ def simulate_trades_core(
             'exit_price': final_price,
             'stake_frac': entry_stake,
             'exit_reason': 'final_close',
+            'regime': regime
         })
         trade_markers.append({
             'timestamp': final_timestamp,
@@ -262,10 +290,10 @@ def simulate_trades_core(
             'position': 'long' if position == 1 else 'short',
             'profit': perf > 0,
             'reason': 'final_close',
+            'regime': regime
         })
         wallet_history[-1] = wallet
 
-    # Build result DataFrame
     df_result = df_iter.copy()
     df_result['wallet'] = np.round(wallet_history, 5)
     df_result.attrs['trades'] = trades

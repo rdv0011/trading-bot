@@ -26,7 +26,7 @@ SYMBOL = 'BTC/USDT'
 WHOLE_WINDOW_DAYS = 45  # total days to fetch (train + test)
 TRAINING_FRACTION = 0.8  # fraction used for training after labeling
 WHOLE_WINDOW_MILLISECONDS = WHOLE_WINDOW_DAYS * 24 * 60 * 60 * 1000
-TF_NAME = "5m"  # switch here only the timeframe for labeling and model training
+TF_NAME = "15m"  # switch here only the timeframe for labeling and model training
 tf_cfg = TIMEFRAMES[TF_NAME]
 
 SAVE_FINAL_MODEL = True # Models are saved to models/ directory
@@ -466,23 +466,51 @@ def run_simulation_from_predicted_dfs(
 
     return df_result, metrics
 
-def build_param_grid_with_relation(
-        stake_values_short, 
-        stake_values_long,
-        stop_losses, 
-        max_hold_hours
-        ):
+def build_param_grid(
+        stake_short, 
+        stake_long,
+        stop_loss, 
+        max_hold_hours,
+        take_profit_mult=2.0
+    ):
     """
-    Build all combinations of stake_short_frac, stake_long_frac, stop_loss_frac, max_hold_hours,
-    with the relation take_profit_frac = 2 * stop_loss_frac.
+    Build a baseline parameter set for optimization.
+    Regime adaptation is applied dynamically during simulation, so no need to duplicate params per regime.
+
+    Parameters
+    ----------
+    stake_short : float or list
+        Baseline short stake(s)
+    stake_long : float or list
+        Baseline long stake(s)
+    stop_loss : float or list
+        Stop loss fraction(s)
+    max_hold_hours : float or list
+        Max holding time(s)
+    take_profit_mult : float
+        Take profit multiplier relative to stop loss
+
+    Returns
+    -------
+    list of dicts: baseline param combinations
     """
+    # Ensure lists for product()
+    if not isinstance(stake_short, (list, tuple)):
+        stake_short = [stake_short]
+    if not isinstance(stake_long, (list, tuple)):
+        stake_long = [stake_long]
+    if not isinstance(stop_loss, (list, tuple)):
+        stop_loss = [stop_loss]
+    if not isinstance(max_hold_hours, (list, tuple)):
+        max_hold_hours = [max_hold_hours]
+
     grid = []
-    for svs, svl, sl, mh in product(stake_values_short, stake_values_long, stop_losses, max_hold_hours):
+    for svs, svl, sl, mh in product(stake_short, stake_long, stop_loss, max_hold_hours):
         grid.append({
             'stake_short_frac': float(svs),
             'stake_long_frac': float(svl),
             'stop_loss_frac': float(sl),
-            'take_profit_frac': float(2 * sl),
+            'take_profit_frac': float(sl * take_profit_mult),
             'max_hold_hours': float(mh)
         })
     return grid
@@ -553,22 +581,19 @@ if __name__ == "__main__":
         # Short risk is asymmetric: downside limited, upside unlimited; keep smaller size
         stake_values_short = [0.05, 0.10, 0.15]
         stop_loss_values = [
-            0.0025,
-            0.005,
-            0.01,
-            0.015,
-            0.02,
             0.03,
             0.05,
             0.075,
             0.10
         ]
-        max_hold_values = [1, 2, 4, 8, 16, 24]
-        param_grid = build_param_grid_with_relation(
-            stake_values_short=stake_values_short,
-            stake_values_long=stake_values_long,
-            stop_losses=stop_loss_values,
-            max_hold_hours=max_hold_values
+        max_hold_values = [1, 2, 4, 8]
+        
+        param_grid = build_param_grid(
+            stake_short=stake_values_short,
+            stake_long=stake_values_long,
+            stop_loss=stop_loss_values,
+            max_hold_hours=max_hold_values,
+            take_profit_mult=2.0
         )
 
         summary_df, all_labels, all_results, best_hours, best_labels = label_and_evaluate_intervals(
