@@ -8,7 +8,7 @@ from catboost import CatBoostRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
-from xgcatboostcore import predict_param_dicts_from_model, resolve_model_class
+from xgcatboostcore import predict_param_dicts_from_model, resolve_model_class, time_to_candles
 from xgcatboostcore import get_features, simulate_trades_core, create_model, build_feature_dataset
 from xgcatboostcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
 from xgcatboostcore import OBJECTIVE_METRIC
@@ -18,7 +18,7 @@ from itertools import product
 import ast
 import os
 from typing import Tuple
-from timeframe_config import TIMEFRAMES
+from timeframe_config import TIMEFRAMES, TimeframeConfig
 
 warnings.filterwarnings("ignore")
 
@@ -27,51 +27,70 @@ WHOLE_WINDOW_DAYS = 45  # total days to fetch (train + test)
 TRAINING_FRACTION = 0.8  # fraction used for training after labeling
 WHOLE_WINDOW_MILLISECONDS = WHOLE_WINDOW_DAYS * 24 * 60 * 60 * 1000
 TF_NAME = "15m"  # switch here only the timeframe for labeling and model training
-tf_cfg = TIMEFRAMES[TF_NAME]
 
-SAVE_FINAL_MODEL = True # Models are saved to models/ directory
 # Metaparameters as constants
 HISTORICAL_PRICES_LENGTH = 500
 HISTORICAL_PRICES_LIMIT = 1000
-WALKFORWARD_EVAL_HORIZON = 288  # how many candles ahead to simulate strategy performance
-#OBJECTIVE_METRIC = 'sharpe_ratio_hourly'  # Smooth risk-adjusted equity curve
-#OBJECTIVE_METRIC = 'profit_factor'  # Balance of risk and reward
-#OBJECTIVE_METRIC = 'sortino_ratio_hourly'  # Focus on avoiding downside volatility
+
+# ==================================================================================
+# Configuration
+# ==================================================================================
+
+LOAD_HISTORICAL_DATA_FROM_CSV = True
+USE_SAVED_ROLLING_PREDICTIONS = True
+USE_SAVED_LABELED_DATA = True
+USE_SAVED_TRAINED_MODEL = True
+MODEL_TYPE = 'cat'
 
 def walkforward_label_forward_windows(
-    df,
-    param_grid,
-    signal_col,
-    window_size: int,
-    timeframe_minutes: int,
-    step: int
-):
+    df: pd.DataFrame,
+    param_grid: list,
+    signal_col: str,
+    window_hours: float,
+    step_hours: float,
+    tf_cfg: TimeframeConfig,
+) -> pd.DataFrame:
     """
     Walk-forward parameter selection using trading simulation.
 
-    Keeps four rolling indices:
-        hist_start, hist_end  → df_hist slice
-        live_start, live_end  → df_live slice
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Full dataset with features and signals.
+    param_grid : list of dict
+        Candidate parameter sets for trading simulation.
+    signal_col : str
+        Column name containing predicted signal values.
+    window_hours : float
+        Horizon for each walk-forward evaluation window (in hours).
+    timeframe_minutes : int
+        Minutes per candle.
+    step_hours : float | None
+        Step to advance the window (in hours). If None, defaults to window_hours / 10.
 
-    The window advances by `step`.
+    Returns
+    -------
+    pd.DataFrame
+        DataFrame of best parameters per window, indexed by date.
     """
+
+    # Convert hours → candles
+    candles_per_hour = time_to_candles(hours=1, timeframe_minutes=tf_cfg.minutes)
+    window_size = int(window_hours * candles_per_hour)
+    step = int(step_hours * candles_per_hour) if step_hours is not None else max(1, window_size // 10)
+
     labels = []
 
     prev_best_param = param_grid[0]
     prev_best_idx = 0
     prev_best_metric = -np.inf
 
-    # ---- INITIAL INDICES ----
     live_start = tf_cfg.adaptive_history_candles   # start of df_live portion
-    live_end = live_start + window_size            # first test window
+    live_end = live_start + window_size
 
     total_steps = ((len(df) - live_end) // step) + 1
 
-    for _ in tqdm(
-        range(total_steps),
-        desc="Walkforward optimization"
-    ):
-        # Slice dynamically without recreating df_hist/df_live
+    for _ in tqdm(range(total_steps), desc="Walkforward optimization"):
         df_hist = df.iloc[:live_start]
         df_test = df.iloc[live_start:live_end]
 
@@ -79,9 +98,8 @@ def walkforward_label_forward_windows(
         best_param = None
         best_param_idx = None
 
-        # --- Evaluate all parameter sets ---
+        # Evaluate all parameter sets
         for idx, params in enumerate(param_grid):
-
             _, metrics = simulate_trades_core(
                 df=df_test,
                 df_hist=df_hist,
@@ -90,10 +108,7 @@ def walkforward_label_forward_windows(
                 param_list=params,
                 close_col='close',
             )
-
             metric_value = metrics.get(OBJECTIVE_METRIC, np.nan)
-
-            # Select best
             if metric_value > best_metric:
                 best_metric = metric_value
                 best_param = params
@@ -105,12 +120,11 @@ def walkforward_label_forward_windows(
             best_param_idx = prev_best_idx
             best_metric = prev_best_metric
 
-        # Store previous best
+        # Save previous best
         prev_best_param = best_param
         prev_best_idx = best_param_idx
         prev_best_metric = best_metric
 
-        # Save result
         labels.append({
             "date": df.index[live_end - 1],
             "best_param_idx": best_param_idx,
@@ -118,14 +132,11 @@ def walkforward_label_forward_windows(
             "best_metric": round(best_metric, 5),
         })
 
-        live_start += step                      # shift live window
+        live_start += step
         live_end = live_start + window_size
-
-        # Stop if we exceed df
         if live_end > len(df):
             break
 
-    # --- Create final labels dataframe ---
     labels_df = pd.DataFrame(labels)
     labels_df["date"] = pd.to_datetime(labels_df["date"])
     labels_df = labels_df.set_index("date").sort_index()
@@ -171,7 +182,7 @@ def rolling_train_predict_multi(
     model_cls = resolve_model_class(model_type)
     preds = []
     mdl = None
-    retrain_every = 1  # Retrain every N candles for speed
+    retrain_every = 12  # Retrain every N candles for speed
 
     # Train model on rolling window
     for i in tqdm(range(w, n), desc=f"Labeling with predictions {model_type.upper()}", unit="candle"):
@@ -205,8 +216,8 @@ def label_and_evaluate_intervals(
     model_type,
     param_grid,
     intervals_hours,
-    timeframe_minutes=5,
-    signal_col=SIGNAL_COLUMN,
+    signal_col,
+    tf_cfg: TimeframeConfig,
 ):
     """
     Label the dataset for a single model and evaluate trading performance
@@ -220,26 +231,25 @@ def label_and_evaluate_intervals(
         best_labels: labels df for best interval (date-indexed)
     """
 
-    candles_per_hour = int(round(60.0 / float(timeframe_minutes)))
     summary_rows = []
     all_labels = {}
     all_results = {}
 
     for hours in sorted(set(intervals_hours)):
 
-        window_size = int(hours * candles_per_hour)
-        step = window_size // 10
-        
-        print(f"\n--- Labeling for {hours}h horizon ({window_size} candles), step={step} ---")
+        window_hours = hours
+        step_hours = window_hours / 10  # walk-forward step in hours
+
+        print(f"\n--- Labeling for {hours}h horizon (window_hours={window_hours}, step_hours={step_hours}) ---")
 
         # --- Create labels df (date-index from the beginning) ---
         labels_df = walkforward_label_forward_windows(
             df=df,
             param_grid=param_grid,
             signal_col=signal_col,
-            window_size=window_size,
-            timeframe_minutes=timeframe_minutes,
-            step=step,
+            window_hours=window_hours,
+            step_hours=step_hours,
+            tf_cfg=tf_cfg,
         )
 
         all_labels[hours] = labels_df
@@ -281,7 +291,6 @@ def label_and_evaluate_intervals(
         # Build summary row
         row = {
             'interval_hours': hours,
-            'horizon_candles': window_size,
             f"{model_type}_objective": round(metrics_dyn.get(OBJECTIVE_METRIC, np.nan), 5),
             f"{model_type}_final_wallet": round(metrics_dyn.get('final_wallet', np.nan), 5),
             f"{model_type}_num_trades": metrics_dyn.get('trades_count', 0),
@@ -427,9 +436,10 @@ def run_simulation_from_predicted_dfs(
     predicted_dfs: pd.DataFrame,
     model,
     metadata,
-    model_type: str = "cat",
-    signal_col: str = SIGNAL_COLUMN,
-    close_col: str = "close",
+    model_type: str,
+    signal_col: str,
+    close_col: str,
+    tf_cfg: TimeframeConfig,
 ) -> Tuple[pd.DataFrame, dict]:
 
     df_hist = predicted_dfs[:tf_cfg.adaptive_history_candles].copy()
@@ -515,21 +525,86 @@ def build_param_grid(
         })
     return grid
 
-# ==================================================================================
-# Configuration
-# ==================================================================================
+import pandas as pd
 
-LOAD_HISTORICAL_DATA_FROM_CSV = False
-USE_SAVED_ROLLING_PREDICTIONS = False
-USE_SAVED_LABELED_DATA = False
-USE_SAVED_TRAINED_MODEL = False
-MODEL_TYPE = 'cat'
+def prepare_simulation_df_for_day(
+    df: pd.DataFrame,
+    trade_date,
+    *,
+    tf_cfg,
+    date_col: str | None = None,
+) -> pd.DataFrame:
+    """
+    Prepare a dataframe for single-day trading simulation.
+
+    The returned dataframe contains:
+    - adaptive history candles BEFORE the trade date
+    - all candles ON the trade date
+
+    History rows come first so downstream simulation logic
+    can safely split by adaptive_history_candles.
+
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Predicted dataframe (must be datetime-indexed or contain date_col)
+    trade_date : str | datetime.date | pd.Timestamp
+        Day to simulate (e.g. "2025-12-15")
+    tf_cfg : object
+        Timeframe config with adaptive_history_candles
+    date_col : str | None
+        Optional column name if datetime is not the index
+
+    Returns
+    -------
+    pd.DataFrame
+        Combined dataframe ready for simulation
+
+    Raises
+    ------
+    ValueError
+        If no data for trade date or insufficient history
+    """
+
+    # Normalize trade_date to date
+    trade_date = pd.Timestamp(trade_date).date()
+
+    # Extract datetime series
+    if date_col:
+        dt = pd.to_datetime(df[date_col])
+    else:
+        if not isinstance(df.index, pd.DatetimeIndex):
+            raise TypeError("DataFrame index must be DatetimeIndex or date_col must be provided")
+        dt = df.index
+
+    # --- Live day ---
+    df_day = df.loc[dt.date == trade_date].copy()
+    if df_day.empty:
+        raise ValueError(f"No data found for trade date {trade_date}")
+
+    # --- History ---
+    df_hist = df.loc[
+        dt < df_day.index.min()
+    ].tail(tf_cfg.adaptive_history_candles)
+
+    if len(df_hist) < tf_cfg.adaptive_history_candles:
+        raise ValueError(
+            f"Insufficient history: "
+            f"{len(df_hist)} < {tf_cfg.adaptive_history_candles}"
+        )
+
+    # --- Combine ---
+    df_sim_input = pd.concat([df_hist, df_day]).sort_index()
+
+    return df_sim_input
+
 
 # ==================================================================================
 # Main script
 # ==================================================================================
 if __name__ == "__main__":
 
+    tf_cfg = TIMEFRAMES[TF_NAME]
     # Load or fetch full historical data
     featured_filename = "df_featured.csv"
     df_full = None
@@ -581,12 +656,15 @@ if __name__ == "__main__":
         # Short risk is asymmetric: downside limited, upside unlimited; keep smaller size
         stake_values_short = [0.05, 0.10, 0.15]
         stop_loss_values = [
+            0.01,
+            0.015,
+            0.02,
             0.03,
             0.05,
             0.075,
             0.10
         ]
-        max_hold_values = [1, 2, 4, 8]
+        max_hold_values = [1, 2, 4, 8, 12, 24]
         
         param_grid = build_param_grid(
             stake_short=stake_values_short,
@@ -601,7 +679,8 @@ if __name__ == "__main__":
             model_type=MODEL_TYPE,
             param_grid=param_grid,
             intervals_hours=(24,),
-            timeframe_minutes=tf_cfg.minutes,
+            signal_col=SIGNAL_COLUMN,
+            tf_cfg=tf_cfg,
         )
 
         summary_filename = f"{MODEL_TYPE}_best_params_label_summary_full.csv"
@@ -651,6 +730,12 @@ if __name__ == "__main__":
         except Exception as e:
             print(f"Warning: failed to save model: {e}")
 
+    df_sim_input = prepare_simulation_df_for_day(
+        df=df_test,
+        trade_date="2025-12-15",
+        tf_cfg=tf_cfg,
+    )
+
     # Predict meta-parameters on TEST set and simulate trading on TEST only ---
     df_result_test, metrics_test = run_simulation_from_predicted_dfs(
         predicted_dfs=df_test,
@@ -659,6 +744,7 @@ if __name__ == "__main__":
         model_type=MODEL_TYPE,
         signal_col=SIGNAL_COLUMN,
         close_col="close",
+        tf_cfg=tf_cfg,
     )
 
     print("=== Final TEST set simulation metrics ===")

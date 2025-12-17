@@ -2,11 +2,29 @@ from typing import Optional
 import numpy as np
 import pandas as pd
 import inspect
+import math
 
 TARGET_COLUMN = 'future_ret'
 SIGNAL_COLUMN = 'pred'
 SEED_BASE = 42
 OBJECTIVE_METRIC = "objective_score" # Composite metric better for ML training
+
+def time_to_candles(
+    *,
+    minutes: float | None = None,
+    hours: float | None = None,
+    timeframe_minutes: int,
+    min_candles: int = 1,
+) -> int:
+    if minutes is None and hours is None:
+        raise ValueError("Provide minutes or hours")
+
+    total_minutes = minutes if minutes is not None else hours * 60
+
+    return max(
+        min_candles,
+        int(math.ceil(total_minutes / timeframe_minutes))
+    )
 
 # =============================================
 # Feature engineering
@@ -20,7 +38,7 @@ def make_features(df, tf_cfg):
         df[f'ret_lag_{l}'] = df['ret1'].shift(l)
 
     # EMA features for trend detection (include 20 & 100 for detect_regime)
-    ema_spans = set(tf_cfg.ema_spans + [20, 100])
+    ema_spans = set(tf_cfg.ema_spans + (20, 100))
     for span in ema_spans:
         df[f'ema_{span}'] = df['close'].ewm(span=span, adjust=False).mean()
         df[f'ema_diff_{span}'] = df[f'ema_{span}'] - df['close']
@@ -76,16 +94,11 @@ def build_feature_dataset(df_raw, tf_cfg):
 
 def get_features(df):
     """
-    Returns list of columns to use as features for ML models.
-    Excludes target columns 'future_close' and 'future_ret'.
-
-    Args:
-        df: pd.DataFrame
-
-    Returns:
-        list of feature column names
+    Returns list of numeric columns to use as features for ML models.
+    Excludes target columns 'future_close', 'future_ret', and categorical 'regime'.
     """
-    return [c for c in df.columns if c not in ['future_close','future_ret']]
+    exclude = ['future_close', 'future_ret', 'regime']
+    return [c for c in df.columns if c not in exclude and np.issubdtype(df[c].dtype, np.number)]
 
 # =============================================
 # Adaptive training loop
