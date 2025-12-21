@@ -1,10 +1,10 @@
 from basestrategy import BaseStrategy
 import time
 from mlio import MODEL_DIR
-from tradingmodelpredictor import TradingModelPredictor
-from xgcatboostcore import MAX_HISTORY_SIZE, PREDICT_WITH_SIGNAL_LABEL_WINDOW, PREDICT_WITH_SIGNAL_NUM_CANDLES
-from xgcatboostcore import TARGET_COLUMN, NUMBER_OF_CANDLES_AHEAD, MIN_CANDLES_FOR_FEATURES
-from xgcatboostcore import get_features, make_features, make_labels
+from timeframe_config import TIMEFRAMES
+from mlpredictor import MlPredictor
+from mltrainingcore import TARGET_COLUMN
+from mltrainingcore import get_features, make_features, make_labels
 
 MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
 TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
@@ -23,11 +23,40 @@ class XGCatBoostStrategy(BaseStrategy):
     def initialize(self):
         # Trading parameters
         self.asset = self.parameters.get("asset_symbol", "BTC")
-        self.historical_prices_length = self.parameters.get("historical_prices_length", 500)
+        
         self.historical_prices_unit = self.parameters.get("historical_prices_unit", "5m")
-        self.predict_with_signal_num_candles = self.parameters.get("predict_with_signal_num_candles", PREDICT_WITH_SIGNAL_NUM_CANDLES)
-        self.predict_with_signal_label_window = self.parameters.get("predict_with_signal_label_window", PREDICT_WITH_SIGNAL_LABEL_WINDOW)
-        self.max_history_size = self.parameters.get("max_history_size", MAX_HISTORY_SIZE)
+        self.tf_cfg = TIMEFRAMES[self.historical_prices_unit]
+
+        # Historical candles for fetching data (can be larger than adaptive history)
+        self.historical_prices_length = self.parameters.get(
+            "historical_prices_length",
+            min(500, self.tf_cfg.max_history_candles)  # fallback capped by max history
+        )
+
+        # Adaptive thresholds & prediction windows
+        self.max_history_size = self.parameters.get(
+            "max_history_size",
+            self.tf_cfg.adaptive_history_candles
+        )
+        self.predict_with_signal_num_candles = self.parameters.get(
+            "predict_with_signal_num_candles",
+            self.tf_cfg.adaptive_history_candles  # number of past predictions to track
+        )
+        self.predict_with_signal_label_window = self.parameters.get(
+            "predict_with_signal_label_window",
+            self.tf_cfg.label_window_candles
+        )
+
+        self.log_message(f"⏱ TimeframeConfig loaded: {self.tf_cfg.name} ({self.tf_cfg.minutes} min candles)")
+        self.log_message(f"  Historical candles: {self.historical_prices_length} @ {self.historical_prices_unit}")
+        self.log_message(
+            f"  Predictor windows | AdaptiveHistory={self.predict_with_signal_num_candles}, "
+            f"LabelWindow={self.predict_with_signal_label_window}, "
+            f"MaxHistory={self.max_history_size}"
+        )
+        self.log_message(f"  Min feature candles: {self.tf_cfg.min_feature_candles}")
+        self.log_message(f"  Label horizon: {self.tf_cfg.label_horizon_candles} candles ({self.tf_cfg.label_horizon_minutes} minutes)")
+        self.log_message(f"  EMA spans (candles): {list(self.tf_cfg.ema_spans)}")
         
         # Position tracking
         self.entry_price = None
@@ -42,9 +71,9 @@ class XGCatBoostStrategy(BaseStrategy):
 
         # Prediction history for adaptive thresholding
         init_length = (
-            MIN_CANDLES_FOR_FEATURES
+            self.tf_cfg.min_feature_candles
             + self.predict_with_signal_num_candles
-            + NUMBER_OF_CANDLES_AHEAD
+            + self.tf_cfg.label_horizon_candles
         )
         self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
         
@@ -56,20 +85,18 @@ class XGCatBoostStrategy(BaseStrategy):
             )
             self.log_message(msg)
             raise MissingHistoricalDataError(msg)
-        df_hist = make_features(df_hist)
-        df_hist = make_labels(df_hist, H=NUMBER_OF_CANDLES_AHEAD)
+        
+        df_hist = make_features(df_hist, tf_cfg=self.tf_cfg)
+        df_hist = make_labels(df_hist, tf_cfg=self.tf_cfg)
         features = get_features(df_hist)
 
-        self.predictor = TradingModelPredictor(
+        self.predictor = MlPredictor(
             model_dir=self.parameters.get("model_dir", MODEL_DIR),
             model_type=self.parameters.get("model_type", "cat"),
             model_params=self.parameters.get("model_params", {'iterations': 500, 'verbose': False}),
-            df_hist = df_hist,
+            df_hist=df_hist,
             features=features,
-            min_candles_for_features=MIN_CANDLES_FOR_FEATURES,
-            num_candles=self.predict_with_signal_num_candles,
-            label_window=self.predict_with_signal_label_window,
-            max_history_size=self.max_history_size,
+            tf_cfg=self.tf_cfg,
             target_col=TARGET_COLUMN,
         )
 
@@ -80,166 +107,252 @@ class XGCatBoostStrategy(BaseStrategy):
             pretty_key = key.replace("_", " ").title()
             self.log_message(f"   {pretty_key}: {value}")
 
+        self.trade_log = []
+
     def on_trading_iteration(self):
-        # Get historical data (need at least 240 candles for features)
-        df = self.get_historical_prices(self.asset, self.historical_prices_length, self.historical_prices_unit)
+        """
+        Live trading iteration with:
+        - Regime-aware stake scaling
+        - Adaptive threshold signals
+        - Time-based exits (max_hold_hours)
+        - Regime-aware stop/take scaling
+        - Trade marker logging
+        """
+
+        # ---------------------------------------------------------
+        # 1️⃣ Fetch historical candles
+        # ---------------------------------------------------------
+        df = self.get_historical_prices(
+            self.asset,
+            self.historical_prices_length,
+            self.historical_prices_unit,
+        )
 
         if df is None or len(df) == 0:
-            self.log_message(
-                f"❌ Skipping iteration: get_historical_prices() returned None or empty "
-                f"for asset={self.asset}, candles={self.historical_prices_length}, interval={self.historical_prices_unit}"
-            )
+            self.log_message("❌ No historical data, skipping iteration")
             return
 
-        # Update dynamic meta parameters from model
+        # ---------------------------------------------------------
+        # 2️⃣ Update meta parameters (stake, SL, TP, max hold)
+        # ---------------------------------------------------------
         try:
-            meta_params = self.predictor.predict_meta_params(df)
-            self.stake_long_frac = meta_params["stake_long_frac"]
-            self.stake_short_frac = meta_params["stake_short_frac"]
-            self.stop_loss_frac = meta_params["stop_loss_frac"]
-            self.take_profit_frac = meta_params["take_profit_frac"]
-            self.max_hold_hours = meta_params["max_hold_hours"]
+            meta = self.predictor.predict_meta_params(df)
+
+            self.stake_long_frac = meta["stake_long_frac"]
+            self.stake_short_frac = meta["stake_short_frac"]
+            self.stop_loss_frac = meta["stop_loss_frac"]
+            self.take_profit_frac = meta["take_profit_frac"]
+            self.max_hold_hours = meta["max_hold_hours"]
 
             self.log_message(
-                f"Updated meta parameters: stake_long_frac={self.stake_long_frac:.3f}, "
-                f"stake_short_frac={self.stake_short_frac:.3f}, "
-                f"stop_loss_frac={self.stop_loss_frac:.3f}, take_profit_frac={self.take_profit_frac:.3f}, "
-                f"max_hold_hours={self.max_hold_hours:.1f}"
+                f"MetaParams | "
+                f"Long={self.stake_long_frac:.3f}, "
+                f"Short={self.stake_short_frac:.3f}, "
+                f"SL={self.stop_loss_frac:.3f}, "
+                f"TP={self.take_profit_frac:.3f}, "
+                f"Hold={self.max_hold_hours:.1f}h"
             )
         except Exception as e:
-            self.log_message(f"⚠️ Failed to update meta parameters, using previous values: {e}")
+            self.log_message(f"⚠️ Meta-param update failed: {e}")
 
-        # Get prediction and signal
-        if len(df) < 240:
-            print(f"Need at least 240 candles, got {len(df)}")
+        # ---------------------------------------------------------
+        # 3️⃣ Feature engineering
+        # ---------------------------------------------------------
+        min_required = self.tf_cfg.min_feature_candles
+        if len(df) < min_required:
+            self.log_message(
+                f"⚠️ Need {min_required} candles, got {len(df)}"
+            )
             return
-    
-        df = make_features(df)
-        df = make_labels(df, H=NUMBER_OF_CANDLES_AHEAD)
+
+        df = make_features(df, tf_cfg=self.tf_cfg)
+        df = make_labels(df, tf_cfg=self.tf_cfg)
         features = get_features(df)
 
-        result = self.predictor.predict_with_signal(
-            df, 
-            features=features,
-        )
-        
-        prediction = result['prediction']
-        signal = result['signal']
-        max_threshold = result['max_threshold']
-        min_threshold = result['min_threshold']
+        # ---------------------------------------------------------
+        # 4️⃣ Predict signal (regime-aware)
+        # ---------------------------------------------------------
+        result = self.predictor.predict_with_signal(df, features, tf_cfg=self.tf_cfg)
 
-        self.log_message(f"Prediction: {prediction:.6f}, Signal: {signal}, Max Threshold: {max_threshold:.6f}, Min Threshold: {min_threshold:.6f}")
-        
-        # Get current position
+        prediction = result["prediction"]
+        signal = result["signal"]
+        regime = result["regime"]
+        stake_mult = result["stake_mult"]
+
+        self.last_regime = regime
+        self.last_stake_mult = stake_mult
+
+        self.log_message(
+            f"Signal | Pred={prediction:.6f} | MinThr={result['min_threshold']:.6f} | MaxThr={result['max_threshold']:.6f} | "
+            f"Signal={signal.upper()} | "
+            f"Regime={regime} | "
+            f"StakeMult={stake_mult:.2f}"
+        )
+
+        # ---------------------------------------------------------
+        # 5️⃣ Skip trading entirely in chop regime
+        # ---------------------------------------------------------
+        if stake_mult == 0.0:
+            self.log_message("⏸ Chop regime detected — trading paused")
+            return
+
+        # ---------------------------------------------------------
+        # 6️⃣ Apply regime scaling (mirrors simulator)
+        # ---------------------------------------------------------
+        stake_long = self.stake_long_frac * stake_mult
+        stake_short = self.stake_short_frac * stake_mult
+
+        scaled_sl, scaled_tp = self._scaled_risk_params(stake_mult)
+
+        # ---------------------------------------------------------
+        # 7️⃣ Current position state
+        # ---------------------------------------------------------
         position = self.get_position(self.asset)
         current_price = self.get_last_price(self.asset)
-
-        # Check if we have a meaningful position
         has_position = position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY
 
-        # Entry logic
+        # ---------------------------------------------------------
+        # 8️⃣ ENTRY LOGIC
+        # ---------------------------------------------------------
         if not has_position and signal != "hold":
-            # Reset entry tracking if position was closed
+            # Clean up stale state
             if self.entry_price is not None:
-                # Close any remaining open orders (e.g., stop/take profit) if position closed externally
                 self.cancel_open_orders(self.asset)
                 self.entry_price = None
                 self.entry_time = None
-            
-            self._enter_position(current_price, signal=signal)
-        # Exit logic
-        elif has_position and self.entry_price is not None:
+
+            # Store scaled params for entry
+            self.stake_long_frac = stake_long
+            self.stake_short_frac = stake_short
+            self.stop_loss_frac = scaled_sl
+            self.take_profit_frac = scaled_tp
+
+            self._enter_position(current_price, signal)
+            return
+
+        # ---------------------------------------------------------
+        # 9️⃣ EXIT LOGIC (time-based, reversal-based)
+        # ---------------------------------------------------------
+        if has_position and self.entry_price is not None:
             self._check_exit_conditions(position, current_price, signal)
 
     def _enter_position(self, current_price: float, signal: str):
-        """
-        Enter long or short position with bracket orders.
-        signal: "long" or "short"
-        """
         signal = signal.lower()
-        if signal not in ["long", "short"]:
-            self.log_message(f"❌ Invalid signal '{signal}', must be 'long' or 'short'")
-            return
 
-        # Determine stake fraction based on signal
         stake_frac = self.stake_long_frac if signal == "long" else self.stake_short_frac
-        # Calculate position size
         cash = self.get_cash()
-        qty = (cash * stake_frac) / current_price
-        qty = round(qty, TRADEABLE_QUANTITY_PRECISION)
+        qty = round((cash * stake_frac) / current_price, TRADEABLE_QUANTITY_PRECISION)
 
         if qty < MIN_TRADEABLE_QUANTITY:
-            self.log_message(f"⚠️ Order quantity {qty:.3f} BTC below minimum {MIN_TRADEABLE_QUANTITY}, skipping")
+            self.log_message("⚠️ Quantity below minimum, skipping entry")
             return
 
-        # Open position with bracket orders
+        sl, tp = self._scaled_risk_params(self.last_stake_mult)
+
         res = self.open_position_with_bracket(
             self.asset,
             signal,
             qty,
-            tp_frac=self.take_profit_frac,
-            sl_frac=self.stop_loss_frac
+            sl_frac=sl,
+            tp_frac=tp,
         )
 
         if not res.success:
-            self.log_message(
-                f"⚠️ {'LONG' if signal == 'long' else 'SHORT'} ENTRY failed: {res.error}"
-            )
+            self.log_message(f"❌ ENTRY FAILED: {res.error}")
             return
 
-        # Extract entry price
-        entry_price = res.data.get("entry_price")
+        self.entry_price = res.data["entry_price"]
+        self.entry_time = self.get_datetime()
 
-        if entry_price is not None and entry_price > 0:
-            self.entry_price = entry_price
-            self.entry_time = self.get_datetime()
-            self.log_message(f"{'🟢 LONG' if signal == 'long' else '🔴 SHORT'} ENTRY {entry_price}, Qty: {qty:.3f}")
-        else:
-            self.log_message(f"⚠️ {'LONG' if signal == 'long' else 'SHORT'} ENTRY failed, no entry_price.")
+        self.trade_log.append({
+            "timestamp": self.entry_time,
+            "type": "entry",
+            "side": signal,
+            "price": self.entry_price,
+            "qty": qty,
+            "regime": self.last_regime,
+            "timeframe": self.tf_cfg.name,
+            "stake_frac": stake_frac,
+            "stop_loss": sl,
+            "take_profit": tp,
+        })
+
+        self.log_message(f"🟢 ENTRY {signal.upper()} @ {self.entry_price}")
         
     def _check_exit_conditions(self, position, current_price: float, signal: str):
-        """Check if position should be exited"""
         is_long = position > 0
-        
-        # Calculate performance
-        if is_long:
-            perf = (current_price / self.entry_price - 1)
-        else:
-            perf = (self.entry_price / current_price - 1)
-        
-        hold_time = (self.get_datetime() - self.entry_time).total_seconds() / 3600  # hours
-        
-        # Exit conditions
-        should_exit = False
-        exit_reason = ""
-        
-        # Check max hold time
-        if hold_time >= self.max_hold_hours:
-            should_exit = True
-            exit_reason = "MAX HOLD TIME"
-        # Check for signal reversal
-        elif is_long and signal == 'short':
-            should_exit = True
-            exit_reason = "SIGNAL REVERSAL (LONG->SHORT)"
-        elif not is_long and signal == 'long':
-            should_exit = True
-            exit_reason = "SIGNAL REVERSAL (SHORT->LONG)"
 
-        if should_exit:
-            self._close_orders_position(position, current_price, exit_reason, perf)
+        # -------------------------------------------------
+        # Performance calculation (direction-aware)
+        # -------------------------------------------------
+        perf = (
+            (current_price / self.entry_price - 1.0)
+            if is_long
+            else (self.entry_price / current_price - 1.0)
+        )
+
+        # -------------------------------------------------
+        # Time-based exit (SIMULATOR-FAITHFUL)
+        # -------------------------------------------------
+        now = self.get_datetime()
+
+        elapsed_minutes = (
+            now - self.entry_time
+        ).total_seconds() / 60.0
+
+        max_hold_minutes = self.max_hold_hours * 60.0
+
+        exit_reason = None
+
+        # 1️⃣ Time-based exit
+        if elapsed_minutes >= max_hold_minutes:
+            exit_reason = "MAX_HOLD_TIME"
+
+        # -------------------------------------------------
+        # Signal reversal exit
+        # -------------------------------------------------
+        elif is_long and signal == "short":
+            exit_reason = "REVERSAL_LONG_TO_SHORT"
+        elif not is_long and signal == "long":
+            exit_reason = "REVERSAL_SHORT_TO_LONG"
+
+        # -------------------------------------------------
+        # Execute exit
+        # -------------------------------------------------
+        if exit_reason:
+            self._close_orders_position(
+                position=position,
+                current_price=current_price,
+                reason=exit_reason,
+                perf=perf,
+            )
         
-    def _close_orders_position(self, position, current_price: float, exit_reason: str, perf: float):
-        """Exit current position"""
-        # Cancel any pending orders
+    def _close_orders_position(self, position, current_price, reason, perf):
         self.cancel_open_orders(self.asset)
-        
-        # Double-check position still exists and is above minimum
+
         if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
             self.broker.close_position(self.asset, position)
-            self.log_message(f"🔵 EXIT ({exit_reason}) at {current_price}, PnL: {perf:.2%}")
-        else:
-            self.log_message(f"✅ Position already closed or too small (possibly by stop/take profit), reason would be: {exit_reason}, PnL: {perf:.2%}")
-        
+
+        exit_time = self.get_datetime()
+
+        self.trade_log.append({
+            "timestamp": exit_time,
+            "type": "exit",
+            "price": current_price,
+            "perf": perf,
+            "reason": reason,
+            "hold_hours": (
+                exit_time - self.entry_time
+            ).total_seconds() / 3600,
+            "regime": self.last_regime,
+            "timeframe": self.tf_cfg.name,
+            "profit": perf > 0,
+        })
+
+        self.log_message(
+            f"🔵 EXIT {reason} @ {current_price} | PnL {perf:.2%}"
+        )
+
         self.entry_price = None
         self.entry_time = None
 
@@ -277,3 +390,20 @@ class XGCatBoostStrategy(BaseStrategy):
             self.log_message(f"❌ Error during abrupt closing: {e}")
             import traceback
             self.log_message(f"Traceback: {traceback.format_exc()}")
+
+    def _scaled_risk_params(self, stake_mult: float):
+        """
+        Regime-aware stop/take scaling.
+        High volatility => tighter exits.
+        """
+        if stake_mult <= 0:
+            return None, None
+
+        sl = self.stop_loss_frac / stake_mult
+        tp = self.take_profit_frac / stake_mult
+
+        # Safety clamp
+        sl = min(sl, 0.10)
+        tp = min(tp, 0.20)
+
+        return sl, tp

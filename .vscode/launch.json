@@ -3,7 +3,7 @@
   "configurations": [
     
 {
-      "name": "Python: Run CatBoost ML strategy",
+      "name": "Python: Run bot",
       "type": "debugpy",
       "request": "launch",
       "justMyCode": false,
@@ -11,11 +11,11 @@
       "console": "integratedTerminal",
       "args": ["--model-type=cat"]
     },{
-      "name": "Python: Train xgboost catboost models",
+      "name": "Python: Train ML models",
       "type": "debugpy",
       "request": "launch",
       "justMyCode": false,
-      "program": "${workspaceFolder}/xgcatboostlabeling.py",
+      "program": "${workspaceFolder}/mltraining.py",
       "console": "integratedTerminal"
     }
   ]

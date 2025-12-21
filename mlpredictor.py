@@ -1,48 +1,26 @@
 from tqdm import tqdm
 from mlio import load_model, get_latest_model_paths
-from xgcatboostcore import SEED_BASE, create_model, adaptive_thresholding
-from xgcatboostcore import resolve_model_class, TARGET_COLUMN, predict_param_dicts_from_model
+from timeframe_config import TimeframeConfig
+from mltrainingcore import SEED_BASE, create_model, adaptive_thresholding
+from mltrainingcore import resolve_model_class, TARGET_COLUMN, predict_param_dicts_from_model
 import pandas as pd
 import numpy as np
 import gc
 
-# =============================================
-# Prediction Helper Functions
-# =============================================
-# =============================================
-# # Example
-# =============================================
-# Load the predictor
-# predictor = TradingModelPredictor(
-#     model_path='models/xgb_model_20251015_234550.pkl',
-#     features_path='models/xgb_features_20251015_234550.pkl'
-# )
-
-# # Fetch fresh data
-# exchange = ccxt.binance()
-# ohlcv = exchange.fetch_ohlcv('BTC/USDT', '5m', limit=500)
-# df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
-# df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-# df = df.set_index('date').sort_index()
-
-# # Predict with signal
-# pred_history = []  # In real usage, maintain this across calls
-# result = predictor.predict_with_signal(df, pred_history)
-
-# print(f"\n🔮 PREDICTION RESULT:")
-# print(f"   Predicted Return: {result['prediction']:.6f}")
-# print(f"   Trading Signal: {result['signal'].upper()}")
-# print(f"   Max Threshold: {result['max_threshold']:.6f}")
-# print(f"   Min Threshold: {result['min_threshold']:.6f}")
-# print(f"   Current BTC Price: ${df['close'].iloc[-1]:,.2f}")
-class TradingModelPredictor:
+class MlPredictor:
     """
     Helper class for loading and using trained models in Lumibot strategies.
     Automatically detects and reloads new models when available.
     """
+
+    REGIME_STAKE_MULT = {
+        "trend": 1.0,
+        "high_vol": 0.5,
+        "chop": 0.0
+    }
     
     def __init__(self, model_dir, model_type, model_params, df_hist, features,
-                 min_candles_for_features, num_candles, label_window, max_history_size, target_col, auto_reload=True):
+                 tf_cfg: TimeframeConfig, target_col, auto_reload=True):
         """
         Initialize predictor with saved model and features.
         
@@ -55,9 +33,9 @@ class TradingModelPredictor:
         self.model_params = model_params
         self.auto_reload = auto_reload
         self.model_dir = model_dir
-        self.max_history_size = max_history_size
-        self.num_candles = num_candles
-        self.label_window = label_window
+        self.max_history_size = tf_cfg.max_history_candles
+        self.num_candles = tf_cfg.adaptive_history_candles
+        self.label_window = tf_cfg.label_window_candles
         self.target_col = target_col
         
         model_path, meta_path = get_latest_model_paths(model_type, self.model_dir)
@@ -71,7 +49,7 @@ class TradingModelPredictor:
         self.metadata = metadata
         self.pred_history = []
 
-        self.make_prediction_history(df_hist, features, min_candles_for_features, max_history_size)
+        self.make_prediction_history(df_hist, features, tf_cfg=tf_cfg)
 
         print(f"✅ Predictor initialized with model: {self.current_model_path}")
     
@@ -120,18 +98,24 @@ class TradingModelPredictor:
         
         return False
     
-    def make_prediction_history(self, df: pd.DataFrame, features: list, min_candles_for_features: int, max_history_size: int):
+    def make_prediction_history(
+        self, 
+        df: pd.DataFrame, 
+        features: list, 
+        tf_cfg: TimeframeConfig
+    ):
         """
         Pre-populate prediction history with historical predictions
-        to enable immediate adaptive thresholding.
-
+        to enable immediate adaptive thresholding using tf_cfg.
+        
         Args:
             df (pd.DataFrame): Historical DataFrame already containing features.
             features (list): List of feature column names corresponding to df.
+            tf_cfg (TimeframeConfig): Timeframe configuration object.
         """
         try:
             n = len(df)
-            window = max(50, min_candles_for_features)
+            window = max(50, tf_cfg.min_feature_candles)
             preds = []
             mdl = None
             retrain_every = 12  # Retrain every N candles for speed
@@ -152,19 +136,23 @@ class TradingModelPredictor:
                 preds.append(p)
 
             # Keep only most recent predictions
-            self.pred_history = preds[-max_history_size:]
+            self.pred_history = preds[-tf_cfg.max_history_candles:]
             print(f"✅ Initialized prediction history with {len(self.pred_history)} predictions")
 
-            # Verify adaptive thresholding will work
-            max_th, min_th = adaptive_thresholding(
-                pd.Series(self.pred_history),
-                num_candles=min(self.num_candles, len(self.pred_history)),
-                label_window=self.label_window
+            # Adaptive thresholding using tf_cfg
+            hist_len = tf_cfg.adaptive_history_candles
+            if len(self.pred_history) < hist_len:
+                print("⚠️ Not enough prediction history for adaptive thresholding")
+                return
+
+            adaptive_max, adaptive_min = adaptive_thresholding(
+                pd.Series(self.pred_history[-hist_len:]),
+                tf_cfg
             )
-            if not np.isnan(max_th):
-                print(f"✅ Adaptive thresholding ready (max: {max_th:.6f}, min: {min_th:.6f})")
+            if not np.isnan(adaptive_max):
+                print(f"✅ Adaptive thresholding ready (max: {adaptive_max:.6f}, min: {adaptive_min:.6f})")
             else:
-                print("⚠️ Adaptive thresholding returned NaN - check parameters")
+                print("⚠️ Adaptive thresholding returned NaN - check tf_cfg and history length")
 
         except Exception as e:
             print(f"⚠️ Failed to initialize prediction history: {e}")
@@ -175,53 +163,44 @@ class TradingModelPredictor:
         self,
         df,
         features,
+        tf_cfg,  # <- TimeframeConfig object
         random_seed=42,
     ):
         """
-        Train a model on the provided historical features and target, then predict
-        the last row and generate a trading signal using adaptive thresholding.
-
-        Args:
-            df (pd.DataFrame): DataFrame containing features and target column.
-            target_col (str): Name of the target column.
-            features (list): List of feature column names.
-            random_seed (int): Random seed for reproducibility.
-            num_candles (int): Number of candles for adaptive thresholding.
-            label_window (int): Window size for adaptive thresholding.
-
-        Returns:
-            dict: {
-                'prediction': float,
-                'signal': str ('long', 'short', 'hold'),
-                'max_threshold': float,
-                'min_threshold': float
-            }
+        Regime-aware prediction & adaptive signal generation
+        using TimeframeConfig-based adaptive thresholding.
         """
 
-        # Prepare features and target
+        # --- Train model ---
         X = df[features]
         y = df[self.target_col]
 
-        # Create model instance
         mdl = create_model(self.model_cls, random_seed, self.model_params)
-
-        # Train the model on historical data
         mdl.fit(X, y)
 
-        # Predict on last row
+        # --- Predict ---
         last_row = X.iloc[[-1]]
         prediction = float(mdl.predict(last_row)[0])
 
-        # Calculate adaptive thresholds
+        # --- Regime ---
+        regime = df.iloc[-1].get("regime", "trend")
+        stake_mult = self.REGIME_STAKE_MULT.get(regime, 0.0)
+
+        # --- Adaptive thresholds using tf_cfg ---
+        hist_len = tf_cfg.adaptive_history_candles
         pred_series = pd.Series(list(self.pred_history) + [prediction])
-        max_th, min_th = adaptive_thresholding(
-            df=pred_series,
-            num_candles=min(self.num_candles, len(self.pred_history)),
-            label_window=self.label_window
+        
+        if len(pred_series) < hist_len:
+            # Not enough history yet
+            max_th, min_th = np.nan, np.nan
+        else:
+            max_th, min_th = adaptive_thresholding(
+                pd.Series(pred_series[-hist_len:]),
+                tf_cfg
             )
 
-        # Generate trading signal
-        if np.isnan(max_th):
+        # --- Signal logic ---
+        if stake_mult == 0.0 or np.isnan(max_th):
             signal = "hold"
         elif prediction > max_th:
             signal = "long"
@@ -230,7 +209,7 @@ class TradingModelPredictor:
         else:
             signal = "hold"
 
-        # Update prediction history
+        # --- Update history ---
         self.pred_history.append(prediction)
         if len(self.pred_history) > self.max_history_size:
             self.pred_history.pop(0)
@@ -238,10 +217,12 @@ class TradingModelPredictor:
         return {
             "prediction": prediction,
             "signal": signal,
+            "regime": regime,
+            "stake_mult": stake_mult,
             "max_threshold": max_th,
-            "min_threshold": min_th
+            "min_threshold": min_th,
         }
-    
+
     def get_model_info(self):
         """
         Get information about the currently loaded model.

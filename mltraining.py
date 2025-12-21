@@ -1,6 +1,7 @@
-# xgcatboostlabeling.py
+# mltraining.py
 # Produces trained XGBoost/CatBoost models and a labeled historical price dataset
 
+from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 import warnings
@@ -8,10 +9,10 @@ from catboost import CatBoostRegressor
 from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
-from xgcatboostcore import predict_param_dicts_from_model, resolve_model_class, time_to_candles
-from xgcatboostcore import get_features, simulate_trades_core, create_model, build_feature_dataset
-from xgcatboostcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
-from xgcatboostcore import OBJECTIVE_METRIC
+from mltrainingcore import predict_param_dicts_from_model, resolve_model_class, time_to_candles
+from mltrainingcore import get_features, simulate_trades_core, create_model, build_feature_dataset
+from mltrainingcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
+from mltrainingcore import OBJECTIVE_METRIC
 from mlio import LABEL_DIR, download_historical_prices, load_featured_df, load_labels
 from mlio import load_model, save_model, save_featured_df, save_labels, get_latest_model_paths
 from itertools import product
@@ -19,24 +20,21 @@ import ast
 import os
 from typing import Tuple
 from timeframe_config import TIMEFRAMES, TimeframeConfig
+from binance.client import Client
 
 warnings.filterwarnings("ignore")
 
-SYMBOL = 'BTC/USDT'
+SYMBOL = 'BTCUSDT'
 WHOLE_WINDOW_DAYS = 45  # total days to fetch (train + test)
 TRAINING_FRACTION = 0.8  # fraction used for training after labeling
 WHOLE_WINDOW_MILLISECONDS = WHOLE_WINDOW_DAYS * 24 * 60 * 60 * 1000
 TF_NAME = "15m"  # switch here only the timeframe for labeling and model training
 
-# Metaparameters as constants
-HISTORICAL_PRICES_LENGTH = 500
-HISTORICAL_PRICES_LIMIT = 1000
-
 # ==================================================================================
 # Configuration
 # ==================================================================================
 
-LOAD_HISTORICAL_DATA_FROM_CSV = True
+LOAD_HISTORICAL_DATA_FROM_CSV = False
 USE_SAVED_ROLLING_PREDICTIONS = True
 USE_SAVED_LABELED_DATA = True
 USE_SAVED_TRAINED_MODEL = True
@@ -602,6 +600,9 @@ def prepare_simulation_df_for_day(
 # ==================================================================================
 # Main script
 # ==================================================================================
+
+load_dotenv()
+
 if __name__ == "__main__":
 
     tf_cfg = TIMEFRAMES[TF_NAME]
@@ -612,11 +613,14 @@ if __name__ == "__main__":
         df_full = load_featured_df(featured_filename)
 
     if df_full is None:
+        api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
+        api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+        client = Client(api_key, api_secret, testnet=True)
         df_raw = download_historical_prices(
             SYMBOL,
-            tf_cfg.name,
-            HISTORICAL_PRICES_LIMIT,
-            WHOLE_WINDOW_MILLISECONDS
+            tf_cfg.binance_interval,
+            WHOLE_WINDOW_DAYS,
+            client=client
         )
 
         df_full = build_feature_dataset(df_raw, tf_cfg)

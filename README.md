@@ -45,7 +45,7 @@ Run training:
 The training script fill remove the oldets models to keep two model versions only to use a minimum file system storage.
 > **_NOTE:_** The traning step shuold be repeated on a daily basic. To do this the crone job can be created to execute run traning script. Run . ```conda env list``` and copy the path ```/Users/<user_name>/miniconda3/envs/tradingbot```. Run the following ```crontab -e``` and put the following line:
 ```shell
-0 2 * * * /bin/bash -i -c "source /Users/<user_name>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<user_name>/Development/trading-bot/xgcatboost.py >> /Users/<user_name>/Development/trading-bot/xgcatboost.log 2>&1"
+0 2 * * * /bin/bash -i -c "source /Users/<user_name>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<user_name>/Development/trading-bot/mltraining.py >> /Users/<user_name>/Development/trading-bot/mltraining.log 2>&1"
 ```
 Make sure that ```/Users/<user_name>/Development/trading-bot/``` points to the cloned bot repo
 

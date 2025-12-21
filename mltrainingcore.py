@@ -4,6 +4,8 @@ import pandas as pd
 import inspect
 import math
 
+from timeframe_config import TimeframeConfig
+
 TARGET_COLUMN = 'future_ret'
 SIGNAL_COLUMN = 'pred'
 SEED_BASE = 42
@@ -105,7 +107,7 @@ def get_features(df):
 # =============================================
 def adaptive_thresholding(
     series,
-    tf_cfg
+    tf_cfg: TimeframeConfig,
 ):
     num_candles = tf_cfg.adaptive_history_candles
     label_window = tf_cfg.label_window_candles
@@ -155,7 +157,7 @@ def simulate_trades_core(
     df,
     df_hist,
     signal_col,
-    tf_cfg,
+    tf_cfg: TimeframeConfig,
     param_list,
     close_col="close",
 ):

@@ -3,10 +3,8 @@ import pandas as pd
 import os
 import sys
 import os, json
-import time
 from datetime import datetime
 import joblib, glob
-import ccxt
 
 # =============================================
 # IO directories configuration
@@ -134,33 +132,58 @@ def save_featured_df(df, filename):
     df.to_csv(path, index=True)
     print(f"✅ Saved {len(df)} candles to {path}")
 
-def download_historical_prices(symbol, timeframe, limit, window_ms):
-    exchange = ccxt.binance()
-    since = exchange.milliseconds() - window_ms
+def download_historical_prices(
+    symbol: str,
+    interval: str,
+    lookback_days: int,
+    client
+):
+    """
+    symbol: 'BTCUSDT'
+    interval: Client.KLINE_INTERVAL_15MINUTE
+    lookback_days: int
+    """
 
-    print("Fetching data from Binance...")
-    all_ohlcv = []
+    start_str = f"{lookback_days} days ago UTC"
 
-    while True:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe=timeframe, since=since, limit=limit)
-        if not ohlcv:
-            break
+    print(f"📥 Fetching OHLCV from Binance ({symbol}, {interval})...")
 
-        all_ohlcv.extend(ohlcv)
-        since = ohlcv[-1][0] + (5 * 60 * 1000)
-        print(f"Fetched {len(all_ohlcv)} candles so far...")
-
-        time.sleep(exchange.rateLimit / 1000)
-
-    df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
-    df['date'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-    df = (
-        df.drop_duplicates('date')
-          .set_index('date')
-          .sort_index()
+    klines = client.get_historical_klines(
+        symbol=symbol,
+        interval=interval,
+        start_str=start_str,
     )
 
+    if not klines:
+        raise RuntimeError("No OHLCV data returned from Binance")
+
+    df = pd.DataFrame(
+        klines,
+        columns=[
+            "timestamp",
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "close_time",
+            "quote_asset_volume",
+            "num_trades",
+            "taker_buy_base",
+            "taker_buy_quote",
+            "ignore",
+        ],
+    )
+
+    df["date"] = pd.to_datetime(df["timestamp"], unit="ms")
+    df = (
+        df[["date", "open", "high", "low", "close", "volume"]]
+        .set_index("date")
+        .astype(float)
+        .sort_index()
+    )
+
+    print(f"✅ Retrieved {len(df)} candles")
     return df
 
 def save_labels(df, filename):

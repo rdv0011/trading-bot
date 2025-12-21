@@ -1,16 +1,19 @@
 # timeframe_config.py
 
 from dataclasses import dataclass
+from binance.client import Client
+
 
 @dataclass(frozen=True)
 class TimeframeConfig:
     name: str
     minutes: int
+    binance_interval: str
 
     # ===== Time-based intents =====
     label_horizon_minutes: int = 100
     adaptive_history_hours: int = 50
-    label_window_hours: int = 12
+    label_window_hours: float = 16.7
     max_history_hours: int = 50
     min_feature_hours: int = 20
 
@@ -52,10 +55,26 @@ class TimeframeConfig:
         )
 
 
-# Presets
+# ===== Presets =====
 TIMEFRAMES = {
-    "5m":  TimeframeConfig("5m", 5),
-    "15m": TimeframeConfig("15m", 15),
-    "1h":  TimeframeConfig("1h", 60),
-    "4h":  TimeframeConfig("4h", 240),
+    "5m": TimeframeConfig(
+        name="5m",
+        minutes=5,
+        binance_interval=Client.KLINE_INTERVAL_5MINUTE,
+    ),
+    "15m": TimeframeConfig(
+        name="15m",
+        minutes=15,
+        binance_interval=Client.KLINE_INTERVAL_15MINUTE,
+    ),
+    "1h": TimeframeConfig(
+        name="1h",
+        minutes=60,
+        binance_interval=Client.KLINE_INTERVAL_1HOUR,
+    ),
+    "4h": TimeframeConfig(
+        name="4h",
+        minutes=240,
+        binance_interval=Client.KLINE_INTERVAL_4HOUR,
+    ),
 }

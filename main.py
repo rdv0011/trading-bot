@@ -32,15 +32,7 @@ if __name__ == "__main__":
     quote_symbol = "USDT"
     parameters = {
         "asset_symbol" : base_symbol,
-        "stake_frac" : 0.5,
-        "stop_loss_frac" : 0.01,
-        "take_profit_frac" : 0.02,
-        "max_hold_hours" : 24,
-        "max_history_size" : 600,
-        "historical_prices_length" : 500,
         "historical_prices_unit" : "5m",
-        "predict_with_signal_num_candles" : 600, # 600 predictions needed for adaptive thresholding
-        "predict_with_signal_label_window" : 200,
         "model_type": args.model_type,  # or 'cat' for CatBoost
         "auto_reload": True,
         "sleeptime": "5m"  # 5 minutes
