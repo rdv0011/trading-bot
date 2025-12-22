@@ -1,22 +1,21 @@
 {
   "version": "0.2.0",
   "configurations": [
-    
-{
-      "name": "Python: Run bot",
-      "type": "debugpy",
-      "request": "launch",
-      "justMyCode": false,
-      "program": "${workspaceFolder}/main.py",
-      "console": "integratedTerminal",
-      "args": ["--model-type=cat"]
-    },{
-      "name": "Python: Train ML models",
-      "type": "debugpy",
-      "request": "launch",
-      "justMyCode": false,
-      "program": "${workspaceFolder}/mltraining.py",
-      "console": "integratedTerminal"
-    }
+  {
+    "name": "Python: Run bot",
+    "type": "debugpy",
+    "request": "launch",
+    "justMyCode": false,
+    "program": "${workspaceFolder}/main.py",
+    "console": "integratedTerminal",
+    "args": ["--model-type=cat"]
+  },{
+    "name": "Python: Train ML models",
+    "type": "debugpy",
+    "request": "launch",
+    "justMyCode": false,
+    "program": "${workspaceFolder}/mltraining.py",
+    "console": "integratedTerminal"
+  }
   ]
 }

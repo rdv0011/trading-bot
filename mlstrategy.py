@@ -70,13 +70,13 @@ class XGCatBoostStrategy(BaseStrategy):
         self.sleeptime = self.parameters.get("sleeptime", 300)  # 5 minutes to match training data
 
         # Prediction history for adaptive thresholding
-        init_length = (
-            self.tf_cfg.min_feature_candles
-            + self.predict_with_signal_num_candles
-            + self.tf_cfg.label_horizon_candles
+        init_length = self.compute_required_history(self.tf_cfg)
+        self.log_message(
+            f"📊 Fetching {init_length} historical candles "
+            f"(features={self.tf_cfg.min_feature_candles}, "
+            f"adaptive={self.tf_cfg.adaptive_history_candles}, "
+            f"label_window={self.tf_cfg.label_window_candles})"
         )
-        self.log_message(f"📊 Fetching {init_length} historical candles for prediction history...")
-        
         df_hist = self.get_historical_prices(self.asset, init_length, self.historical_prices_unit)
         if df_hist is None or len(df_hist) == 0:
             msg = (
@@ -98,6 +98,7 @@ class XGCatBoostStrategy(BaseStrategy):
             features=features,
             tf_cfg=self.tf_cfg,
             target_col=TARGET_COLUMN,
+            logger=self.log_message,
         )
 
         # Log initial model info
@@ -106,8 +107,6 @@ class XGCatBoostStrategy(BaseStrategy):
         for key, value in model_info.items():
             pretty_key = key.replace("_", " ").title()
             self.log_message(f"   {pretty_key}: {value}")
-
-        self.trade_log = []
 
     def on_trading_iteration(self):
         """
@@ -264,19 +263,6 @@ class XGCatBoostStrategy(BaseStrategy):
         self.entry_price = res.data["entry_price"]
         self.entry_time = self.get_datetime()
 
-        self.trade_log.append({
-            "timestamp": self.entry_time,
-            "type": "entry",
-            "side": signal,
-            "price": self.entry_price,
-            "qty": qty,
-            "regime": self.last_regime,
-            "timeframe": self.tf_cfg.name,
-            "stake_frac": stake_frac,
-            "stop_loss": sl,
-            "take_profit": tp,
-        })
-
         self.log_message(f"🟢 ENTRY {signal.upper()} @ {self.entry_price}")
         
     def _check_exit_conditions(self, position, current_price: float, signal: str):
@@ -328,26 +314,13 @@ class XGCatBoostStrategy(BaseStrategy):
             )
         
     def _close_orders_position(self, position, current_price, reason, perf):
+        
+        self.log_message(f"🔵 Closing orders and position due to: {reason}")
+        
         self.cancel_open_orders(self.asset)
 
         if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
-            self.broker.close_position(self.asset, position)
-
-        exit_time = self.get_datetime()
-
-        self.trade_log.append({
-            "timestamp": exit_time,
-            "type": "exit",
-            "price": current_price,
-            "perf": perf,
-            "reason": reason,
-            "hold_hours": (
-                exit_time - self.entry_time
-            ).total_seconds() / 3600,
-            "regime": self.last_regime,
-            "timeframe": self.tf_cfg.name,
-            "profit": perf > 0,
-        })
+            self.close_position(self.asset, position)
 
         self.log_message(
             f"🔵 EXIT {reason} @ {current_price} | PnL {perf:.2%}"

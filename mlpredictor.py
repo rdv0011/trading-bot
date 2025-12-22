@@ -1,3 +1,4 @@
+from typing import Callable, Optional
 from tqdm import tqdm
 from mlio import load_model, get_latest_model_paths
 from timeframe_config import TimeframeConfig
@@ -20,7 +21,8 @@ class MlPredictor:
     }
     
     def __init__(self, model_dir, model_type, model_params, df_hist, features,
-                 tf_cfg: TimeframeConfig, target_col, auto_reload=True):
+                 tf_cfg: TimeframeConfig, target_col, auto_reload=True,
+                 logger: Optional[Callable[[str], None]] = None,):
         """
         Initialize predictor with saved model and features.
         
@@ -28,6 +30,7 @@ class MlPredictor:
             model_type: 'xgb' or 'cat' - used when auto-detecting models
             auto_reload: Whether to automatically check for and reload new models
         """
+        self.log_message = logger if logger is not None else print
         self.model_type = model_type
         self.model_cls = resolve_model_class(model_type)
         self.model_params = model_params
@@ -39,7 +42,7 @@ class MlPredictor:
         self.target_col = target_col
         
         model_path, meta_path = get_latest_model_paths(model_type, self.model_dir)
-        print(f"🔍 Auto-detected latest {model_type.upper()} model")
+        self.log_message(f"🔍 Auto-detected latest {model_type.upper()} model")
         
         self.current_model_path = model_path
         self.current_meta_path = meta_path
@@ -51,7 +54,7 @@ class MlPredictor:
 
         self.make_prediction_history(df_hist, features, tf_cfg=tf_cfg)
 
-        print(f"✅ Predictor initialized with model: {self.current_model_path}")
+        self.log_message(f"✅ Predictor initialized with model: {self.current_model_path}")
     
     def check_for_new_model(self):
         """
@@ -72,9 +75,9 @@ class MlPredictor:
             if (latest_model_path != self.current_model_path or 
                 latest_meta_path != self.current_meta_path):
                 
-                print(f"\n🔄 New model detected! Reloading...")
-                print(f"   Old model: {self.current_model_path}")
-                print(f"   New model: {latest_model_path}")
+                self.log_message(f"\n🔄 New model detected! Reloading...")
+                self.log_message(f"   Old model: {self.current_model_path}")
+                self.log_message(f"   New model: {latest_model_path}")
                 
                 # Unload old model and clear memory
                 old_model = self.model
@@ -89,11 +92,11 @@ class MlPredictor:
                 self.current_model_path = latest_model_path
                 self.current_meta_path = latest_meta_path
                 
-                print(f"✅ Model reload complete! Now using {len(self.features)} features")
+                self.log_message(f"✅ Model reload complete! Now using {len(self.features)} features")
                 return True
             
         except Exception as e:
-            print(f"⚠️  Error checking for new model: {e}")
+            self.log_message(f"⚠️  Error checking for new model: {e}")
             return False
         
         return False
@@ -137,12 +140,16 @@ class MlPredictor:
 
             # Keep only most recent predictions
             self.pred_history = preds[-tf_cfg.max_history_candles:]
-            print(f"✅ Initialized prediction history with {len(self.pred_history)} predictions")
+            self.log_message(
+                f"🧠 Prediction history initialized: "
+                f"{len(self.pred_history)} / {tf_cfg.adaptive_history_candles} "
+                f"(effective after warmup & label horizon)"
+            )
 
             # Adaptive thresholding using tf_cfg
             hist_len = tf_cfg.adaptive_history_candles
             if len(self.pred_history) < hist_len:
-                print("⚠️ Not enough prediction history for adaptive thresholding")
+                self.log_message("⚠️ Not enough prediction history for adaptive thresholding")
                 return
 
             adaptive_max, adaptive_min = adaptive_thresholding(
@@ -150,20 +157,20 @@ class MlPredictor:
                 tf_cfg
             )
             if not np.isnan(adaptive_max):
-                print(f"✅ Adaptive thresholding ready (max: {adaptive_max:.6f}, min: {adaptive_min:.6f})")
+                self.log_message(f"✅ Adaptive thresholding ready (max: {adaptive_max:.6f}, min: {adaptive_min:.6f})")
             else:
-                print("⚠️ Adaptive thresholding returned NaN - check tf_cfg and history length")
+                self.log_message("⚠️ Adaptive thresholding returned NaN - check tf_cfg and history length")
 
         except Exception as e:
-            print(f"⚠️ Failed to initialize prediction history: {e}")
+            self.log_message(f"⚠️ Failed to initialize prediction history: {e}")
             import traceback
-            print(f"Traceback: {traceback.format_exc()}")
+            self.log_message(f"Traceback: {traceback.format_exc()}")
     
     def predict_with_signal(
         self,
         df,
         features,
-        tf_cfg,  # <- TimeframeConfig object
+        tf_cfg: TimeframeConfig,
         random_seed=42,
     ):
         """
