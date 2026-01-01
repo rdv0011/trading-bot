@@ -35,9 +35,9 @@ TF_NAME = "15m"  # switch here only the timeframe for labeling and model trainin
 # ==================================================================================
 
 LOAD_HISTORICAL_DATA_FROM_CSV = False
-USE_SAVED_ROLLING_PREDICTIONS = True
-USE_SAVED_LABELED_DATA = True
-USE_SAVED_TRAINED_MODEL = True
+USE_SAVED_ROLLING_PREDICTIONS = False
+USE_SAVED_LABELED_DATA = False
+USE_SAVED_TRAINED_MODEL = False
 MODEL_TYPE = 'cat'
 
 def walkforward_label_forward_windows(
