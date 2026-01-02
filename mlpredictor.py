@@ -2,7 +2,7 @@ from typing import Callable, Optional
 from tqdm import tqdm
 from mlio import load_model, get_latest_model_paths
 from timeframe_config import TimeframeConfig
-from mltrainingcore import SEED_BASE, create_model, adaptive_thresholding
+from mltrainingcore import REGIME_COLUMN, SEED_BASE, create_model, adaptive_thresholding
 from mltrainingcore import resolve_model_class, TARGET_COLUMN, predict_param_dicts_from_model
 import pandas as pd
 import numpy as np
@@ -190,7 +190,7 @@ class MlPredictor:
         prediction = float(mdl.predict(last_row)[0])
 
         # --- Regime ---
-        regime = df.iloc[-1].get("regime", "trend")
+        regime = df.iloc[-1].get(REGIME_COLUMN)
         stake_mult = self.REGIME_STAKE_MULT.get(regime, 0.0)
 
         # --- Adaptive thresholds using tf_cfg ---
