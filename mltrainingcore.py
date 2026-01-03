@@ -10,6 +10,7 @@ TARGET_COLUMN = 'future_ret'
 SIGNAL_COLUMN = 'pred'
 SEED_BASE = 42
 OBJECTIVE_METRIC = "objective_score" # Composite metric better for ML training
+REGIME_COLUMN = 'regime'
 
 def time_to_candles(
     *,

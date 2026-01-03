@@ -15,7 +15,7 @@ class MissingHistoricalDataError(Exception):
     """Raised when get_historical_prices() returns None"""
     pass
 
-class XGCatBoostStrategy(BaseStrategy):
+class MLStrategy(BaseStrategy):
     '''
     Machine Learning Trading Strategy using XGBoost/CatBoost
     '''

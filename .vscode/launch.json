@@ -8,7 +8,7 @@
     "justMyCode": false,
     "program": "${workspaceFolder}/main.py",
     "console": "integratedTerminal",
-    "args": ["--model-type=cat"]
+    "args": ["--model-type=cat", "--market-type=futures"]
   },{
     "name": "Python: Train ML models",
     "type": "debugpy",
