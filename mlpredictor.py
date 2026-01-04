@@ -4,6 +4,7 @@ from mlio import load_model, get_latest_model_paths
 from timeframe_config import TimeframeConfig
 from mltrainingcore import REGIME_COLUMN, SEED_BASE, create_model, adaptive_thresholding
 from mltrainingcore import resolve_model_class, TARGET_COLUMN, predict_param_dicts_from_model
+from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT
 import pandas as pd
 import numpy as np
 import gc
@@ -208,13 +209,13 @@ class MlPredictor:
 
         # --- Signal logic ---
         if stake_mult == 0.0 or np.isnan(max_th):
-            signal = "hold"
+            signal = SIGNAL_HOLD
         elif prediction > max_th:
-            signal = "long"
+            signal = SIGNAL_LONG
         elif prediction < min_th:
-            signal = "short"
+            signal = SIGNAL_SHORT
         else:
-            signal = "hold"
+            signal = SIGNAL_HOLD
 
         # --- Update history ---
         self.pred_history.append(prediction)

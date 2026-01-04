@@ -66,6 +66,7 @@ if __name__ == "__main__":
         "model_type": args.model_type,
         "auto_reload": True,
         "sleeptime": "5m",
+        "market_type": args.market_type,
     }
 
     strategy = MLStrategy(

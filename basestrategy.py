@@ -2,7 +2,7 @@ import time
 from datetime import datetime
 from typing import Dict, Any, Optional
 import pandas as pd
-from basebinancebroker import BaseBinanceBroker, BracketResult
+from binancebasebroker import BinanceBaseBroker, BracketResult, PositionResult
 from timeframe_config import TimeframeConfig
 
 class BaseStrategy:
@@ -10,7 +10,7 @@ class BaseStrategy:
     Base strategy class that mimics Lumibot's Strategy interface
     """
 
-    def __init__(self, broker: BaseBinanceBroker, quote_symbol: str, parameters: Dict[str, Any]):
+    def __init__(self, broker: BinanceBaseBroker, quote_symbol: str, parameters: Dict[str, Any]):
         self._broker = broker
         self.parameters = parameters
         self.quote_asset_symbol = quote_symbol
@@ -25,7 +25,7 @@ class BaseStrategy:
         """Get Binance trading symbol"""
         return f"{asset_symbol}{self.quote_asset_symbol}"
 
-    def get_position(self, asset_symbol: str) -> Optional[float]:
+    def get_position(self, asset_symbol: str) -> Optional[PositionResult]:
         """Get position for asset"""
         return self._broker.get_position(self._pair_asset_symbol(asset_symbol))
 

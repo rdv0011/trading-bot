@@ -5,6 +5,7 @@ from timeframe_config import TIMEFRAMES
 from mlpredictor import MlPredictor
 from mltrainingcore import TARGET_COLUMN
 from mltrainingcore import get_features, make_features, make_labels
+from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT
 
 MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
 TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
@@ -23,6 +24,7 @@ class MLStrategy(BaseStrategy):
     def initialize(self):
         # Trading parameters
         self.asset = self.parameters.get("asset_symbol", "BTC")
+        self.market_type = self.parameters.get("market_type", "futures")
         
         self.historical_prices_unit = self.parameters.get("historical_prices_unit", "5m")
         self.tf_cfg = TIMEFRAMES[self.historical_prices_unit]
@@ -174,7 +176,8 @@ class MLStrategy(BaseStrategy):
         result = self.predictor.predict_with_signal(df, features, tf_cfg=self.tf_cfg)
 
         prediction = result["prediction"]
-        signal = result["signal"]
+        raw_signal = result["signal"]
+        signal = self._normalize_signal_for_market(raw_signal)
         regime = result["regime"]
         stake_mult = result["stake_mult"]
 
@@ -183,7 +186,8 @@ class MLStrategy(BaseStrategy):
 
         self.log_message(
             f"Signal | Pred={prediction:.6f} | MinThr={result['min_threshold']:.6f} | MaxThr={result['max_threshold']:.6f} | "
-            f"Signal={signal.upper()} | "
+            f"RawSignal={raw_signal.upper()} | "
+            f"ExecSignal={signal.upper()} | "
             f"Regime={regime} | "
             f"StakeMult={stake_mult:.2f}"
         )
@@ -213,7 +217,7 @@ class MLStrategy(BaseStrategy):
         # ---------------------------------------------------------
         # 8️⃣ ENTRY LOGIC
         # ---------------------------------------------------------
-        if not has_position and signal != "hold":
+        if not has_position and signal != SIGNAL_HOLD:
             # Clean up stale state
             if self.entry_price is not None:
                 self.cancel_open_orders(self.asset)
@@ -234,11 +238,18 @@ class MLStrategy(BaseStrategy):
         # ---------------------------------------------------------
         if has_position and self.entry_price is not None:
             self._check_exit_conditions(position, current_price, signal)
+    
+    def _normalize_signal_for_market(self, signal: str) -> str:
+        """
+        Futures: signal unchanged
+        Spot: SHORT → HOLD
+        """
+        if self.market_type.lower() == "spot" and signal == SIGNAL_SHORT:
+            return SIGNAL_HOLD
+        return signal
 
     def _enter_position(self, current_price: float, signal: str):
-        signal = signal.lower()
-
-        stake_frac = self.stake_long_frac if signal == "long" else self.stake_short_frac
+        stake_frac = self.stake_long_frac if signal == SIGNAL_LONG else self.stake_short_frac
         cash = self.get_cash()
         qty = round((cash * stake_frac) / current_price, TRADEABLE_QUANTITY_PRECISION)
 
@@ -297,9 +308,9 @@ class MLStrategy(BaseStrategy):
         # -------------------------------------------------
         # Signal reversal exit
         # -------------------------------------------------
-        elif is_long and signal == "short":
+        elif is_long and signal == SIGNAL_SHORT:
             exit_reason = "REVERSAL_LONG_TO_SHORT"
-        elif not is_long and signal == "long":
+        elif not is_long and signal == SIGNAL_LONG:
             exit_reason = "REVERSAL_SHORT_TO_LONG"
 
         # -------------------------------------------------
