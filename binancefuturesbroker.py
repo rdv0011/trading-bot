@@ -1,8 +1,7 @@
 from typing import Optional
 from binance.client import Client
 from binance.enums import *
-import time
-from binancebasebroker import BinanceBaseBroker, MIN_TRADEABLE_QUANTITY, PositionResult
+from binancebasebroker import BinanceBaseBroker, MIN_TRADEABLE_QUANTITY, MarketOrderResult, PositionResult, BracketOrderResult
 
 from binance.client import Client
 from binance.enums import *
@@ -11,8 +10,8 @@ class BinanceFuturesBroker(BinanceBaseBroker):
 
     def setup_client(self):
         self.client = Client(
-            self.config["api_key"],
-            self.config["api_secret"],
+            api_key=self.config["api_key"],
+            api_secret=self.config["api_secret"],
             testnet=self.config.get("testnet", True)
         )
         self.logger.info("✅ Connected to Binance Futures")
@@ -31,7 +30,7 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             amt = float(pos.get("positionAmt", 0.0))
             amt = amt if abs(amt) >= MIN_TRADEABLE_QUANTITY else None
             price = float(pos.get("entryPrice", 0.0))
-            return PositionResult(amount=amt, entri_price=price)
+            return PositionResult(amount=amt, entry_price=price)
         except Exception as e:
             self.logger.error(f"❌ Error fetching position for {symbol}: {e}")
             return None
@@ -43,7 +42,7 @@ class BinanceFuturesBroker(BinanceBaseBroker):
         except Exception:
             return 0.0
 
-    def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[str]:
+    def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[MarketOrderResult]:
         try:
             order = self.client.futures_create_order(
                 symbol=symbol,
@@ -51,12 +50,12 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
-            return str(order.get("orderId"))
+            return MarketOrderResult(order_id=str(order.get("orderId")), entry_price=0.0)
         except Exception as e:
             self.logger.error(f"❌ Futures market order failed: {e}")
             return None
 
-    def _create_bracket_order(self, symbol, amount, side, tp_price, sl_price):
+    def _create_bracket_order(self, symbol, amount, side, tp_price, sl_price) -> Optional[BracketOrderResult]:
         try:
             tp_order = self.client.futures_create_order(
                 symbol=symbol,
@@ -74,12 +73,12 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             )
             tp_id = str(tp_order.get("algoId"))
             sl_id = str(sl_order.get("algoId"))
-            return tp_id, sl_id
+            return BracketOrderResult(tp_order_id=tp_id, sl_order_id=sl_id)
         except Exception as e:
             self.logger.error(f"❌ Futures bracket order failed: {e}")
-            return None, None
+            return None
 
-    def cancel_open_orders(self, symbol: str):
+    def cancel_open_orders(self, symbol: str, max_retries: int, base_delay: float):
         try:
             open_orders = self.client.futures_get_open_orders(symbol=symbol, conditional=True)
             for o in open_orders:

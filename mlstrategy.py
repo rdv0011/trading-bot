@@ -5,7 +5,7 @@ from timeframe_config import TIMEFRAMES
 from mlpredictor import MlPredictor
 from mltrainingcore import TARGET_COLUMN
 from mltrainingcore import get_features, make_features, make_labels
-from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT
+from binancebasebroker import MARKET_TYPE_SPOT, SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT
 
 MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
 TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
@@ -139,16 +139,22 @@ class MLStrategy(BaseStrategy):
         try:
             meta = self.predictor.predict_meta_params(df)
 
-            self.stake_long_frac = meta["stake_long_frac"]
+            self.stake_long_frac = self._normalize_stake_long_frac_for_market(meta["stake_long_frac"])
             self.stake_short_frac = meta["stake_short_frac"]
             self.stop_loss_frac = meta["stop_loss_frac"]
             self.take_profit_frac = meta["take_profit_frac"]
             self.max_hold_hours = meta["max_hold_hours"]
 
+            short_part = (
+                f"Short={self.stake_short_frac:.3f}, "
+                if self.market_type.lower() != MARKET_TYPE_SPOT
+                else ""
+            )
+
             self.log_message(
                 f"MetaParams | "
                 f"Long={self.stake_long_frac:.3f}, "
-                f"Short={self.stake_short_frac:.3f}, "
+                f"{short_part}"
                 f"SL={self.stop_loss_frac:.3f}, "
                 f"TP={self.take_profit_frac:.3f}, "
                 f"Hold={self.max_hold_hours:.1f}h"
@@ -212,7 +218,7 @@ class MLStrategy(BaseStrategy):
         # ---------------------------------------------------------
         position = self.get_position(self.asset)
         current_price = self.get_last_price(self.asset)
-        has_position = position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY
+        has_position = position is not None and abs(position.amount) >= MIN_TRADEABLE_QUANTITY
 
         # ---------------------------------------------------------
         # 8️⃣ ENTRY LOGIC
@@ -244,9 +250,18 @@ class MLStrategy(BaseStrategy):
         Futures: signal unchanged
         Spot: SHORT → HOLD
         """
-        if self.market_type.lower() == "spot" and signal == SIGNAL_SHORT:
+        if self.market_type.lower() == MARKET_TYPE_SPOT and signal == SIGNAL_SHORT:
             return SIGNAL_HOLD
         return signal
+    
+    def _normalize_stake_long_frac_for_market(self, stake_long_frac: float) -> float:
+        """
+        Futures: original unchanged
+        Spot: 1.0 for LONG
+        """
+        if self.market_type.lower() == MARKET_TYPE_SPOT:
+            return 1.0
+        return stake_long_frac
 
     def _enter_position(self, current_price: float, signal: str):
         stake_frac = self.stake_long_frac if signal == SIGNAL_LONG else self.stake_short_frac
@@ -277,7 +292,7 @@ class MLStrategy(BaseStrategy):
         self.log_message(f"🟢 ENTRY {signal.upper()} @ {self.entry_price}")
         
     def _check_exit_conditions(self, position, current_price: float, signal: str):
-        is_long = position > 0
+        is_long = position.amount > 0
 
         # -------------------------------------------------
         # Performance calculation (direction-aware)
@@ -327,11 +342,11 @@ class MLStrategy(BaseStrategy):
     def _close_orders_position(self, position, current_price, reason, perf):
         
         self.log_message(f"🔵 Closing orders and position due to: {reason}")
-        
+
         self.cancel_open_orders(self.asset)
 
-        if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
-            self.close_position(self.asset, position)
+        if position is not None and abs(position.amount) >= MIN_TRADEABLE_QUANTITY:
+            self.close_position(self.asset, position.amount)
 
         self.log_message(
             f"🔵 EXIT {reason} @ {current_price} | PnL {perf:.2%}"
@@ -353,12 +368,12 @@ class MLStrategy(BaseStrategy):
             # Get current position
             position = self.get_position(self.asset)
 
-            if position is not None and abs(position) >= MIN_TRADEABLE_QUANTITY:
+            if position is not None and abs(position.amount) >= MIN_TRADEABLE_QUANTITY:
                 current_price = self.get_last_price(self.asset)
-                is_long = position > 0
+                is_long = position.amount > 0
                 position_type = "LONG" if is_long else "SHORT"
                 self.log_message(f"🔴 EMERGENCY EXIT ({position_type}) at {current_price}")
-                self.close_position(self.asset, position)
+                self.close_position(self.asset, position.amount)
 
                 # Calculate final performance if entry price is known
                 if self.entry_price is not None:

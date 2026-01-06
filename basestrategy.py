@@ -15,7 +15,7 @@ class BaseStrategy:
         self.parameters = parameters
         self.quote_asset_symbol = quote_symbol
         self.is_running = False
-        self.sleep_time = parameters.get("sleeptime", 300)  # Default 5 minutes
+        self.sleep_time = parameters.get("sleeptime", '5m')  # Default 5 minutes
         
     def get_cash(self) -> float:
         """Get available cash"""
@@ -70,7 +70,7 @@ class BaseStrategy:
         """Cancel all open orders"""
         # Assuming we're only trading one symbol
         symbol = self._pair_asset_symbol(asset_symbol)
-        self._broker.cancel_open_orders(symbol)
+        self._broker.cancel_open_orders(symbol, max_retries=3, base_delay=0.5)
 
     def close_position(self, asset_symbol: str, position: float):
         symbol = self._pair_asset_symbol(asset_symbol)
@@ -98,13 +98,8 @@ class BaseStrategy:
                     self.on_trading_iteration()
                     
                     # Sleep based on sleeptime parameter
-                    if isinstance(self.sleep_time, str):
-                        if self.sleep_time.endswith('m'):
-                            sleep_seconds = int(self.sleep_time[:-1]) * 60
-                        else:
-                            sleep_seconds = 300  # Default 5 minutes
-                    else:
-                        sleep_seconds = self.sleep_time
+                    # Sleep time format: Xm in munutes
+                    sleep_seconds = int(self.sleep_time[:-1]) * 60
                     
                     self.log_message(f"💤 Sleeping for {sleep_seconds} seconds...")
                     time.sleep(sleep_seconds)

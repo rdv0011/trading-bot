@@ -13,6 +13,8 @@ TRADEABLE_QUANTITY_PRECISION = 3
 SIGNAL_LONG = "long"
 SIGNAL_SHORT = "short"
 SIGNAL_HOLD = "hold"
+MARKET_TYPE_SPOT = "spot"
+MARKET_TYPE_FUTURES = "futures"
 
 @dataclass
 class BracketResult:
@@ -23,7 +25,17 @@ class BracketResult:
 @dataclass
 class PositionResult:
     amount: float
-    entri_price: float
+    entry_price: float
+
+@dataclass
+class MarketOrderResult:
+    order_id: str
+    entry_price: Optional[float]
+
+@dataclass
+class BracketOrderResult:
+    tp_order_id: str
+    sl_order_id: str
 
 class BinanceBaseBroker(ABC):
     """
@@ -62,7 +74,7 @@ class BinanceBaseBroker(ABC):
         pass
 
     @abstractmethod
-    def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[str]:
+    def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[MarketOrderResult]:
         pass
 
     @abstractmethod
@@ -70,7 +82,7 @@ class BinanceBaseBroker(ABC):
         pass
 
     @abstractmethod
-    def cancel_open_orders(self, symbol: str):
+    def cancel_open_orders(self, symbol: str, max_retries: int, base_delay: float):
         pass
 
     @abstractmethod
@@ -97,23 +109,26 @@ class BinanceBaseBroker(ABC):
 
         try:
             # 1️⃣ Market order
-            create_order_id = self._create_market_order(symbol, market_order_side, quantity)
-            if create_order_id is None:
+            order_result = self._create_market_order(symbol, market_order_side, quantity)
+            if order_result is None:
                 return BracketResult(success=False, error="Market order returned None")
             
-            # May be there is a way to wait untill the order is fulfilled
-            time.sleep(0.5)
+            entry_price = order_result.entry_price
+            if entry_price is None:
+                # For futures market orders, we might not get entry price immediately
+                # May be there is a way to wait untill the order is fulfilled
+                time.sleep(0.5)
 
-            position = self.get_position(symbol)
-            entry_price = position.entri_price if position is not None else self.get_last_price()
+                position = self.get_position(symbol)
+                entry_price = position.entry_price if position is not None else self.get_last_price()
 
-            if not create_order_id:
+            if not order_result.order_id:
                 return BracketResult(success=False, error="Market order returned no order_id")
             if entry_price is None or entry_price <= 0:
                 return BracketResult(success=False, error="Market order returned invalid entry_price")
 
             # 2️⃣ TP/SL prices
-            if signal == SIGNAL_LONG:
+            if market_order_side == SIDE_BUY:
                 tp_price = round(entry_price * (1 + tp_frac), 2)
                 sl_price = round(entry_price * (1 - sl_frac), 2)
             else:
@@ -121,21 +136,22 @@ class BinanceBaseBroker(ABC):
                 sl_price = round(entry_price * (1 + sl_frac), 2)
 
             # 3️⃣ Place bracket orders
-            braket_order_side = SIDE_SELL if signal == SIGNAL_LONG else SIDE_BUY
-
-            tp_id, sl_id = self._create_bracket_order(symbol, quantity, braket_order_side, tp_price, sl_price)
+            bracket_order_result = self._create_bracket_order(symbol, quantity, market_order_side, tp_price, sl_price)
 
             # 4️⃣ TP/SL failure → close position
-            if not tp_id or not sl_id:
+            if not bracket_order_result:
                 position = self.get_position(symbol)
                 if position.amount:
                     self.close_position(symbol, position.amount)
                 return BracketResult(success=False, error="TP/SL placement failed; position closed")
+            
+            tp_id = bracket_order_result.tp_order_id
+            sl_id = bracket_order_result.sl_order_id
 
             return BracketResult(
                 success=True,
                 data={
-                    "order_id": create_order_id,
+                    "order_id": order_result.order_id,
                     "entry_price": entry_price,
                     "tp_price": tp_price,
                     "sl_price": sl_price,

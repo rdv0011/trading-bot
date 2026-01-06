@@ -2,14 +2,24 @@
   "version": "0.2.0",
   "configurations": [
   {
-    "name": "Python: Run bot",
+    "name": "Python: Run bot futures",
     "type": "debugpy",
     "request": "launch",
     "justMyCode": false,
     "program": "${workspaceFolder}/main.py",
     "console": "integratedTerminal",
     "args": ["--model-type=cat", "--market-type=futures"]
-  },{
+  },
+    {
+    "name": "Python: Run bot spot",
+    "type": "debugpy",
+    "request": "launch",
+    "justMyCode": false,
+    "program": "${workspaceFolder}/main.py",
+    "console": "integratedTerminal",
+    "args": ["--model-type=cat", "--market-type=spot"]
+  },
+  {
     "name": "Python: Train ML models",
     "type": "debugpy",
     "request": "launch",

@@ -1,6 +1,6 @@
 from binancespotbroker import BinanceSpotBroker
 from binancefuturesbroker import BinanceFuturesBroker
-from binancebasebroker import BinanceBaseBroker
+from binancebasebroker import MARKET_TYPE_SPOT, MARKET_TYPE_FUTURES, BinanceBaseBroker
 from typing import Dict, Any
 
 def create_binance_broker(config: Dict[str, Any]) -> BinanceBaseBroker:
@@ -17,10 +17,10 @@ def create_binance_broker(config: Dict[str, Any]) -> BinanceBaseBroker:
     """
     market = config.get("market_type", "futures").lower()
 
-    if market == "spot":
+    if market == MARKET_TYPE_SPOT:
         return BinanceSpotBroker(config)
 
-    if market == "futures":
+    if market == MARKET_TYPE_FUTURES:
         return BinanceFuturesBroker(config)
 
     raise ValueError(f"Unsupported market_type: {market}")
