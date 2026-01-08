@@ -93,7 +93,7 @@ class MlPredictor:
                 self.current_model_path = latest_model_path
                 self.current_meta_path = latest_meta_path
                 
-                self.log_message(f"✅ Model reload complete! Now using {len(self.features)} features")
+                self.log_message(f"✅ Model reload complete! Now using {len(self.metadata)}")
                 return True
             
         except Exception as e:

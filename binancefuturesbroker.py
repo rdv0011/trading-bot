@@ -50,23 +50,24 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity
             )
-            return MarketOrderResult(order_id=str(order.get("orderId")), entry_price=0.0)
+            return MarketOrderResult(order_id=str(order.get("orderId")), entry_price=None)
         except Exception as e:
             self.logger.error(f"❌ Futures market order failed: {e}")
             return None
 
     def _create_bracket_order(self, symbol, amount, side, tp_price, sl_price) -> Optional[BracketOrderResult]:
         try:
+            exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
             tp_order = self.client.futures_create_order(
                 symbol=symbol,
-                side=side,
+                side=exit_side,
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                 stopPrice=tp_price,
                 closePosition=True
             )
             sl_order = self.client.futures_create_order(
                 symbol=symbol,
-                side=side,
+                side=exit_side,
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
                 stopPrice=sl_price,
                 closePosition=True
