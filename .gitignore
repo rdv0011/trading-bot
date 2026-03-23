@@ -4,6 +4,7 @@ cache/
 logs/
 historical_data/
 catboost_info/
+plan/
 
 # Files
 .env
