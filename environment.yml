@@ -4,12 +4,14 @@ channels:
   - defaults
 dependencies:
   - python=3.10
-  - pandas=2.3.3
-  - numpy=2.3.4
-  - matplotlib=3.10.3
-  - matplotlib-inline=0.1.7
-  - tqdm=4.67.1
-  - psutil=7.0.0
-  - xgboost=3.0.5
-  - catboost=1.2.8
-  - python-binance=1.0.33
+  - numpy=1.26.*
+  - pandas>=2.1
+  - matplotlib>=3.7
+  - matplotlib-inline
+  - tqdm
+  - psutil
+  - pip
+  - pip:
+      - python-binance>=1.0.33
+      - xgboost>=3.0.5
+      - catboost>=1.2.8
