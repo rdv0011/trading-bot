@@ -4,11 +4,11 @@ from dotenv import load_dotenv
 
 from binancebasebroker import MARKET_TYPE_FUTURES, MARKET_TYPE_SPOT
 from mlstrategy import MLStrategy
+from dualmlstrategy import DualMLStrategy
 from binancebrokerfactory import create_binance_broker
 
 load_dotenv()
 
-# Testnet with futures support
 BINANCE_TESTNET_FUTURES_API_KEY = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY", "")
 BINANCE_TESTNET_FUTURES_API_SECRET = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET", "")
 BINANCE_TESTNET_SPOT_API_KEY = os.getenv("BINANCE_TESTNET_SPOT_API_KEY", "")
@@ -22,19 +22,39 @@ if __name__ == "__main__":
         "--model-type",
         choices=["xgb", "cat"],
         default="cat",
-        help="Select the model type to use."
     )
-
     parser.add_argument(
         "--market-type",
         choices=["spot", "futures"],
         default="futures",
-        help="Select Binance market type."
     )
+    parser.add_argument(
+        "--strategy",
+        choices=["legacy", "dual"],
+        default="dual",
+        help="'legacy' = original single-ML, 'dual' = new two-tier ML system",
+    )
+    parser.add_argument(
+        "--train-strategic",
+        action="store_true",
+        help="Run strategic model training then exit (no live trading).",
+    )
+    parser.add_argument("--strategic-days", type=int, default=365)
+    parser.add_argument("--strategic-timeframe", default="1h")
 
     args = parser.parse_args()
 
-    # ---------------- Broker Config ----------------
+    if args.train_strategic:
+        from strategic.strategictraining import run_training
+        from mlio import MODEL_DIR
+        run_training(
+            symbol="BTCUSDT",
+            days=args.strategic_days,
+            model_type=args.model_type,
+            timeframe=args.strategic_timeframe,
+            model_dir=MODEL_DIR,
+        )
+        raise SystemExit(0)
 
     if args.market_type == "futures":
         broker_config = {
@@ -53,24 +73,37 @@ if __name__ == "__main__":
 
     broker = create_binance_broker(broker_config)
 
-    # ---------------- Strategy Params ----------------
-
     base_symbol = "BTC"
     quote_symbol = "USDT"
 
-    parameters = {
-        "asset_symbol": base_symbol,
-        "historical_prices_unit": "5m",
-        "model_type": args.model_type,
-        "auto_reload": True,
-        "sleeptime": "5m",
-        "market_type": args.market_type,
-    }
-
-    strategy = MLStrategy(
-        broker=broker,
-        quote_symbol=quote_symbol,
-        parameters=parameters,
-    )
+    if args.strategy == "dual":
+        parameters = {
+            "asset_symbol": base_symbol,
+            "model_type": args.model_type,
+            "market_type": args.market_type,
+            "tactical_timeframe": "5m",
+            "strategic_timeframe": "1h",
+            "model_params": {"iterations": 300, "verbose": False},
+            "sleeptime": "5m",
+        }
+        strategy = DualMLStrategy(
+            broker=broker,
+            quote_symbol=quote_symbol,
+            parameters=parameters,
+        )
+    else:
+        parameters = {
+            "asset_symbol": base_symbol,
+            "historical_prices_unit": "5m",
+            "model_type": args.model_type,
+            "auto_reload": True,
+            "sleeptime": "5m",
+            "market_type": args.market_type,
+        }
+        strategy = MLStrategy(
+            broker=broker,
+            quote_symbol=quote_symbol,
+            parameters=parameters,
+        )
 
     strategy.run()
