@@ -33,6 +33,7 @@ class StrategicDecision:
     stop_loss_frac: float
     take_profit_frac: float
     max_hold_hours: float
+    margin_type: str = "ISOLATED"
     confidence: float = 1.0
 
 
@@ -76,7 +77,7 @@ class PositionManager:
             self.log("⏸ Chop regime — no new entries")
             return
 
-        self._broker.set_leverage(self._symbol, int(strategic.recommended_leverage))
+        self._broker.set_leverage(self._symbol, int(strategic.recommended_leverage), strategic.margin_type)
 
         signal = tactical.signal
 

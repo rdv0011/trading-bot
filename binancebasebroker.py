@@ -226,7 +226,7 @@ class BinanceBaseBroker(ABC):
         """
         raise NotImplementedError
 
-    def set_leverage(self, symbol: str, leverage: int) -> bool:
+    def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         """
         Set leverage for a symbol. No-op for spot; implemented by futures broker.
         Returns True on success, False otherwise.

@@ -108,7 +108,13 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             limit=limit,
         )
 
-    def set_leverage(self, symbol: str, leverage: int) -> bool:
+    def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
+        try:
+            self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
+        except Exception as e:
+            if "No need to change margin type" not in str(e):
+                self.logger.warning(f"⚠️ Could not set margin type for {symbol}: {e}")
+
         try:
             self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
             return True
