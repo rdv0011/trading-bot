@@ -226,6 +226,13 @@ class BinanceBaseBroker(ABC):
         """
         raise NotImplementedError
 
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+        """
+        Set leverage for a symbol. No-op for spot; implemented by futures broker.
+        Returns True on success, False otherwise.
+        """
+        return True
+
     def get_datetime(self) -> datetime:
         return datetime.now()
 

@@ -107,3 +107,11 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             interval=interval,
             limit=limit,
         )
+
+    def set_leverage(self, symbol: str, leverage: int) -> bool:
+        try:
+            self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
+            return True
+        except Exception as e:
+            self.logger.error(f"❌ Set leverage failed for {symbol}: {e}")
+            return False
