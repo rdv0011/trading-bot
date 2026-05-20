@@ -1,5 +1,6 @@
 from basestrategy import BaseStrategy
 import traceback
+from dataclasses import replace
 from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT, MARKET_TYPE_SPOT
 from mlio import MODEL_DIR
 from mltrainingcore import make_features, make_labels, get_features
@@ -7,6 +8,7 @@ from timeframe_config import TIMEFRAMES
 from tactical.tacticalml import TacticalML
 from strategic.strategicml import StrategicML
 from positionmanager import PositionManager
+from riskguard import RiskGuard
 
 STRATEGIC_HISTORY_CANDLES = 200
 TACTICAL_HISTORY_CANDLES_MULTIPLIER = 2
@@ -75,9 +77,22 @@ class DualMLStrategy(BaseStrategy):
             logger=self.log_message,
         )
 
+        self.risk_guard = RiskGuard(
+            max_daily_loss_frac=self.parameters.get("max_daily_loss_frac", 0.05),
+            max_drawdown_frac=self.parameters.get("max_drawdown_frac", 0.15),
+            max_leverage=self.parameters.get("max_leverage", 10.0),
+        )
+
         self.log_message("✅ DualMLStrategy initialized")
 
     def on_trading_iteration(self):
+        current_equity = self.get_cash()
+        if not self.risk_guard.update(current_equity):
+            self.log_message(f"🛑 RiskGuard halted trading — equity={current_equity:.2f}")
+            if self.position_manager.has_position:
+                self.position_manager.emergency_close_live()
+            return
+
         df_tactical = self.get_historical_prices(
             self.asset,
             self.tf_cfg_tactical.max_history_candles,
@@ -110,6 +125,10 @@ class DualMLStrategy(BaseStrategy):
         tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, df_pred, features)
 
         strategic_decision = self.strategic_ml.predict(df_strategic)
+        strategic_decision = replace(
+            strategic_decision,
+            recommended_leverage=self.risk_guard.clamp_leverage(strategic_decision.recommended_leverage),
+        )
 
         if self.market_type.lower() == MARKET_TYPE_SPOT and tactical_signal.signal == SIGNAL_SHORT:
             from dataclasses import replace
