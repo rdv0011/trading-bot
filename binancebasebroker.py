@@ -115,12 +115,17 @@ class BinanceBaseBroker(ABC):
             
             entry_price = order_result.entry_price
             if entry_price is None:
-                # For futures market orders, we might not get entry price immediately
-                # May be there is a way to wait untill the order is fulfilled
-                time.sleep(0.5)
+                entry_price = None
+                for attempt in range(5):
+                    time.sleep(0.2 * (2 ** attempt))
+                    position = self.get_position(symbol)
+                    if position and position.entry_price and position.entry_price > 0:
+                        entry_price = position.entry_price
+                        break
 
-                position = self.get_position(symbol)
-                entry_price = position.entry_price if position is not None else self.get_last_price()
+                if entry_price is None:
+                    self.close_position(symbol, quantity)
+                    return BracketResult(success=False, error="Fill confirmation timeout after 5 attempts")
 
             if not order_result.order_id:
                 return BracketResult(success=False, error="Market order returned no order_id")
