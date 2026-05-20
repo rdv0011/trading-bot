@@ -9,8 +9,12 @@ from timeframe_config import TimeframeConfig
 TARGET_COLUMN = 'future_ret'
 SIGNAL_COLUMN = 'pred'
 SEED_BASE = 42
-OBJECTIVE_METRIC = "objective_score" # Composite metric better for ML training
+OBJECTIVE_METRIC = "objective_score"
 REGIME_COLUMN = 'regime'
+
+TAKER_FEE = 0.0004
+SLIPPAGE = 0.0003
+ROUND_TRIP_COST = (TAKER_FEE + SLIPPAGE) * 2
 
 def time_to_candles(
     *,
@@ -224,7 +228,8 @@ def simulate_trades_core(
             enter_short = signal_value < adaptive_min
             if enter_long or enter_short:
                 position = 1 if enter_long else -1
-                entry_price = price
+                cost = TAKER_FEE + SLIPPAGE
+                entry_price = price * (1 + cost) if position == 1 else price * (1 - cost)
                 entry_stake = stake_long if position == 1 else stake_short
                 entry_index = i
                 entry_time = timestamp
@@ -239,7 +244,9 @@ def simulate_trades_core(
 
         # Exit logic
         if position != 0 and entry_index is not None:
-            perf_raw = (price / entry_price - 1.0) * position
+            cost = TAKER_FEE + SLIPPAGE
+            exit_price = price * (1 - cost) if position == 1 else price * (1 + cost)
+            perf_raw = (exit_price / entry_price - 1.0) * position
             elapsed_minutes = (i - entry_index) * max(float(timeframe_minutes), 1.0)
             exit_on_stop = perf_raw <= -stop_loss
             exit_on_take = perf_raw >= take_profit
@@ -256,7 +263,7 @@ def simulate_trades_core(
                     'entry_timestamp': entry_time,
                     'exit_timestamp': timestamp,
                     'entry_price': entry_price,
-                    'exit_price': price,
+                    'exit_price': exit_price,
                     'stake_frac': entry_stake,
                     'exit_reason': exit_reason,
                     'regime': regime
@@ -284,7 +291,9 @@ def simulate_trades_core(
     if position != 0 and entry_index is not None:
         final_price = df_iter[close_col].iloc[-1]
         final_timestamp = df_iter.index[-1]
-        perf_raw = (final_price / entry_price - 1.0) * position
+        cost = TAKER_FEE + SLIPPAGE
+        final_exit_price = final_price * (1 - cost) if position == 1 else final_price * (1 + cost)
+        perf_raw = (final_exit_price / entry_price - 1.0) * position
         perf = perf_raw * entry_stake
         wallet *= (1.0 + perf)
         trades.append({
@@ -294,7 +303,7 @@ def simulate_trades_core(
             'entry_timestamp': entry_time,
             'exit_timestamp': final_timestamp,
             'entry_price': entry_price,
-            'exit_price': final_price,
+            'exit_price': final_exit_price,
             'stake_frac': entry_stake,
             'exit_reason': 'final_close',
             'regime': regime
