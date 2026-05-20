@@ -132,7 +132,7 @@ class DualMLStrategy(BaseStrategy):
     def on_abrupt_closing(self):
         try:
             self.log_message("⚠️ Abrupt closing — emergency position close")
-            self.position_manager.emergency_close()
+            self.position_manager.emergency_close_live()
         except Exception as e:
             self.log_message(f"❌ Emergency close error: {e}")
             self.log_message(traceback.format_exc())

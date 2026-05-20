@@ -57,9 +57,11 @@ class PositionManager:
     ):
         self._broker = broker
         self._asset = asset
+        self._quote_symbol = quote_symbol
         self._symbol = f"{asset}{quote_symbol}"
         self.log = logger if logger is not None else print
         self._state: Optional[_PositionState] = None
+        self._reconcile_on_startup()
 
     def on_signal(
         self,
@@ -120,10 +122,42 @@ class PositionManager:
         if self._state is not None:
             self._full_close("EMERGENCY")
 
+    def emergency_close_live(self):
+        try:
+            self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
+        except Exception as exc:
+            self.log(f"⚠️ cancel_open_orders failed during emergency close: {exc}")
+
+        live = self._broker.get_position(self._symbol)
+        if live and live.amount and abs(live.amount) >= MIN_TRADEABLE_QUANTITY:
+            self._broker.close_position(self._symbol, abs(live.amount))
+            self.log(f"🔴 EMERGENCY CLOSE (live) qty={abs(live.amount)}")
+        else:
+            self.log("✅ No open position on exchange during emergency close")
+
+        self._state = None
+
+    def _reconcile_on_startup(self):
+        live = self._broker.get_position(self._symbol)
+        if live and live.amount and abs(live.amount) >= MIN_TRADEABLE_QUANTITY:
+            side = SIGNAL_LONG if live.amount > 0 else SIGNAL_SHORT
+            self._state = _PositionState(
+                side=side,
+                amount=abs(live.amount),
+                entry_price=live.entry_price,
+                entry_time=datetime.now(),
+            )
+            self.log(
+                f"♻️ Reconciled existing {side} position on startup: "
+                f"qty={abs(live.amount)} entry={live.entry_price}"
+            )
+        else:
+            self.log("✅ No open position found on startup — starting flat")
+
     def _open_position(
         self, signal: str, price: float, strategic: StrategicDecision
     ):
-        cash = self._broker.get_cash(self._symbol.replace(self._asset, ""))
+        cash = self._broker.get_cash(self._quote_symbol)
         stake_frac = (
             strategic.stake_long_frac
             if signal == SIGNAL_LONG
@@ -161,7 +195,7 @@ class PositionManager:
         self.log(f"🟢 OPEN {signal.upper()} @ {entry_price} qty={qty}")
 
     def _scale_up(self, signal: str, price: float, strategic: StrategicDecision):
-        cash = self._broker.get_cash(self._symbol.replace(self._asset, ""))
+        cash = self._broker.get_cash(self._quote_symbol)
         stake_frac = (
             strategic.stake_long_frac
             if signal == SIGNAL_LONG
