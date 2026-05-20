@@ -759,7 +759,7 @@ if __name__ == "__main__":
         out_sim = os.path.join(LABEL_DIR, f"{MODEL_TYPE}_final_test_sim.csv")
         df_result_test.to_csv(out_sim)
         print(f"Saved final test simulation to {out_sim}")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"WARNING: failed to save final test simulation: {exc}")
 
     print("Pipeline completed: labeling (full) → split → train → test simulation (final)")

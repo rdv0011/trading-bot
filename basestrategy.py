@@ -1,4 +1,5 @@
 import time
+import traceback
 from datetime import datetime
 from typing import Dict, Any, Optional
 import pandas as pd
@@ -102,14 +103,16 @@ class BaseStrategy:
                     sleep_seconds = int(self.sleep_time[:-1]) * 60
                     
                     self.log_message(f"💤 Sleeping for {sleep_seconds} seconds...")
-                    time.sleep(sleep_seconds)
+                    elapsed = 0
+                    while self.is_running and elapsed < sleep_seconds:
+                        time.sleep(1)
+                        elapsed += 1
                     
                 except KeyboardInterrupt:
                     self.log_message("⚠️  Strategy interrupted by user")
                     break
                 except Exception as e:
                     self.log_message(f"❌ Error in trading iteration: {e}")
-                    import traceback
                     self.log_message(f"Traceback: {traceback.format_exc()}")
                     time.sleep(60)  # Wait before retrying
         

@@ -1,6 +1,6 @@
 # timeframe_config.py
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from binance.client import Client
 
 
@@ -17,8 +17,7 @@ class TimeframeConfig:
     max_history_hours: int = 50
     min_feature_hours: int = 20
 
-    # EMA durations in HOURS (NOT candles)
-    ema_hours = (0.5, 1.25, 5, 20)
+    ema_hours: tuple = (0.5, 1.25, 5, 20)
 
     def candles_per_hour(self) -> int:
         return max(1, int(60 / self.minutes))

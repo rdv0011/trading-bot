@@ -1,4 +1,5 @@
 from basestrategy import BaseStrategy
+import traceback
 from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT, MARKET_TYPE_SPOT
 from mlio import MODEL_DIR
 from mltrainingcore import make_features, make_labels, get_features
@@ -134,5 +135,4 @@ class DualMLStrategy(BaseStrategy):
             self.position_manager.emergency_close()
         except Exception as e:
             self.log_message(f"❌ Emergency close error: {e}")
-            import traceback
             self.log_message(traceback.format_exc())

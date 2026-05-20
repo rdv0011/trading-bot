@@ -3,19 +3,24 @@ import pandas as pd
 import os
 import sys
 import os, json
+import logging
+import shutil
+import tempfile
 from datetime import datetime
 import joblib, glob
+
+logger = logging.getLogger(__name__)
 
 # =============================================
 # IO directories configuration
 # =============================================
-# Detect the directory of the main script
-script_path = os.path.abspath(sys.argv[0])
-script_dir = os.path.dirname(script_path)
-MODEL_DIR = Path(script_dir) / "model"
+# Resolve paths relative to this file so they are stable regardless of
+# which script imports mlio (e.g. main.py vs strategic/strategictraining.py).
+_HERE = Path(__file__).resolve().parent
+MODEL_DIR = _HERE / "model"
 MODEL_DIR.mkdir(exist_ok=True)
 
-LABEL_DIR = Path(script_dir) / "labeleddata"
+LABEL_DIR = _HERE / "labeleddata"
 LABEL_DIR.mkdir(exist_ok=True)
 
 # =============================================
@@ -39,30 +44,28 @@ def save_model(model, metadata, model_type, model_dir=MODEL_DIR, keep_count=1):
     model_fname = os.path.join(model_dir, f"{safe_type}_meta_model_{ts}.pkl")
     meta_fname = os.path.join(model_dir, f"{safe_type}_meta_model_{ts}.meta.json")
 
-    # Use joblib for generic pickling (works for sklearn wrappers & catboost objects)
-    joblib.dump(model, model_fname)
+    tmp_model = model_fname + ".tmp"
+    joblib.dump(model, tmp_model)
+    shutil.move(tmp_model, model_fname)
 
     if metadata is not None:
         try:
             with open(meta_fname, "w") as f:
                 json.dump(metadata, f, indent=2, default=str)
-        except Exception:
-            # Best-effort metadata saving; don't fail the pipeline for this.
-            pass
+        except Exception as exc:
+            logger.warning("save_model: failed to write metadata to %s: %s", meta_fname, exc)
 
     # Prune older models (keep only 'keep_count' most recent)
     pattern = os.path.join(model_dir, f"{safe_type}_meta_model_*.pkl")
     files = sorted(glob.glob(pattern), key=os.path.getmtime, reverse=True)
-    # Keep keep_count newest
     for old in files[keep_count:]:
         try:
             os.remove(old)
-            # Also try to remove associated metadata file if exists
             old_meta = os.path.splitext(old)[0] + ".meta.json"
             if os.path.exists(old_meta):
                 os.remove(old_meta)
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("save_model: failed to remove old model file %s: %s", old, exc)
 
     print(f"[save_model] Saved model to {model_fname} (kept {min(keep_count, len(files))} newest).")
     return model_fname
@@ -80,8 +83,8 @@ def load_model(model_path, model_meta_path):
         try:
             with open(model_meta_path, "r") as f:
                 metadata = json.load(f)
-        except Exception:
-            # Non-fatal – model still loads
+        except Exception as exc:
+            logger.warning("load_model: failed to read metadata from %s: %s", model_meta_path, exc)
             metadata = None
 
     print(f"[load_model] Loaded model: {model_path}, meta info: {model_meta_path}")
@@ -117,9 +120,8 @@ def load_featured_df(filename):
     path = LABEL_DIR / filename
 
     if path.exists():
-        print(f"[DEBUG] Loading data from: {path}")
         df = pd.read_csv(path, parse_dates=['date'], index_col='date')
-        print(f"✅ Loaded {len(df)} candles from CSV")
+        logger.info("Loaded %d candles from %s", len(df), path)
         return df
 
     return None

@@ -1,4 +1,5 @@
 from typing import Callable, Optional
+import traceback
 from tqdm import tqdm
 from mlio import load_model, get_latest_model_paths
 from timeframe_config import TimeframeConfig
@@ -164,7 +165,6 @@ class MlPredictor:
 
         except Exception as e:
             self.log_message(f"⚠️ Failed to initialize prediction history: {e}")
-            import traceback
             self.log_message(f"Traceback: {traceback.format_exc()}")
     
     def predict_with_signal(

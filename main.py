@@ -9,10 +9,10 @@ from binancebrokerfactory import create_binance_broker
 
 load_dotenv()
 
-BINANCE_TESTNET_FUTURES_API_KEY = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY", "")
-BINANCE_TESTNET_FUTURES_API_SECRET = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET", "")
-BINANCE_TESTNET_SPOT_API_KEY = os.getenv("BINANCE_TESTNET_SPOT_API_KEY", "")
-BINANCE_TESTNET_SPOT_API_SECRET = os.getenv("BINANCE_TESTNET_SPOT_API_SECRET", "")
+BINANCE_TESTNET_FUTURES_API_KEY = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY")
+BINANCE_TESTNET_FUTURES_API_SECRET = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET")
+BINANCE_TESTNET_SPOT_API_KEY = os.getenv("BINANCE_TESTNET_SPOT_API_KEY")
+BINANCE_TESTNET_SPOT_API_SECRET = os.getenv("BINANCE_TESTNET_SPOT_API_SECRET")
 
 if __name__ == "__main__":
 
@@ -57,6 +57,8 @@ if __name__ == "__main__":
         raise SystemExit(0)
 
     if args.market_type == "futures":
+        if not BINANCE_TESTNET_FUTURES_API_KEY or not BINANCE_TESTNET_FUTURES_API_SECRET:
+            raise ValueError("BINANCE_TESTNET_FUTURES_API_KEY and BINANCE_TESTNET_FUTURES_API_SECRET must be set")
         broker_config = {
             "api_key": BINANCE_TESTNET_FUTURES_API_KEY,
             "api_secret": BINANCE_TESTNET_FUTURES_API_SECRET,
@@ -64,6 +66,8 @@ if __name__ == "__main__":
             "testnet": True,
         }
     else:
+        if not BINANCE_TESTNET_SPOT_API_KEY or not BINANCE_TESTNET_SPOT_API_SECRET:
+            raise ValueError("BINANCE_TESTNET_SPOT_API_KEY and BINANCE_TESTNET_SPOT_API_SECRET must be set")
         broker_config = {
             "api_key": BINANCE_TESTNET_SPOT_API_KEY,
             "api_secret": BINANCE_TESTNET_SPOT_API_SECRET,

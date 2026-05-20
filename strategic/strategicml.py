@@ -140,7 +140,7 @@ class StrategicML:
                 self._current_model_path = latest_path
                 self._current_meta_path = latest_meta
         except FileNotFoundError:
-            pass
+            self.log("⚠️ StrategicML: no model file found during reload check")
         except Exception as e:
             self.log(f"⚠️ StrategicML reload check failed: {e}")
 

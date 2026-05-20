@@ -324,11 +324,11 @@ def simulate_trades_core(
     df_result.attrs['trades'] = trades
     df_result.attrs['trade_markers'] = trade_markers
 
-    _, metrics = caculate_metrics(trades, wallet)
+    _, metrics = calculate_metrics(trades, wallet)
 
     return df_result, metrics
 
-def caculate_metrics(trades, wallet, expected_trades=10):
+def calculate_metrics(trades, wallet, expected_trades=10):
     """
     Compute a stable, always-defined objective metric for short walk-forward windows.
 

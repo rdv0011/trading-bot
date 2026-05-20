@@ -1,3 +1,4 @@
+import traceback
 from basestrategy import BaseStrategy
 import time
 from mlio import MODEL_DIR
@@ -9,8 +10,6 @@ from binancebasebroker import MARKET_TYPE_SPOT, SIGNAL_HOLD, SIGNAL_LONG, SIGNAL
 
 MIN_TRADEABLE_QUANTITY = 0.001  # Minimum tradeable quantity for BTC on Binance
 TRADEABLE_QUANTITY_PRECISION = 3  # Binance allows BTC quantities to 3 decimal places
-BUY_SLIPPAGE = 1.005  # 0.5% slippage on buy orders
-SELL_SLIPPAGE = 0.995  # 0.5% slippage on sell orders
 
 class MissingHistoricalDataError(Exception):
     """Raised when get_historical_prices() returns None"""
@@ -387,7 +386,6 @@ class MLStrategy(BaseStrategy):
                 
         except Exception as e:
             self.log_message(f"❌ Error during abrupt closing: {e}")
-            import traceback
             self.log_message(f"Traceback: {traceback.format_exc()}")
 
     def _scaled_risk_params(self, stake_mult: float):

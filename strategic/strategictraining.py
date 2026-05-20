@@ -163,8 +163,10 @@ def run_training(
     df_full = load_featured_df(featured_file)
 
     if df_full is None:
-        api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
-        api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+        api_key = os.getenv("BINANCE_TESTNET_API_KEY")
+        api_secret = os.getenv("BINANCE_TESTNET_API_SECRET")
+        if not api_key or not api_secret:
+            raise ValueError("BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET must be set")
         client = Client(api_key, api_secret, testnet=True)
 
         df_raw = download_historical_prices(symbol, tf_cfg.binance_interval, days, client)
