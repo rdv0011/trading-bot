@@ -1,3 +1,6 @@
+# LEGACY: Used only by MLStrategy (--strategy legacy).
+# For the dual-ML strategy, see tactical/tacticalml.py and strategic/strategicml.py.
+# This module will be removed when MLStrategy is retired.
 from typing import Callable, Optional
 import traceback
 from tqdm import tqdm
