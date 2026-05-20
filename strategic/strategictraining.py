@@ -3,7 +3,7 @@ Strategic ML training pipeline.
 
 Usage:
     python strategic/strategictraining.py
-    python strategic/strategictraining.py --symbol BTCUSDT --days 365 --model-type cat --timeframe 1h
+    python strategic/strategictraining.py --symbol BTCUSDT --days 365 --timeframe 1h
 
 Designed to be run from cron:
     0 2 * * * conda run -n tradingbot python /path/to/strategic/strategictraining.py >> training.log 2>&1
@@ -54,7 +54,6 @@ warnings.filterwarnings("ignore")
 
 DEFAULT_SYMBOL = "BTCUSDT"
 DEFAULT_DAYS = 365
-DEFAULT_MODEL_TYPE = "cat"
 DEFAULT_TIMEFRAME = "1h"
 TRAINING_FRACTION = 0.8
 
@@ -150,22 +149,19 @@ def _train_strategic_model(df_train: pd.DataFrame):
 def run_training(
     symbol: str,
     days: int,
-    model_type: str,
     timeframe: str,
+    api_key: str,
+    api_secret: str,
     model_dir=MODEL_DIR,
 ):
-    load_dotenv()
-
     tf_cfg = TIMEFRAMES[timeframe]
 
     featured_file = f"strategic_{symbol}_{timeframe}_{days}d_featured.csv"
     df_full = load_featured_df(featured_file)
 
     if df_full is None:
-        api_key = os.getenv("BINANCE_TESTNET_API_KEY")
-        api_secret = os.getenv("BINANCE_TESTNET_API_SECRET")
         if not api_key or not api_secret:
-            raise ValueError("BINANCE_TESTNET_API_KEY and BINANCE_TESTNET_API_SECRET must be set")
+            raise ValueError("api_key and api_secret must be provided")
         client = Client(api_key, api_secret, testnet=True)
 
         df_raw = download_historical_prices(symbol, tf_cfg.binance_interval, days, client)
@@ -201,18 +197,25 @@ def run_training(
 
 
 if __name__ == "__main__":
+    load_dotenv()
+
     parser = argparse.ArgumentParser(description="Train the StrategicML model.")
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
-    parser.add_argument("--model-type", choices=["xgb", "cat"], default=DEFAULT_MODEL_TYPE)
     parser.add_argument("--timeframe", default=DEFAULT_TIMEFRAME, choices=list(TIMEFRAMES.keys()))
     parser.add_argument("--model-dir", default=str(MODEL_DIR))
     args = parser.parse_args()
 
+    _api_key = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY")
+    _api_secret = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET")
+    if not _api_key or not _api_secret:
+        raise ValueError("BINANCE_TESTNET_FUTURES_API_KEY and BINANCE_TESTNET_FUTURES_API_SECRET must be set")
+
     run_training(
         symbol=args.symbol,
         days=args.days,
-        model_type=args.model_type,
         timeframe=args.timeframe,
+        api_key=_api_key,
+        api_secret=_api_secret,
         model_dir=args.model_dir,
     )
