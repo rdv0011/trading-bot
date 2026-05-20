@@ -6,7 +6,6 @@ import pandas as pd
 import numpy as np
 import warnings
 from catboost import CatBoostRegressor
-from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
 from mltrainingcore import predict_param_dicts_from_model, resolve_model_class, time_to_candles
@@ -391,9 +390,9 @@ def train_best_param_multi_model(
     Y = df[[f"target_{k}" for k in valid_keys]].fillna(0)
 
     # -------- Train/test split --------
-    X_train, X_val, Y_train, Y_val = train_test_split(
-        X, Y, test_size=test_size, random_state=random_state
-    )
+    n_train = int(len(X) * (1.0 - test_size))
+    X_train, X_val = X.iloc[:n_train], X.iloc[n_train:]
+    Y_train, Y_val = Y.iloc[:n_train], Y.iloc[n_train:]
 
     # Base Cat model
     base = CatBoostRegressor(

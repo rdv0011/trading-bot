@@ -19,7 +19,6 @@ import pandas as pd
 from dotenv import load_dotenv
 from binance.client import Client
 from catboost import CatBoostRegressor
-from sklearn.model_selection import train_test_split
 from sklearn.multioutput import MultiOutputRegressor
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -118,9 +117,9 @@ def _train_strategic_model(df_train: pd.DataFrame):
     X = df_train[feature_cols].fillna(0)
     Y = df_train[valid_targets].fillna(0)
 
-    X_train, X_val, Y_train, Y_val = train_test_split(
-        X, Y, test_size=0.2, random_state=SEED_BASE
-    )
+    n_train = int(len(X) * 0.8)
+    X_train, X_val = X.iloc[:n_train], X.iloc[n_train:]
+    Y_train, Y_val = Y.iloc[:n_train], Y.iloc[n_train:]
 
     base = CatBoostRegressor(
         iterations=500,
