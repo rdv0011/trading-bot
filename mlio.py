@@ -193,4 +193,6 @@ def save_labels(df, filename):
 
 def load_labels(filename):
     path = LABEL_DIR / filename
+    if not path.exists():
+        return None
     return pd.read_csv(path, parse_dates=['date'], index_col='date')

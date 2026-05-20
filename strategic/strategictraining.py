@@ -29,6 +29,8 @@ from mlio import (
     download_historical_prices,
     load_featured_df,
     save_featured_df,
+    load_labels,
+    save_labels,
     save_model,
     get_latest_model_paths,
     load_model,
@@ -157,8 +159,8 @@ def run_training(
 
     tf_cfg = TIMEFRAMES[timeframe]
 
-    cache_file = f"strategic_{symbol}_{timeframe}_{days}d_featured.csv"
-    df_full = load_featured_df(cache_file)
+    featured_file = f"strategic_{symbol}_{timeframe}_{days}d_featured.csv"
+    df_full = load_featured_df(featured_file)
 
     if df_full is None:
         api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
@@ -167,10 +169,17 @@ def run_training(
 
         df_raw = download_historical_prices(symbol, tf_cfg.binance_interval, days, client)
         df_full = make_strategic_features(df_raw, tf_cfg)
-        save_featured_df(df_full, cache_file)
-        print(f"✅ Features saved to cache: {cache_file}")
+        save_featured_df(df_full, featured_file)
+        print(f"✅ Features saved: {featured_file}")
 
-    df_labeled = _build_strategic_labels(df_full, tf_cfg)
+    labeled_file = f"strategic_{symbol}_{timeframe}_{days}d_labeled.csv"
+    df_labeled = load_labels(labeled_file)
+
+    if df_labeled is None:
+        df_labeled = _build_strategic_labels(df_full, tf_cfg)
+        save_labels(df_labeled, labeled_file)
+        print(f"✅ Labels saved: {labeled_file}")
+
     print(f"📊 Labeled dataset: {len(df_labeled)} rows")
 
     n_train = int(len(df_labeled) * TRAINING_FRACTION)
