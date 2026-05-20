@@ -54,7 +54,7 @@ class TacticalML:
 
         for i in tqdm(range(window, n), desc="TacticalML warmup", unit="candle"):
             if i % retrain_every == 0 or mdl is None:
-                train_df = df.iloc[i - window : i]
+                train_df = df.iloc[i - window : i - 1]
                 X_train = train_df[features]
                 y_train = train_df[TARGET_COLUMN]
                 seed = SEED_BASE + i - window
@@ -69,15 +69,20 @@ class TacticalML:
             f"🧠 TacticalML warmup complete: {len(self._pred_history)} predictions cached"
         )
 
-    def fit_and_predict(self, df: pd.DataFrame, features: List[str]) -> TacticalSignal:
-        X = df[features]
-        y = df[TARGET_COLUMN]
+    def fit_and_predict(
+        self,
+        df_train: pd.DataFrame,
+        df_pred: pd.DataFrame,
+        features: List[str],
+    ) -> TacticalSignal:
+        X_train = df_train[features]
+        y_train = df_train[TARGET_COLUMN]
 
         seed = SEED_BASE + len(self._pred_history)
         mdl = create_model(self.model_cls, seed, self.model_params)
-        mdl.fit(X, y)
+        mdl.fit(X_train, y_train)
 
-        last_row = X.iloc[[-1]]
+        last_row = df_pred[features].iloc[[-1]]
         prediction = float(mdl.predict(last_row)[0])
 
         hist_len = self.tf_cfg.adaptive_history_candles

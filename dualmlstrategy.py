@@ -100,7 +100,14 @@ class DualMLStrategy(BaseStrategy):
         df_tactical = make_labels(df_tactical, self.tf_cfg_tactical)
         features = get_features(df_tactical)
 
-        tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, features)
+        df_raw_tactical = self.get_historical_prices(
+            self.asset,
+            self.tf_cfg_tactical.max_history_candles,
+            self.tf_cfg_tactical.name,
+        )
+        df_pred = make_features(df_raw_tactical, self.tf_cfg_tactical).iloc[[-1]]
+
+        tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, df_pred, features)
 
         strategic_decision = self.strategic_ml.predict(df_strategic)
 
