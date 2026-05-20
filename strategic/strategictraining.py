@@ -185,7 +185,6 @@ def run_training(
         metadata=metadata,
         model_type=STRATEGIC_MODEL_TYPE_PREFIX,
         model_dir=model_dir,
-        keep_count=2,
     )
     print(f"\n✅ Strategic model saved: {saved_path}")
     return saved_path

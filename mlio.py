@@ -12,7 +12,7 @@ import joblib, glob
 # Detect the directory of the main script
 script_path = os.path.abspath(sys.argv[0])
 script_dir = os.path.dirname(script_path)
-MODEL_DIR = Path(script_dir) / "models"
+MODEL_DIR = Path(script_dir) / "model"
 MODEL_DIR.mkdir(exist_ok=True)
 
 LABEL_DIR = Path(script_dir) / "labeleddata"
@@ -21,16 +21,16 @@ LABEL_DIR.mkdir(exist_ok=True)
 # =============================================
 # Model Persistence Functions
 # =============================================
-def save_model(model, metadata, model_type, model_dir=MODEL_DIR, keep_count=2):
+def save_model(model, metadata, model_type, model_dir=MODEL_DIR, keep_count=1):
     """
     Save trained model to disk with timestamp.
-    Keeps only the most recent models to save disk space.
+    Keeps only the most recent model to save disk space.
 
     Args:
         model: Trained model object (e.g., MultiOutputRegressor wrapping CatBoost)
         model_type: 'xgb' or 'cat' (used in filename)
         model_dir: Directory to save models
-        keep_count: Number of recent models to keep (default: 2)
+        keep_count: Number of recent models to keep (default: 1)
         metadata: optional dict to save alongside the model (e.g., feature_cols, valid_targets)
     """
     os.makedirs(model_dir, exist_ok=True)
