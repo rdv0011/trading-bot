@@ -98,15 +98,8 @@ class BaseStrategy:
                 try:
                     self.on_trading_iteration()
                     
-                    # Sleep based on sleeptime parameter
-                    # Sleep time format: Xm in munutes
-                    sleep_seconds = int(self.sleep_time[:-1]) * 60
-                    
-                    self.log_message(f"💤 Sleeping for {sleep_seconds} seconds...")
-                    elapsed = 0
-                    while self.is_running and elapsed < sleep_seconds:
-                        time.sleep(1)
-                        elapsed += 1
+                    timeframe_minutes = int(self.sleep_time[:-1])
+                    self._sleep_until_next_candle(timeframe_minutes)
                     
                 except KeyboardInterrupt:
                     self.log_message("⚠️  Strategy interrupted by user")
@@ -122,6 +115,16 @@ class BaseStrategy:
         finally:
             self.shutdown()
     
+    def _sleep_until_next_candle(self, timeframe_minutes: int):
+        now = datetime.utcnow()
+        seconds_into_candle = (now.minute % timeframe_minutes) * 60 + now.second
+        seconds_to_next = timeframe_minutes * 60 - seconds_into_candle + 5
+        self.log_message(f"💤 Sleeping {seconds_to_next}s until next {timeframe_minutes}m candle close")
+        elapsed = 0
+        while self.is_running and elapsed < seconds_to_next:
+            time.sleep(1)
+            elapsed += 1
+
     def shutdown(self):
         """Graceful shutdown"""
         self.log_message("🛑 Shutting down strategy...")
