@@ -1,4 +1,5 @@
 import gc
+import time
 from typing import Callable, Optional
 
 import numpy as np
@@ -10,6 +11,7 @@ from strategic.strategicfeatures import make_strategic_features, get_strategic_f
 from timeframe_config import TimeframeConfig
 
 STRATEGIC_MODEL_TYPE_PREFIX = "strategic"
+_RELOAD_CHECK_INTERVAL = 300
 
 _REGIME_TO_LEVERAGE = {
     "trend": 5.0,
@@ -53,6 +55,7 @@ class StrategicML:
         self._metadata = None
         self._current_model_path = None
         self._current_meta_path = None
+        self._last_reload_check: float = 0.0
         self._load_latest()
 
     def predict(self, df: pd.DataFrame) -> StrategicDecision:
@@ -126,6 +129,10 @@ class StrategicML:
             self.log(f"⚠️ StrategicML load error: {e}")
 
     def _check_and_reload(self):
+        now = time.time()
+        if now - self._last_reload_check < _RELOAD_CHECK_INTERVAL:
+            return
+        self._last_reload_check = now
         try:
             latest_path, latest_meta = get_latest_model_paths(
                 STRATEGIC_MODEL_TYPE_PREFIX, self.model_dir
