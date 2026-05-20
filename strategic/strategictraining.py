@@ -16,7 +16,6 @@ import warnings
 
 import numpy as np
 import pandas as pd
-from dotenv import load_dotenv
 from binance.client import Client
 from catboost import CatBoostRegressor
 from sklearn.multioutput import MultiOutputRegressor
@@ -143,8 +142,6 @@ def run_training(
     symbol: str,
     days: int,
     timeframe: str,
-    api_key: str,
-    api_secret: str,
     model_dir=MODEL_DIR,
 ):
     tf_cfg = TIMEFRAMES[timeframe]
@@ -153,9 +150,7 @@ def run_training(
     df_full = load_featured_df(featured_file)
 
     if df_full is None:
-        if not api_key or not api_secret:
-            raise ValueError("api_key and api_secret must be provided")
-        client = Client(api_key, api_secret, testnet=True)
+        client = Client()
 
         df_raw = download_historical_prices(symbol, tf_cfg.binance_interval, days, client)
         df_full = make_strategic_features(df_raw, tf_cfg)
@@ -190,8 +185,6 @@ def run_training(
 
 
 if __name__ == "__main__":
-    load_dotenv()
-
     parser = argparse.ArgumentParser(description="Train the StrategicML model.")
     parser.add_argument("--symbol", default=DEFAULT_SYMBOL)
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
@@ -199,16 +192,9 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", default=str(MODEL_DIR))
     args = parser.parse_args()
 
-    _api_key = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY")
-    _api_secret = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET")
-    if not _api_key or not _api_secret:
-        raise ValueError("BINANCE_TESTNET_FUTURES_API_KEY and BINANCE_TESTNET_FUTURES_API_SECRET must be set")
-
     run_training(
         symbol=args.symbol,
         days=args.days,
         timeframe=args.timeframe,
-        api_key=_api_key,
-        api_secret=_api_secret,
         model_dir=args.model_dir,
     )

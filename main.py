@@ -47,16 +47,10 @@ if __name__ == "__main__":
     if args.train_strategic:
         from strategic.strategictraining import run_training
         from mlio import MODEL_DIR
-        _key = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY")
-        _secret = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET")
-        if not _key or not _secret:
-            raise ValueError("BINANCE_TESTNET_FUTURES_API_KEY and BINANCE_TESTNET_FUTURES_API_SECRET must be set")
         run_training(
             symbol="BTCUSDT",
             days=args.strategic_days,
             timeframe=args.strategic_timeframe,
-            api_key=_key,
-            api_secret=_secret,
             model_dir=MODEL_DIR,
         )
         raise SystemExit(0)
