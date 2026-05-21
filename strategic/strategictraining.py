@@ -33,6 +33,8 @@ from mlio import (
     get_latest_model_paths,
     load_model,
 )
+from mltrainingcore import SIGNAL_COLUMN
+from mltraining import walkforward_label_forward_windows, build_param_grid
 from strategic.strategicfeatures import (
     make_strategic_features,
     get_strategic_features,
@@ -76,6 +78,74 @@ def _build_strategic_labels(df: pd.DataFrame, tf_cfg: TimeframeConfig) -> pd.Dat
     )
 
     return df.dropna()
+
+
+def _build_strategic_labels_from_simulation(
+    df: pd.DataFrame,
+    df_5m_predictions: pd.DataFrame,
+    tf_cfg: TimeframeConfig,
+) -> pd.DataFrame:
+    df = df.copy()
+
+    vol_ratio = df["vol_short"] / df["vol_long"].clip(lower=1e-8)
+    df["allow_trading"] = (vol_ratio < EXTREME_VOL_RATIO).astype(float)
+
+    regime_leverage = {"trend": 5.0, "high_vol": 2.0, "chop": 1.0}
+    df["recommended_leverage"] = df["regime"].map(regime_leverage).fillna(1.0)
+
+    df["max_exposure_frac"] = np.where(
+        vol_ratio >= HIGH_VOL_RATIO, 0.3, np.where(vol_ratio >= 1.0, 0.6, 1.0)
+    )
+
+    pred_1h = df_5m_predictions[SIGNAL_COLUMN].resample("1h").last().rename(SIGNAL_COLUMN)
+    df = df.join(pred_1h, how="inner")
+    df = df.dropna(subset=[SIGNAL_COLUMN])
+
+    param_grid = build_param_grid(
+        stake_short=[0.05, 0.10, 0.15],
+        stake_long=[0.10, 0.15, 0.25],
+        stop_loss=[0.01, 0.015, 0.02, 0.03, 0.05],
+        max_hold_hours=[2, 4, 8, 12, 24],
+        take_profit_mult=2.0,
+    )
+
+    labels_df = walkforward_label_forward_windows(
+        df=df,
+        param_grid=param_grid,
+        signal_col=SIGNAL_COLUMN,
+        window_hours=24.0,
+        step_hours=2.4,
+        tf_cfg=tf_cfg,
+    )
+
+    if labels_df.empty:
+        raise RuntimeError(
+            f"Walk-forward param search produced no labels — dataset too short "
+            f"({len(df)} rows). Need at least {tf_cfg.adaptive_history_candles + 24} rows."
+        )
+
+    labels_for_merge = labels_df.reset_index()[["date", "best_param"]]
+
+    df.index.name = "date"
+    df_reset = df.reset_index()
+
+    df_merged = pd.merge_asof(
+        df_reset.sort_values("date"),
+        labels_for_merge.sort_values("date"),
+        on="date",
+        direction="backward",
+    ).set_index("date").sort_index()
+
+    df_merged = df_merged.dropna(subset=["best_param"])
+
+    param_keys = ["stake_long_frac", "stake_short_frac", "stop_loss_frac", "take_profit_frac", "max_hold_hours"]
+    for key in param_keys:
+        df_merged[key] = df_merged["best_param"].apply(
+            lambda d: d.get(key) if isinstance(d, dict) else np.nan
+        )
+
+    df_merged = df_merged.drop(columns=["best_param"])
+    return df_merged.dropna(subset=param_keys)
 
 
 def _train_strategic_model(df_train: pd.DataFrame):
@@ -143,6 +213,7 @@ def run_training(
     days: int,
     timeframe: str,
     model_dir=MODEL_DIR,
+    df_5m_predictions: pd.DataFrame = None,
 ):
     tf_cfg = TIMEFRAMES[timeframe]
 
@@ -157,13 +228,22 @@ def run_training(
         save_featured_df(df_full, featured_file)
         print(f"✅ Features saved: {featured_file}")
 
-    labeled_file = f"strategic_{symbol}_{timeframe}_{days}d_labeled.csv"
-    df_labeled = load_labels(labeled_file)
+    if df_5m_predictions is not None:
+        labeled_file = f"strategic_{symbol}_{timeframe}_{days}d_sim_labeled.csv"
+        df_labeled = load_labels(labeled_file)
 
-    if df_labeled is None:
-        df_labeled = _build_strategic_labels(df_full, tf_cfg)
-        save_labels(df_labeled, labeled_file)
-        print(f"✅ Labels saved: {labeled_file}")
+        if df_labeled is None:
+            df_labeled = _build_strategic_labels_from_simulation(df_full, df_5m_predictions, tf_cfg)
+            save_labels(df_labeled, labeled_file)
+            print(f"✅ Simulation-driven labels saved: {labeled_file}")
+    else:
+        labeled_file = f"strategic_{symbol}_{timeframe}_{days}d_labeled.csv"
+        df_labeled = load_labels(labeled_file)
+
+        if df_labeled is None:
+            df_labeled = _build_strategic_labels(df_full, tf_cfg)
+            save_labels(df_labeled, labeled_file)
+            print(f"✅ Labels saved: {labeled_file}")
 
     print(f"📊 Labeled dataset: {len(df_labeled)} rows")
 
