@@ -10,7 +10,7 @@ from strategic.strategicml import StrategicML
 from positionmanager import PositionManager
 from riskguard import RiskGuard
 
-STRATEGIC_HISTORY_CANDLES = 200
+STRATEGIC_HISTORY_CANDLES = 300
 TACTICAL_HISTORY_CANDLES_MULTIPLIER = 2
 
 
@@ -131,7 +131,6 @@ class DualMLStrategy(BaseStrategy):
         )
 
         if self.market_type.lower() == MARKET_TYPE_SPOT and tactical_signal.signal == SIGNAL_SHORT:
-            from dataclasses import replace
             tactical_signal = type(tactical_signal)(
                 signal=SIGNAL_HOLD,
                 prediction=tactical_signal.prediction,
