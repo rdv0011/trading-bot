@@ -108,6 +108,16 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             limit=limit,
         )
 
+    def get_position_leverage(self, symbol: str) -> Optional[int]:
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            if not positions:
+                return None
+            return int(positions[0].get("leverage", 0)) or None
+        except Exception as e:
+            self.logger.error(f"❌ Error fetching leverage for {symbol}: {e}")
+            return None
+
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         try:
             self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
@@ -117,7 +127,24 @@ class BinanceFuturesBroker(BinanceBaseBroker):
 
         try:
             self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
-            return True
         except Exception as e:
             self.logger.error(f"❌ Set leverage failed for {symbol}: {e}")
             return False
+
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            if positions:
+                confirmed_leverage = int(positions[0].get("leverage", 0))
+                confirmed_margin = positions[0].get("marginType", "unknown")
+                if confirmed_leverage != leverage:
+                    self.logger.warning(
+                        f"⚠️ Leverage mismatch for {symbol}: requested={leverage}x confirmed={confirmed_leverage}x"
+                    )
+                else:
+                    self.logger.info(
+                        f"✅ Leverage confirmed: {confirmed_leverage}x ({confirmed_margin}) for {symbol}"
+                    )
+        except Exception as e:
+            self.logger.warning(f"⚠️ Could not verify leverage for {symbol}: {e}")
+
+        return True
