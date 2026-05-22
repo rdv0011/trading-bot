@@ -1,9 +1,11 @@
 import argparse
+import os
 import warnings
 
 import numpy as np
 import pandas as pd
 from binance.client import Client
+from joblib import Parallel, delayed
 from tqdm import tqdm
 
 from mltrainingcore import (
@@ -45,12 +47,23 @@ DEFAULT_PARAMS = {
 }
 
 
+def _predict_chunk(df_full, features, tf_cfg, model_params, indices):
+    from tactical.tacticalml import TacticalML as _TacticalML
+    tactical = _TacticalML(model_type="cat", model_params=model_params, tf_cfg=tf_cfg)
+    window = tf_cfg.max_history_candles
+    results = []
+    for i in indices:
+        df_train = df_full.iloc[i - window : i - 1]
+        df_pred_row = df_full.iloc[[i]]
+        sig = tactical.fit_and_predict(df_train, df_pred_row, features)
+        results.append((i, sig.prediction))
+    return results
+
+
 def _rolling_tactical_predictions(df_full: pd.DataFrame, tf_cfg) -> pd.DataFrame:
-    tactical = TacticalML(
-        model_type="cat",
-        model_params={"iterations": 300, "verbose": False},
-        tf_cfg=tf_cfg,
-    )
+    # iterations=100 (vs 300 live) is sufficient for offline backtest and gives ~3x speedup.
+    # thread_count=1 prevents core thrashing when N workers each spawn N CatBoost threads.
+    model_params = {"iterations": 100, "verbose": False, "thread_count": 1}
 
     features = get_features(df_full)
     n = len(df_full)
@@ -60,13 +73,24 @@ def _rolling_tactical_predictions(df_full: pd.DataFrame, tf_cfg) -> pd.DataFrame
         window = max(50, n // 3)
         print(f"[TacticalML] Auto-adjusted window={window} for dataset length={n}")
 
-    preds = []
+    all_indices = list(range(window, n))
+    n_jobs = min(os.cpu_count() or 4, 8)
+    chunks = [arr.tolist() for arr in np.array_split(all_indices, n_jobs)]
 
-    for i in tqdm(range(window, n), desc="Walk-forward tactical predictions", unit="candle"):
-        df_train = df_full.iloc[i - window : i - 1]
-        df_pred_row = df_full.iloc[[i]]
-        signal = tactical.fit_and_predict(df_train, df_pred_row, features)
-        preds.append(signal.prediction)
+    print(f"Running {len(all_indices)} walk-forward predictions on {n_jobs} workers...")
+
+    results_nested = Parallel(n_jobs=n_jobs, backend="threading")(
+        delayed(_predict_chunk)(df_full, features, tf_cfg, model_params, chunk)
+        for chunk in chunks
+    )
+
+    flat = sorted(
+        [item for chunk_result in results_nested for item in chunk_result],
+        key=lambda x: x[0],
+    )
+    preds = [p for _, p in flat]
+
+    print("Predictions complete.")
 
     df_out = df_full.iloc[window:].copy()
     df_out[SIGNAL_COLUMN] = preds
@@ -90,12 +114,14 @@ def _build_strategic_param_list(
     )
 
     max_hist = strategic_tf_cfg.max_history_candles
+    min_rows_for_features = 250
+    hist_window = max(max_hist, min_rows_for_features)
     param_list = []
 
     for ts in tqdm(df_test.index, desc="Strategic decisions", unit="candle"):
-        df_hist_1h = df_1h[df_1h.index <= ts].tail(max_hist)
+        df_hist_1h = df_1h[df_1h.index <= ts].tail(hist_window)
 
-        if len(df_hist_1h) < 10:
+        if len(df_hist_1h) < min_rows_for_features:
             param_list.append(DEFAULT_PARAMS.copy())
             continue
 

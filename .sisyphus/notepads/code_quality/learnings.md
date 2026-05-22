@@ -1,0 +1,13 @@
+## 2026-05-20 Initial setup
+- Conda env: `traidingbot` (typo intentional), path `/opt/homebrew/anaconda3/envs/traidingbot/bin/python`
+- Project root: `trading-bot/trading-bot/`
+- Branch: `feature/dual-ml-system`
+- `caculate_metrics` is called at mltrainingcore.py:327 and in mltraining.py (grep needed for exact line)
+- `BUY_SLIPPAGE`/`SELL_SLIPPAGE` dead code at mlstrategy.py:12-13
+- `import traceback` inside except blocks: basestrategy.py:112, mlstrategy.py:390, mlpredictor.py:167, dualmlstrategy.py:137
+- mlio.py uses print() throughout — needs logging
+- strategic/strategictraining.py uses print() — needs logging
+- Silent pass locations: mlio.py:49-51, mlio.py:64-65, mlio.py:83-85, strategic/strategicml.py:143, mltraining.py:762-763
+- MODEL_DIR/LABEL_DIR resolved from sys.argv[0] — fragile, should use __file__
+- API keys default to "" on missing env — should raise ValueError
+- BaseStrategy sleep is monolithic time.sleep() — should be interruptible loop

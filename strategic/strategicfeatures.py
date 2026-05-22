@@ -43,7 +43,7 @@ def _classify_vol_state(vol_ratio: float) -> float:
 
 
 def get_strategic_features(df: pd.DataFrame) -> list:
-    exclude = {"future_close", "future_ret", "regime", "vol_state"}
+    exclude = {"future_close", "future_ret", "regime", "vol_state", "allow_trading", "pred"}
     return [
         c
         for c in df.columns

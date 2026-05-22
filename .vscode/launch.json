@@ -2,29 +2,20 @@
   "version": "0.2.0",
   "configurations": [
   {
-    "name": "Python: Run bot futures",
+    "name": "train-strategic",
     "type": "debugpy",
     "request": "launch",
     "justMyCode": false,
     "program": "${workspaceFolder}/main.py",
     "console": "integratedTerminal",
-    "args": ["--model-type=cat", "--market-type=futures"]
-  },
-    {
-    "name": "Python: Run bot spot",
-    "type": "debugpy",
-    "request": "launch",
-    "justMyCode": false,
-    "program": "${workspaceFolder}/main.py",
-    "console": "integratedTerminal",
-    "args": ["--model-type=cat", "--market-type=spot"]
+    "args": ["--train-strategic", "--market-type=futures"]
   },
   {
-    "name": "Python: Train ML models",
+    "name": "run-strategic",
     "type": "debugpy",
     "request": "launch",
     "justMyCode": false,
-    "program": "${workspaceFolder}/mltraining.py",
+    "program": "${workspaceFolder}/main.py",
     "console": "integratedTerminal"
   }
   ]
