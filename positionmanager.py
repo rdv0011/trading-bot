@@ -79,11 +79,10 @@ class PositionManager:
             self.log("⏸ Chop regime — no new entries")
             return
 
-        self._broker.set_leverage(self._symbol, int(strategic.recommended_leverage), strategic.margin_type)
-
         signal = tactical.signal
 
         if self._state is None:
+            self._broker.set_leverage(self._symbol, int(strategic.recommended_leverage), strategic.margin_type)
             if signal != SIGNAL_HOLD:
                 self._open_position(signal, current_price, strategic)
             return
@@ -210,6 +209,9 @@ class PositionManager:
             self.log("⚠️ Scale-up quantity below minimum, skipping")
             return
 
+        # Cancel existing TP/SL orders before placing new bracket to avoid -4130
+        self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
+
         res = self._broker.open_position_with_bracket(
             self._symbol,
             signal,
@@ -220,6 +222,12 @@ class PositionManager:
 
         if not res.success:
             self.log(f"❌ Scale-up failed: {res.error}")
+            # Verify actual position — open_position_with_bracket may have closed
+            # the full position on TP/SL failure; reset state if flat
+            live = self._broker.get_position(self._symbol)
+            if live is None or abs(live.amount) < MIN_TRADEABLE_QUANTITY:
+                self.log("⚠️ Position was fully closed during failed scale-up — resetting state")
+                self._state = None
             return
 
         self._state.amount += add_qty

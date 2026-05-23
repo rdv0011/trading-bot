@@ -119,18 +119,34 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             return None
 
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
+        # ── Check current margin type to avoid unnecessary API calls ──
         try:
-            self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
+            positions = self.client.futures_position_information(symbol=symbol)
+            current_margin = positions[0].get("marginType", "").upper() if positions else ""
+            current_lev = int(positions[0].get("leverage", 0)) if positions else 0
+            if current_margin != margin_type.upper():
+                try:
+                    self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
+                except Exception as e:
+                    err_str = str(e)
+                    if "No need to change margin type" not in err_str:
+                        self.logger.warning(f"⚠️ Could not set margin type for {symbol}: {e}")
         except Exception as e:
-            if "No need to change margin type" not in str(e):
-                self.logger.warning(f"⚠️ Could not set margin type for {symbol}: {e}")
+            self.logger.warning(f"⚠️ Could not read current margin type for {symbol}: {e}")
 
+        # ── Set leverage ──
         try:
             self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
         except Exception as e:
-            self.logger.error(f"❌ Set leverage failed for {symbol}: {e}")
+            err_str = str(e)
+            # code -4161: leverage reduction not supported in isolated margin with open positions
+            if "4161" in err_str:
+                self.logger.warning(f"⚠️ Leverage reduction not supported with open positions in isolated margin — skipping for {symbol}")
+            else:
+                self.logger.error(f"❌ Set leverage failed for {symbol}: {e}")
             return False
 
+        # ── Verify ──
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             if positions:
