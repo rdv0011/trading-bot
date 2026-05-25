@@ -7,11 +7,11 @@ import pandas as pd
 from tqdm import tqdm
 
 from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT
+from catboost import CatBoostRegressor
 from mltrainingcore import (
     TARGET_COLUMN,
     SEED_BASE,
     create_model,
-    resolve_model_class,
     adaptive_thresholding,
 )
 from timeframe_config import TimeframeConfig
@@ -34,13 +34,10 @@ class TacticalML:
 
     def __init__(
         self,
-        model_type: str,
         model_params: dict,
         tf_cfg: TimeframeConfig,
         logger: Optional[Callable[[str], None]] = None,
     ):
-        self.model_type = model_type
-        self.model_cls = resolve_model_class(model_type)
         self.model_params = model_params
         self.tf_cfg = tf_cfg
         self.log = logger if logger is not None else print
@@ -58,7 +55,7 @@ class TacticalML:
                 X_train = train_df[features]
                 y_train = train_df[TARGET_COLUMN]
                 seed = SEED_BASE + i - window
-                mdl = create_model(self.model_cls, seed, self.model_params)
+                mdl = create_model(CatBoostRegressor, seed, self.model_params)
                 mdl.fit(X_train, y_train)
 
             X_pred = df.iloc[[i]][features]
@@ -79,7 +76,7 @@ class TacticalML:
         y_train = df_train[TARGET_COLUMN]
 
         seed = SEED_BASE + len(self._pred_history)
-        mdl = create_model(self.model_cls, seed, self.model_params)
+        mdl = create_model(CatBoostRegressor, seed, self.model_params)
         mdl.fit(X_train, y_train)
 
         last_row = df_pred[features].iloc[[-1]]

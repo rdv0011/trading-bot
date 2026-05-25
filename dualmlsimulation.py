@@ -49,7 +49,7 @@ DEFAULT_PARAMS = {
 
 def _predict_chunk(df_full, features, tf_cfg, model_params, indices):
     from tactical.tacticalml import TacticalML as _TacticalML
-    tactical = _TacticalML(model_type="cat", model_params=model_params, tf_cfg=tf_cfg)
+    tactical = _TacticalML(model_params=model_params, tf_cfg=tf_cfg)
     window = tf_cfg.max_history_candles
     results = []
     for i in indices:

@@ -6,8 +6,9 @@ import traceback
 from tqdm import tqdm
 from mlio import load_model, get_latest_model_paths
 from timeframe_config import TimeframeConfig
+from catboost import CatBoostRegressor
 from mltrainingcore import REGIME_COLUMN, SEED_BASE, create_model, adaptive_thresholding
-from mltrainingcore import resolve_model_class, TARGET_COLUMN, predict_param_dicts_from_model
+from mltrainingcore import TARGET_COLUMN, predict_param_dicts_from_model
 from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT
 import pandas as pd
 import numpy as np
@@ -37,7 +38,7 @@ class MlPredictor:
         """
         self.log_message = logger if logger is not None else print
         self.model_type = model_type
-        self.model_cls = resolve_model_class(model_type)
+        self.model_cls = CatBoostRegressor
         self.model_params = model_params
         self.auto_reload = auto_reload
         self.model_dir = model_dir

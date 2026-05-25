@@ -8,7 +8,7 @@ import warnings
 from catboost import CatBoostRegressor
 from sklearn.multioutput import MultiOutputRegressor
 from tqdm import tqdm
-from mltrainingcore import predict_param_dicts_from_model, resolve_model_class, time_to_candles
+from mltrainingcore import predict_param_dicts_from_model, time_to_candles
 from mltrainingcore import get_features, simulate_trades_core, create_model, build_feature_dataset
 from mltrainingcore import TARGET_COLUMN, SEED_BASE, SIGNAL_COLUMN
 from mltrainingcore import OBJECTIVE_METRIC
@@ -176,7 +176,7 @@ def rolling_train_predict_multi(
     else:
         w = window
 
-    model_cls = resolve_model_class(model_type)
+    model_cls = CatBoostRegressor
     preds = []
     mdl = None
     retrain_every = 12  # Retrain every N candles for speed

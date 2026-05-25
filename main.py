@@ -19,11 +19,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run trading bot strategy.")
 
     parser.add_argument(
-        "--model-type",
-        choices=["xgb", "cat"],
-        default="cat",
-    )
-    parser.add_argument(
         "--market-type",
         choices=["spot", "futures"],
         default="futures",
@@ -105,7 +100,7 @@ if __name__ == "__main__":
     if args.strategy == "dual":
         parameters = {
             "asset_symbol": base_symbol,
-            "model_type": args.model_type,
+            "model_type": "cat",
             "market_type": args.market_type,
             "tactical_timeframe": "5m",
             "strategic_timeframe": "1h",
@@ -121,7 +116,7 @@ if __name__ == "__main__":
         parameters = {
             "asset_symbol": base_symbol,
             "historical_prices_unit": "5m",
-            "model_type": args.model_type,
+            "model_type": "cat",
             "auto_reload": True,
             "sleeptime": "5m",
             "market_type": args.market_type,

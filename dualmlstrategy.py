@@ -47,10 +47,8 @@ class DualMLStrategy(BaseStrategy):
         features = get_features(df_hist)
 
         model_params = self.parameters.get("model_params", {"iterations": 300, "verbose": False})
-        model_type = self.parameters.get("model_type", "cat")
 
         self.tactical_ml = TacticalML(
-            model_type=model_type,
             model_params=model_params,
             tf_cfg=self.tf_cfg_tactical,
             logger=self.log_message,

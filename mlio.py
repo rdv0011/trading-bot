@@ -23,6 +23,10 @@ MODEL_DIR.mkdir(exist_ok=True)
 LABEL_DIR = _HERE / "labeleddata"
 LABEL_DIR.mkdir(exist_ok=True)
 
+# Model type identifier used for tactical predictions and file naming.
+# Only "cat" (CatBoost) is supported in production.
+MODEL_TYPE = "cat"
+
 # =============================================
 # Model Persistence Functions
 # =============================================

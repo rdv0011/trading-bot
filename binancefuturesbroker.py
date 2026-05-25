@@ -1,3 +1,4 @@
+import time
 from typing import Optional
 from binance.client import Client
 from binance.enums import *
@@ -125,12 +126,20 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             current_margin = positions[0].get("marginType", "").upper() if positions else ""
             current_lev = int(positions[0].get("leverage", 0)) if positions else 0
             if current_margin != margin_type.upper():
-                try:
-                    self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
-                except Exception as e:
-                    err_str = str(e)
-                    if "No need to change margin type" not in err_str:
+                for _attempt in range(2):
+                    try:
+                        self.client.futures_change_margin_type(symbol=symbol, marginType=margin_type)
+                        break
+                    except Exception as e:
+                        err_str = str(e)
+                        if "No need to change margin type" in err_str:
+                            break
+                        if "-1007" in err_str and _attempt == 0:
+                            self.logger.warning(f"⚠️ Margin type change timed out for {symbol}, retrying...")
+                            time.sleep(1)
+                            continue
                         self.logger.warning(f"⚠️ Could not set margin type for {symbol}: {e}")
+                        break
         except Exception as e:
             self.logger.warning(f"⚠️ Could not read current margin type for {symbol}: {e}")
 

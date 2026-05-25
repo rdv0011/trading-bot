@@ -417,33 +417,6 @@ def create_model(model_cls, random_seed, model_params):
     # Merge parameters safely
     return model_cls(**seed_args, **model_params)
 
-def resolve_model_class(model_type):
-    """
-    Resolve the appropriate model class based on self.model_type.
-    Supports: 'cat', 'xgb'
-    """
-
-    model_map = {
-        "cat": ("catboost", "CatBoostRegressor"),
-        "xgb": ("xgboost", "XGBRegressor"),
-    }
-
-    key = model_type.lower()
-
-    if key not in model_map:
-        raise ValueError(
-            f"Unknown model_type '{model_type}'. "
-            f"Supported values: {list(model_map.keys())}"
-        )
-
-    module_name, class_name = model_map[key]
-
-    # Dynamically import module & class
-    module = __import__(module_name, fromlist=[class_name])
-    model_class = getattr(module, class_name)
-
-    return model_class
-
 def predict_param_dicts_from_model(model, metadata: Optional[dict], X: pd.DataFrame):
     """
     Returns a SINGLE dict mapping target_keys to predicted values.

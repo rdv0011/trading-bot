@@ -62,7 +62,6 @@ Available flags:
 |------|--------|---------|-------------|
 | `--market-type` | `futures`, `spot` | `futures` | Binance market |
 | `--strategy` | `dual`, `legacy` | `dual` | `dual` = two-tier ML, `legacy` = original single-ML |
-| `--model-type` | `cat` | `cat` | ML model backend |
 
 ---
 

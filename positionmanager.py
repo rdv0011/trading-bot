@@ -82,8 +82,15 @@ class PositionManager:
         signal = tactical.signal
 
         if self._state is None:
-            self._broker.set_leverage(self._symbol, int(strategic.recommended_leverage), strategic.margin_type)
             if signal != SIGNAL_HOLD:
+                ok = self._broker.set_leverage(
+                    self._symbol,
+                    int(strategic.recommended_leverage),
+                    strategic.margin_type,
+                )
+                if not ok:
+                    self.log("⚠️ Leverage setup failed — skipping entry")
+                    return
                 self._open_position(signal, current_price, strategic)
             return
 
