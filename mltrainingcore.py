@@ -18,8 +18,8 @@ ROUND_TRIP_COST = (TAKER_FEE + SLIPPAGE) * 2
 
 def time_to_candles(
     *,
-    minutes: float | None = None,
-    hours: float | None = None,
+    minutes: Optional[float] = None,
+    hours: Optional[float] = None,
     timeframe_minutes: int,
     min_candles: int = 1,
 ) -> int:

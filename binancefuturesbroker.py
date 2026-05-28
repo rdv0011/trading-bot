@@ -81,14 +81,32 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             return None
 
     def cancel_open_orders(self, symbol: str, max_retries: int, base_delay: float):
-        try:
-            open_orders = self.client.futures_get_open_orders(symbol=symbol, conditional=True)
-            for o in open_orders:
-                algo_id = o.get("algoId")
-                if algo_id:
-                    self.client.futures_cancel_order(symbol=symbol, algoId=algo_id, conditional=True)
-        except Exception as e:
-            self.logger.error(f"❌ Cancel open orders failed: {e}")
+        last_error = None
+        for attempt in range(max_retries):
+            try:
+                open_orders = self.client.futures_get_open_orders(symbol=symbol, conditional=True)
+                if not open_orders:
+                    return  # nothing to cancel
+
+                for o in open_orders:
+                    algo_id = o.get("algoId")
+                    if algo_id:
+                        self.client.futures_cancel_order(symbol=symbol, algoId=algo_id, conditional=True)
+
+                # Verify all orders were cancelled
+                remaining = self.client.futures_get_open_orders(symbol=symbol, conditional=True)
+                if not remaining:
+                    return
+
+                last_error = f"{len(remaining)} order(s) still open after cancel"
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+            except Exception as e:
+                last_error = str(e)
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+
+        self.logger.error(f"❌ Cancel open orders failed after {max_retries} retries: {last_error}")
 
     def close_position(self, symbol: str, position: float):
         try:
@@ -100,7 +118,22 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 quantity=abs(position)
             )
         except Exception as e:
-            self.logger.error(f"❌ Close position failed: {e}")
+            self.logger.error(f"❌ Close position failed for {symbol}: {e}")
+
+    def get_liquidation_price(self, symbol: str) -> Optional[float]:
+        """Fetch the current liquidation price from the exchange position info."""
+        try:
+            positions = self.client.futures_position_information(symbol=symbol)
+            if not positions:
+                return None
+            liq_price = positions[0].get("liquidationPrice")
+            if liq_price is not None:
+                val = float(liq_price)
+                return val if val > 0 else None
+            return None
+        except Exception as e:
+            self.logger.error(f"❌ Error fetching liquidation price for {symbol}: {e}")
+            return None
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(

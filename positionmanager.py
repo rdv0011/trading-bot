@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time as _time
 from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -19,6 +20,7 @@ MAX_SCALE_COUNT = 3
 SCALE_INCREMENT_FRAC = 0.5
 PARTIAL_CLOSE_FRAC = 0.33
 CONSECUTIVE_SIGNALS_REQUIRED = 2
+MIN_LIQUIDATION_BUFFER_FRAC = 0.008  # 0.8% minimum gap between SL trigger and liquidation
 
 
 @dataclass
@@ -136,7 +138,8 @@ class PositionManager:
 
         live = self._broker.get_position(self._symbol)
         if live and live.amount and abs(live.amount) >= MIN_TRADEABLE_QUANTITY:
-            self._broker.close_position(self._symbol, abs(live.amount))
+            # Pass signed amount: positive for LONG (sell), negative for SHORT (buy to cover)
+            self._broker.close_position(self._symbol, live.amount)
             self.log(f"🔴 EMERGENCY CLOSE (live) qty={abs(live.amount)}")
         else:
             self.log("✅ No open position on exchange during emergency close")
@@ -159,6 +162,39 @@ class PositionManager:
             )
         else:
             self.log("✅ No open position found on startup — starting flat")
+
+    def _check_liquidation_buffer(
+        self,
+        sl_price: float,
+        entry_price: float,
+        context: str = "",
+    ):
+        """Warn if the stop-loss trigger is dangerously close to the liquidation price."""
+        try:
+            liq_price = self._broker.get_liquidation_price(self._symbol)
+            if liq_price is None or liq_price <= 0:
+                return  # exchange didn't report a liquidation price
+
+            if self._state and self._state.side == SIGNAL_SHORT:
+                # For SHORT: SL is above entry, liquidation is above SL
+                buffer_pct = (liq_price - sl_price) / entry_price
+            else:
+                # For LONG: SL is below entry, liquidation is below SL
+                buffer_pct = (sl_price - liq_price) / entry_price
+
+            if buffer_pct < MIN_LIQUIDATION_BUFFER_FRAC:
+                self.log(
+                    f"⚠️ LIQUIDATION RISK ({context}): "
+                    f"SL={sl_price:.2f} liq={liq_price:.2f} "
+                    f"buffer={buffer_pct*100:.2f}% — below {MIN_LIQUIDATION_BUFFER_FRAC*100:.1f}% threshold"
+                )
+            else:
+                self.log(
+                    f"  🛡 Liq buffer OK ({context}): "
+                    f"{buffer_pct*100:.2f}% gap between SL and liquidation"
+                )
+        except Exception as exc:
+            self.log(f"⚠️ Could not check liquidation buffer: {exc}")
 
     def _open_position(
         self, signal: str, price: float, strategic: StrategicDecision
@@ -200,6 +236,11 @@ class PositionManager:
         self._state.signal_history.append(signal)
         self.log(f"🟢 OPEN {signal.upper()} @ {entry_price} qty={qty}")
 
+        # Warn if liquidation is too close to stop-loss
+        sl_price = res.data.get("sl_price")
+        if sl_price:
+            self._check_liquidation_buffer(sl_price, entry_price, context=f"entry@{entry_price}")
+
     def _scale_up(self, signal: str, price: float, strategic: StrategicDecision):
         cash = self._broker.get_cash(self._quote_symbol)
         stake_frac = (
@@ -215,6 +256,10 @@ class PositionManager:
         if add_qty < MIN_TRADEABLE_QUANTITY:
             self.log("⚠️ Scale-up quantity below minimum, skipping")
             return
+
+        # Record position size before scale-up to verify later
+        pos_before = self._broker.get_position(self._symbol)
+        qty_before = abs(pos_before.amount) if pos_before else 0.0
 
         # Cancel existing TP/SL orders before placing new bracket to avoid -4130
         self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
@@ -235,14 +280,46 @@ class PositionManager:
             if live is None or abs(live.amount) < MIN_TRADEABLE_QUANTITY:
                 self.log("⚠️ Position was fully closed during failed scale-up — resetting state")
                 self._state = None
+            elif abs(live.amount) <= qty_before:
+                # Position was NOT increased (market order failed or was rejected)
+                self.log(
+                    f"⚠️ Scale-up market order likely failed — "
+                    f"position unchanged at {abs(live.amount):.4f}"
+                )
+            else:
+                # Position increased but TP/SL failed — position is unprotected!
+                self.log(
+                    f"⚠️ Scale-up added {abs(live.amount) - qty_before:.4f} but TP/SL placement failed — "
+                    f"position has no stop-loss protection!"
+                )
             return
 
-        self._state.amount += add_qty
+        # Verify position actually increased
+        live = self._broker.get_position(self._symbol)
+        if live is None or abs(live.amount) <= qty_before + MIN_TRADEABLE_QUANTITY:
+            self.log(
+                f"⚠️ Scale-up market order did not increase position "
+                f"(before={qty_before:.4f}, after={abs(live.amount) if live else 0:.4f})"
+            )
+            return
+
+        actual_added = abs(live.amount) - qty_before
+        self._state.amount = abs(live.amount)
         self._state.scale_count += 1
         self.log(
-            f"📈 SCALE UP {signal.upper()} +{add_qty} "
-            f"(total={self._state.amount}, scale#{self._state.scale_count})"
+            f"📈 SCALE UP {signal.upper()} +{actual_added:.3f} "
+            f"(total={self._state.amount:.4f}, scale#{self._state.scale_count})"
         )
+        if res.success:
+            tp_price = res.data.get("tp_price", "?")
+            sl_price = res.data.get("sl_price", "?")
+            self.log(f"  🛡 TP={tp_price} SL={sl_price}")
+            if sl_price and isinstance(sl_price, (int, float)):
+                self._check_liquidation_buffer(
+                    sl_price,
+                    res.data.get("entry_price", price),
+                    context=f"scale-up#{self._state.scale_count}",
+                )
 
     def _partial_close(self, price: float):
         if self._state is None:
@@ -256,7 +333,13 @@ class PositionManager:
             self._full_close("REVERSAL_FULL")
             return
 
-        self._broker.close_position(self._symbol, close_qty)
+        # Pass signed amount: positive for LONG (sell), negative for SHORT (buy to cover)
+        signed_qty = (
+            close_qty
+            if self._state.side == SIGNAL_LONG
+            else -close_qty
+        )
+        self._broker.close_position(self._symbol, signed_qty)
         self._state.amount -= close_qty
         self.log(f"🔽 PARTIAL CLOSE -{close_qty} (remaining={self._state.amount:.4f})")
 
@@ -267,10 +350,48 @@ class PositionManager:
         if self._state is None:
             return
 
+        live_before = self._broker.get_position(self._symbol)
+        pos_before = abs(live_before.amount) if live_before else 0.0
+
         self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
-        self._broker.close_position(self._symbol, self._state.amount)
-        self.log(f"🔵 FULL CLOSE reason={reason}")
-        self._state = None
+
+        # Pass signed amount: positive for LONG (sell), negative for SHORT (buy to cover)
+        signed_qty = (
+            self._state.amount
+            if self._state.side == SIGNAL_LONG
+            else -self._state.amount
+        )
+        self._broker.close_position(self._symbol, signed_qty)
+
+        # Verify close succeeded by checking exchange (retry up to 3 times)
+        live = None
+        for attempt in range(3):
+            live = self._broker.get_position(self._symbol)
+            if live is None or abs(live.amount) < MIN_TRADEABLE_QUANTITY:
+                self.log(f"🔵 FULL CLOSE reason={reason}")
+                self._state = None
+                return
+            if attempt < 2:
+                delta = abs(live.amount) - pos_before if live_before else 0
+                self.log(
+                    f"⚠️ FULL CLOSE retry #{attempt + 1}: "
+                    f"remaining={abs(live.amount):.4f} (delta={delta:+.4f}), retrying..."
+                )
+                # Use signed amount based on exchange-reported position direction
+                signed_qty = (
+                    abs(live.amount)
+                    if live.amount > 0
+                    else -abs(live.amount)
+                )
+                self._broker.close_position(self._symbol, signed_qty)
+                _time.sleep(0.5 * (2 ** attempt))
+                live_before = live
+
+        remaining = abs(live.amount) if live else 0.0
+        self.log(
+            f"⚠️ FULL CLOSE reason={reason} — FAILED after 3 attempts, "
+            f"remaining={remaining:.4f}"
+        )
 
     def _count_consecutive_tail(self, signal: str) -> int:
         count = 0

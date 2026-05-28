@@ -165,3 +165,37 @@ def test_bb09_exception_in_market_order_returns_failure(mock_sleep, broker):
 
     assert result.success is False
     assert len(result.error) > 0
+
+
+@patch("binancebasebroker.time.sleep")
+def test_bb10_entry_timeout_long_closes_with_positive_qty(mock_sleep, broker):
+    """LONG entry price timeout: close_position receives positive amount (SELL to close)."""
+    broker._create_market_order = MagicMock(
+        return_value=MarketOrderResult(order_id="ord_1", entry_price=None)
+    )
+    broker.get_position = MagicMock(return_value=None)
+    broker.close_position = MagicMock()
+
+    result = broker.open_position_with_bracket("BTCUSDT", SIGNAL_LONG, 0.01)
+
+    assert result.success is False
+    broker.close_position.assert_called_once()
+    args = broker.close_position.call_args[0]
+    assert args[1] > 0, f"Expected positive for LONG entry timeout close, got {args[1]}"
+
+
+@patch("binancebasebroker.time.sleep")
+def test_bb11_entry_timeout_short_closes_with_negative_qty(mock_sleep, broker):
+    """SHORT entry price timeout: close_position receives negative amount (BUY to cover)."""
+    broker._create_market_order = MagicMock(
+        return_value=MarketOrderResult(order_id="ord_2", entry_price=None)
+    )
+    broker.get_position = MagicMock(return_value=None)
+    broker.close_position = MagicMock()
+
+    result = broker.open_position_with_bracket("BTCUSDT", SIGNAL_SHORT, 0.01)
+
+    assert result.success is False
+    broker.close_position.assert_called_once()
+    args = broker.close_position.call_args[0]
+    assert args[1] < 0, f"Expected negative for SHORT entry timeout close, got {args[1]}"

@@ -124,7 +124,9 @@ class BinanceBaseBroker(ABC):
                         break
 
                 if entry_price is None:
-                    self.close_position(symbol, quantity)
+                    # Use signed quantity: positive for LONG (sell), negative for SHORT (buy to cover)
+                    close_qty = quantity if signal == SIGNAL_LONG else -quantity
+                    self.close_position(symbol, close_qty)
                     return BracketResult(success=False, error="Fill confirmation timeout after 5 attempts")
 
             if not order_result.order_id:
@@ -230,6 +232,10 @@ class BinanceBaseBroker(ABC):
         Implemented by Spot / Futures brokers.
         """
         raise NotImplementedError
+
+    def get_liquidation_price(self, symbol: str) -> Optional[float]:
+        """Return the current estimated liquidation price from the exchange, or None if unavailable."""
+        return None
 
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         """
