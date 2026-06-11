@@ -65,7 +65,7 @@ def test_rg07_once_halted_stays_halted_on_recovery():
     assert rg.is_halted is True
 
 
-def test_rg08_new_day_resets_start_of_day_equity():
+def test_rg08_new_day_resets_halt_state():
     rg = RiskGuard(max_daily_loss_frac=0.05)
     today = date(2024, 1, 1)
     tomorrow = date(2024, 1, 2)
@@ -76,11 +76,12 @@ def test_rg08_new_day_resets_start_of_day_equity():
         rg.update(900.0)
         assert rg.is_halted is True
 
+        # New day should reset the halt
         mock_date.today.return_value = tomorrow
         rg.update(800.0)
 
     assert rg._start_of_day_equity == 800.0
-    assert rg.is_halted is True
+    assert rg.is_halted is False
 
 
 def test_rg09_clamp_leverage_below_cap_unchanged():
@@ -104,3 +105,27 @@ def test_rg12_peak_equity_tracks_correctly():
     rg.update(1200.0)
     rg.update(1100.0)
     assert rg._peak_equity == 1200.0
+
+
+def test_rg13_reset_clears_halt_and_resets_equity_trackers():
+    rg = RiskGuard(max_daily_loss_frac=0.05)
+    rg.update(1000.0)
+    rg.update(900.0)
+    assert rg.is_halted is True
+
+    rg.reset(500.0)
+    assert rg.is_halted is False
+    assert rg._start_of_day_equity == 500.0
+    assert rg._peak_equity == 500.0
+
+
+def test_rg14_reset_allows_trading_to_resume():
+    rg = RiskGuard(max_daily_loss_frac=0.05)
+    rg.update(1000.0)
+    rg.update(900.0)
+    assert rg.is_halted is True
+
+    rg.reset(500.0)
+    result = rg.update(480.0)
+    assert result is True
+    assert rg.is_halted is False
