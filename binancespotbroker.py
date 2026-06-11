@@ -224,18 +224,29 @@ class BinanceSpotBroker(BinanceBaseBroker):
 
     def close_position(self, symbol: str, position: float):
         try:
+            self.logger.info(
+                "🔵 close_position: %s SELL qty=%s",
+                symbol, f"{position:.4f}",
+            )
             result = self.client.create_order(
                 symbol=symbol,
                 side=SIDE_SELL,
                 type=ORDER_TYPE_MARKET,
                 quantity=position
             )
+            if result:
+                self.logger.info(
+                    "🔵 close_position result: orderId=%s status=%s executedQty=%s",
+                    result.get("orderId", "?"),
+                    result.get("status", "?"),
+                    result.get("executedQty", result.get("cummulativeQuoteQty", "?")),
+                )
             if result and result.get("status") == ORDER_STATUS_FILLED:
                 self.logger.info(f"✅ Spot position closed for {symbol}, qty: {position}")
             else:
                 self.logger.error(f"❌ Spot close position failed for {symbol} {result}")
         except Exception as e:
-            self.logger.error(f"❌ Close position failed: {e}")
+            self.logger.error(f"❌ Close position failed for {symbol}: {e}")
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.get_klines(

@@ -111,11 +111,22 @@ class BinanceFuturesBroker(BinanceBaseBroker):
     def close_position(self, symbol: str, position: float):
         try:
             side = SIDE_SELL if position > 0 else SIDE_BUY
-            self.client.futures_create_order(
+            side_label = "SELL" if side == SIDE_SELL else "BUY"
+            self.logger.info(
+                "🔵 close_position: %s %s qty=%s",
+                symbol, side_label, f"{abs(position):.4f}",
+            )
+            order = self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type=ORDER_TYPE_MARKET,
                 quantity=abs(position)
+            )
+            self.logger.info(
+                "🔵 close_position result: orderId=%s status=%s executedQty=%s",
+                order.get("orderId", "?"),
+                order.get("status", "?"),
+                order.get("executedQty", "?"),
             )
         except Exception as e:
             self.logger.error(f"❌ Close position failed for {symbol}: {e}")

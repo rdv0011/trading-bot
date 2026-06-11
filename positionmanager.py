@@ -133,14 +133,20 @@ class PositionManager:
     def emergency_close_live(self):
         try:
             self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
+            self.log(f"🔴 EMERGENCY CLOSE — cancelled open orders for {self._symbol}")
         except Exception as exc:
-            self.log(f"⚠️ cancel_open_orders failed during emergency close: {exc}")
+            self.log(f"⚠️ EMERGENCY CLOSE — cancel_open_orders failed: {exc}")
 
         live = self._broker.get_position(self._symbol)
         if live and live.amount and abs(live.amount) >= MIN_TRADEABLE_QUANTITY:
+            side_label = "SELL" if live.amount > 0 else "BUY"
+            self.log(
+                f"🔴 EMERGENCY CLOSE — placing {side_label} market order "
+                f"qty={abs(live.amount):.4f} for {self._symbol}"
+            )
             # Pass signed amount: positive for LONG (sell), negative for SHORT (buy to cover)
             self._broker.close_position(self._symbol, live.amount)
-            self.log(f"🔴 EMERGENCY CLOSE (live) qty={abs(live.amount)}")
+            self.log(f"🔴 EMERGENCY CLOSE (live) qty={abs(live.amount)} - position closed")
         else:
             self.log("✅ No open position on exchange during emergency close")
 
@@ -350,16 +356,32 @@ class PositionManager:
         if self._state is None:
             return
 
+        side_label = self._state.side.upper()
+        self.log(
+            f"🔵 FULL CLOSE (start) reason={reason} — "
+            f"side={side_label} amount={self._state.amount:.4f} "
+            f"entry={self._state.entry_price}"
+        )
+
         live_before = self._broker.get_position(self._symbol)
         pos_before = abs(live_before.amount) if live_before else 0.0
 
-        self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
+        try:
+            self._broker.cancel_open_orders(self._symbol, max_retries=3, base_delay=0.5)
+            self.log(f"🔵 FULL CLOSE — cancelled open orders for {self._symbol}")
+        except Exception as exc:
+            self.log(f"⚠️ FULL CLOSE — cancel_open_orders failed: {exc}")
 
         # Pass signed amount: positive for LONG (sell), negative for SHORT (buy to cover)
+        close_side_label = "SELL" if self._state.side == SIGNAL_LONG else "BUY"
         signed_qty = (
             self._state.amount
             if self._state.side == SIGNAL_LONG
             else -self._state.amount
+        )
+        self.log(
+            f"🔵 FULL CLOSE — placing {close_side_label} market order "
+            f"qty={abs(signed_qty):.4f} for {self._symbol}"
         )
         self._broker.close_position(self._symbol, signed_qty)
 
@@ -368,14 +390,16 @@ class PositionManager:
         for attempt in range(3):
             live = self._broker.get_position(self._symbol)
             if live is None or abs(live.amount) < MIN_TRADEABLE_QUANTITY:
-                self.log(f"🔵 FULL CLOSE reason={reason}")
+                self.log(f"🔵 FULL CLOSE reason={reason} — position closed")
                 self._state = None
                 return
             if attempt < 2:
                 delta = abs(live.amount) - pos_before if live_before else 0
                 self.log(
                     f"⚠️ FULL CLOSE retry #{attempt + 1}: "
-                    f"remaining={abs(live.amount):.4f} (delta={delta:+.4f}), retrying..."
+                    f"remaining={abs(live.amount):.4f} "
+                    f"side={'LONG' if live.amount > 0 else 'SHORT'} "
+                    f"(delta={delta:+.4f}), retrying..."
                 )
                 # Use signed amount based on exchange-reported position direction
                 signed_qty = (
@@ -385,12 +409,12 @@ class PositionManager:
                 )
                 self._broker.close_position(self._symbol, signed_qty)
                 _time.sleep(0.5 * (2 ** attempt))
-                live_before = live
 
         remaining = abs(live.amount) if live else 0.0
+        live_side = "LONG" if live and live.amount > 0 else "SHORT" if live else "?"
         self.log(
             f"⚠️ FULL CLOSE reason={reason} — FAILED after 3 attempts, "
-            f"remaining={remaining:.4f}"
+            f"remaining={remaining:.4f} side={live_side}"
         )
 
     def _count_consecutive_tail(self, signal: str) -> int:
