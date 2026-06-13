@@ -409,6 +409,9 @@ class PositionManager:
                 )
                 self._broker.close_position(self._symbol, signed_qty)
                 _time.sleep(0.5 * (2 ** attempt))
+                # Track position for next retry's delta calculation
+                live_before = live
+                pos_before = abs(live.amount)
 
         remaining = abs(live.amount) if live else 0.0
         live_side = "LONG" if live and live.amount > 0 else "SHORT" if live else "?"

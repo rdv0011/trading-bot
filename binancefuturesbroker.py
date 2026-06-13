@@ -113,14 +113,15 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             side = SIDE_SELL if position > 0 else SIDE_BUY
             side_label = "SELL" if side == SIDE_SELL else "BUY"
             self.logger.info(
-                "🔵 close_position: %s %s qty=%s",
+                "🔵 close_position: %s %s qty=%s reduceOnly=True",
                 symbol, side_label, f"{abs(position):.4f}",
             )
             order = self.client.futures_create_order(
                 symbol=symbol,
                 side=side,
                 type=ORDER_TYPE_MARKET,
-                quantity=abs(position)
+                quantity=abs(position),
+                reduceOnly=True
             )
             self.logger.info(
                 "🔵 close_position result: orderId=%s status=%s executedQty=%s",
