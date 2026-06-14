@@ -229,6 +229,18 @@ before training and off after — even if the process crashes.
 `raspi-gpio`, `pinctrl`, sysfs, or Python `libgpiod` bindings) and
 works on any Linux SBC.
 
+#### Config file (recommended)
+
+```bash
+# Copy the template to the project root (found automatically)
+cp fancontrol/fanctl.toml.example fanctl.toml
+# edit: chip = "gpiochip3", line = 20   (for Radxa Zero 3W)
+python main.py --train-strategic --fan-control
+```
+
+No env vars needed — the file is auto-discovered by searching the
+project root (alongside ``main.py``), then the current directory.
+
 #### Example: Radxa Zero 3W
 
 ```bash
@@ -236,9 +248,9 @@ works on any Linux SBC.
 sudo gpioset -c gpiochip3 20=1   # fan should spin up
 sudo gpioset -c gpiochip3 20=0   # fan stops
 
-# 2. Configure (or use FAN_GPIO_CHIP / FAN_GPIO_LINE env vars)
+# 2. Configure
 cp fancontrol/fanctl.toml.example fanctl.toml
-# edit: chip = "gpiochip3", line = 20
+# edit fanctl.toml: chip = "gpiochip3", line = 20
 
 # 3. Run training with fan control
 python main.py --train-strategic --optimize-params --fan-control

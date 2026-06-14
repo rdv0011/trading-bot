@@ -62,12 +62,25 @@ These flags are available on:
 
 ### Via TOML config file
 
-Copy the example and adjust:
+Copy to the project root (alongside ``main.py``).  The file is found
+automatically — no environment variables or flags needed.
 
 ```bash
 cp fancontrol/fanctl.toml.example fanctl.toml
-# edit fanctl.toml
+nano fanctl.toml              # adjust chip, line, threshold, etc.
 python main.py --train-strategic --fan-control
+```
+
+Search order (``load_config`` resolves the first match):
+
+1. ``FAN_CONFIG`` environment variable pointing to a specific path.
+2. ``fanctl.toml`` in the project root (parent of ``fancontrol/``).
+3. ``fanctl.toml`` in the current working directory.
+
+You can verify which file was loaded by watching for the log line:
+
+```
+FanControl: loading config from /home/armbian/trading-bot/fanctl.toml
 ```
 
 ### Programmatic (in Python)

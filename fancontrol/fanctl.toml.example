@@ -1,10 +1,17 @@
 # ── Fan Control Configuration ──────────────────────────────────────
 #
-# Copy this file to fanctl.toml in the project root (it is git-ignored
-# by default).  Everything here can be overridden via environment
-# variables — see the "Environment" column below.
+# Copy this file to fanctl.toml in the project root (where main.py
+# lives).  It will be found automatically — no env vars needed.
 #
-#    cp fancontrol/fanctl.toml.example fanctl.toml
+#     cp fancontrol/fanctl.toml.example fanctl.toml
+#
+# Search order (first found wins):
+#   1. FAN_CONFIG env var pointing to a specific path.
+#   2. fanctl.toml in the project root (alongside main.py).
+#   3. fanctl.toml in the current working directory.
+#
+# Everything here can be overridden via environment variables — see
+# the "Environment:" notes on each field below.
 #
 # ── Board Reference ────────────────────────────────────────────────
 #

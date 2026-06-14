@@ -29,11 +29,20 @@ Available environment variables:
     ====================== ====================== ===========
 """
 
+import logging
 import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Optional
 
 from fancontrol.backends.base import PinConfig
+
+logger = logging.getLogger(__name__)
+
+# Resolve the project root (parent of fancontrol/).  This mirrors the
+# pattern from mlio.py so that fanctl.toml is found regardless of the
+# current working directory.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass
@@ -74,9 +83,12 @@ def load_config(path: Optional[str] = None) -> FanConfig:
         3. Individual environment variables.
 
     Args:
-        path: Path to a TOML config file.  Falls back to the
-            ``FAN_CONFIG`` env var if ``None``, then to ``fanctl.toml``
-            in the current directory.
+        path: Path to a TOML config file.  If ``None`` (default),
+            the search order is:
+
+            1. ``FAN_CONFIG`` environment variable.
+            2. ``fanctl.toml`` in the project root (where ``main.py`` lives).
+            3. ``fanctl.toml`` in the current working directory.
     """
     chip = "gpiochip0"
     line = 20
@@ -87,9 +99,18 @@ def load_config(path: Optional[str] = None) -> FanConfig:
 
     # ── 1. TOML config file ─────────────────────────────────
     if path is None:
-        path = os.getenv("FAN_CONFIG", "fanctl.toml")
+        path = os.getenv("FAN_CONFIG", "")
 
-    if path and os.path.exists(path):
+    if not path:
+        # Search: project root (fancontrol/../fanctl.toml) first, then CWD.
+        candidates = [_PROJECT_ROOT / "fanctl.toml", Path("fanctl.toml")]
+        for candidate in candidates:
+            if candidate.exists():
+                path = str(candidate)
+                break
+
+    if path:
+        logger.info("FanControl: loading config from %s", path)
         try:
             import tomllib as _toml  # Python ≥3.11
         except ImportError:
