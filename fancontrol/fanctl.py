@@ -25,6 +25,7 @@ import atexit
 import logging
 import signal
 import sys
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Generator, Optional
@@ -296,13 +297,24 @@ def fan_control(
     if temp_threshold is not None:
         ctrl._config.temp_threshold = temp_threshold
 
-    # temp_threshold > 0 → temperature-aware (only on when hot).
-    # temp_threshold == 0 → always-on during the block.
-    if ctrl._config.temp_threshold > 0:
-        ctrl.auto()
-    else:
-        ctrl.on()
+    _stop_monitor = threading.Event()
+    _monitor_thread: Optional[threading.Thread] = None
     try:
+        if ctrl._config.temp_threshold > 0:
+            ctrl.auto()
+            # Periodically check temp so the fan turns on once the CPU
+            # heats up, even if the caller never calls .auto() itself.
+            def _monitor() -> None:
+                while not _stop_monitor.wait(30):
+                    ctrl.auto()
+
+            _monitor_thread = threading.Thread(target=_monitor, daemon=True)
+            _monitor_thread.start()
+        else:
+            ctrl.on()
         yield ctrl
     finally:
+        _stop_monitor.set()
+        if _monitor_thread is not None:
+            _monitor_thread.join(timeout=5)
         ctrl.off()
