@@ -172,11 +172,20 @@ class FanController:
         """
         threshold = self._config.temp_threshold
         if threshold <= 0:
+            logger.info(
+                "FanControl: temp_threshold=%.1f — auto-control disabled "
+                "(set FAN_TEMP_THRESHOLD or temp_threshold in fanctl.toml)",
+                threshold,
+            )
             return
 
         temp = _read_cpu_temp()
         if temp is None:
-            logger.debug("FanControl: no CPU temp sensor — skipping auto()")
+            logger.info(
+                "FanControl: no CPU temp sensor found — cannot auto-control. "
+                "Run 'ls /sys/class/thermal/' to check available zones, "
+                "or call .on() directly to force the fan on."
+            )
             return
 
         hysteresis = self._config.temp_hysteresis
