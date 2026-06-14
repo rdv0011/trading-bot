@@ -117,7 +117,12 @@ def load_config(path: Optional[str] = None) -> FanConfig:
             try:
                 import tomli as _toml  # pip install tomli
             except ImportError:
-                _toml = None  # no TOML support — skip file
+                logger.warning(
+                    "FanControl: no TOML parser available — "
+                    "install 'tomli' (pip install tomli) or use Python ≥3.11. "
+                    "Falling back to environment variables and defaults."
+                )
+                _toml = None
 
         if _toml is not None:
             with open(path, "rb") as f:
