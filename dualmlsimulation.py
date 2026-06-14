@@ -24,6 +24,7 @@ from mlio import (
     load_labels,
     save_labels,
 )
+from fancontrol.fanctl import fan_control
 from tactical.tacticalml import TacticalML
 from strategic.strategicml import StrategicML
 from timeframe_config import TIMEFRAMES
@@ -229,11 +230,27 @@ if __name__ == "__main__":
         "--timeframe", default=DEFAULT_TIMEFRAME, choices=list(TIMEFRAMES.keys())
     )
     parser.add_argument("--model-dir", default=str(MODEL_DIR))
+    parser.add_argument(
+        "--fan-control",
+        action="store_true",
+        help="Enable GPIO fan control for CPU cooling during simulation.",
+    )
+    parser.add_argument(
+        "--fan-temp-threshold",
+        type=float,
+        default=None,
+        help="CPU temperature threshold (°C) to trigger the fan. "
+        "Set low (e.g. 30) for testing. Requires --fan-control.",
+    )
     args = parser.parse_args()
 
-    run_simulation(
-        symbol=args.symbol,
-        days=args.days,
-        timeframe=args.timeframe,
-        model_dir=args.model_dir,
-    )
+    with fan_control(
+        enable=args.fan_control,
+        temp_threshold=args.fan_temp_threshold,
+    ):
+        run_simulation(
+            symbol=args.symbol,
+            days=args.days,
+            timeframe=args.timeframe,
+            model_dir=args.model_dir,
+        )

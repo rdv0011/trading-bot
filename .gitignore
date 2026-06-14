@@ -7,6 +7,9 @@ catboost_info/
 .sisyphus/
 .omo
 
+# Board-specific fan control config (copy from fancontrol/fanctl.toml.example)
+fanctl.toml
+
 # Files
 .env
 .DS_Store

@@ -6,6 +6,7 @@ from binancebasebroker import MARKET_TYPE_FUTURES, MARKET_TYPE_SPOT
 from mlstrategy import MLStrategy
 from dualmlstrategy import DualMLStrategy
 from binancebrokerfactory import create_binance_broker
+from fancontrol.fanctl import fan_control
 
 load_dotenv()
 
@@ -47,6 +48,18 @@ if __name__ == "__main__":
         action="store_true",
         help="Use simulation-driven param optimisation when training the strategic model.",
     )
+    parser.add_argument(
+        "--fan-control",
+        action="store_true",
+        help="Enable GPIO fan control for CPU cooling during training.",
+    )
+    parser.add_argument(
+        "--fan-temp-threshold",
+        type=float,
+        default=None,
+        help="CPU temperature threshold (°C) to trigger the fan. "
+        "Set low (e.g. 30) for testing. Requires --fan-control.",
+    )
 
     args = parser.parse_args()
 
@@ -64,13 +77,17 @@ if __name__ == "__main__":
                 timeframe="5m",
             )
 
-        run_training(
-            symbol="BTCUSDT",
-            days=args.strategic_days,
-            timeframe=args.strategic_timeframe,
-            model_dir=MODEL_DIR,
-            df_5m_predictions=df_5m_predictions,
-        )
+        with fan_control(
+            enable=args.fan_control,
+            temp_threshold=args.fan_temp_threshold,
+        ):
+            run_training(
+                symbol="BTCUSDT",
+                days=args.strategic_days,
+                timeframe=args.strategic_timeframe,
+                model_dir=MODEL_DIR,
+                df_5m_predictions=df_5m_predictions,
+            )
         raise SystemExit(0)
 
     if args.market_type == "futures":

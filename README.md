@@ -219,6 +219,41 @@ keepawake/cancelkeepawake.sh
 
 ---
 
+## Fan Control (CPU Cooling)
+
+During simulation-driven training the CPU runs at 100% for extended
+periods.  The `fancontrol/` module turns a GPIO-controlled fan on
+before training and off after — even if the process crashes.
+
+**Board-agnostic**: auto-detects the GPIO interface (`gpioset`,
+`raspi-gpio`, `pinctrl`, sysfs, or Python `libgpiod` bindings) and
+works on any Linux SBC.
+
+#### Example: Radxa Zero 3W
+
+```bash
+# 1. Verify the GPIO chip and line (gpiochip3 line 20 = physical pin 7)
+sudo gpioset -c gpiochip3 20=1   # fan should spin up
+sudo gpioset -c gpiochip3 20=0   # fan stops
+
+# 2. Configure (or use FAN_GPIO_CHIP / FAN_GPIO_LINE env vars)
+cp fancontrol/fanctl.toml.example fanctl.toml
+# edit: chip = "gpiochip3", line = 20
+
+# 3. Run training with fan control
+python main.py --train-strategic --optimize-params --fan-control
+
+# Quick test — set a low temp threshold to trigger immediately:
+FAN_TEMP_THRESHOLD=30 python main.py --train-strategic --fan-control
+```
+
+For other boards (Raspberry Pi, Orange Pi, Jetson, etc.) see the full
+documentation and board reference table:
+
+➡️ **[`fancontrol/README.md`](fancontrol/README.md)**
+
+---
+
 ## Project structure
 
 ```
@@ -244,6 +279,12 @@ mltrainingcore.py              Shared feature engineering, label generation, sim
 mltraining.py                  Walk-forward param optimisation (used by strategictraining)
 mlio.py                        Model and data I/O utilities
 timeframe_config.py            Timeframe presets (5m / 15m / 1h / 4h)
+
+fancontrol/                    Board-agnostic GPIO fan control for CPU cooling
+  fanctl.py                    Context manager, signal handlers, temp monitoring
+  config.py                    TOML + env var configuration
+  backends/                    5 GPIO backends (auto-detected)
+  fanctl.toml.example          Board reference table + config template
 
 binancebasebroker.py           Abstract broker interface
 binancefuturesbroker.py        Binance Futures implementation
