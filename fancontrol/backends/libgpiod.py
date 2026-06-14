@@ -42,7 +42,9 @@ class LibgpiodBackend(GpioBackend):
 
         key = f"{pin.chip}:{pin.line}"
         if key not in self._lines:
-            chip = gpiod.Chip(pin.chip)
+            # gpiod v2 expects full /dev/gpiochipN path (not just gpiochipN)
+            chip_path = pin.chip if pin.chip.startswith("/dev/") else f"/dev/{pin.chip}"
+            chip = gpiod.Chip(chip_path)
             line = chip.get_line(pin.line)
             line.request(consumer="fanctl", type=gpiod.LINE_REQ_DIR_OUT)
             self._lines[key] = line
