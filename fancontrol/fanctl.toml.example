@@ -64,11 +64,16 @@
 [fan]
 
 # GPIO chip name (run `ls /dev/gpiochip*` to list).
+#
+# ╔═══════════════════════════════════════════════════════╗
+# ║  Radxa Zero 3W:  chip = "gpiochip3", line = 20      ║
+# ║  Raspberry Pi:   chip = "gpiochip0", line = 18       ║
+# ╚═══════════════════════════════════════════════════════╝
+#
 # Environment: FAN_GPIO_CHIP
 chip = "gpiochip0"
 
 # GPIO line (offset within the chip).
-# For Raspberry Pi, this is the BCM GPIO number.
 # Environment: FAN_GPIO_LINE
 line = 20
 
