@@ -168,13 +168,28 @@ Or, for the Python libgpiod backend, grant the user direct GPIO
 access via `udev` (no sudo needed):
 
 ```bash
-# /etc/udev/rules.d/99-gpio.rules
-SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"
-# Then: sudo usermod -aG gpio yourusername
+# 1. Create the gpio group if it doesn't exist (Armbian, some Armbian
+#    derivatives, and minimal builds often omit it).
+sudo groupadd gpio 2>/dev/null; echo "ok"
+
+# 2. Add your user to the group.
+sudo usermod -aG gpio $USER
+
+# 3. Create a udev rule that grants the gpio group read-write access
+#    to all GPIO chip devices.
+echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-gpio.rules
+
+# 4. Reload udev and log out / back in (or reboot).
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+echo "Now log out and back in, or reboot."
 ```
 
-The `libgpiod` backend is preferred when available because it
-bypasses the sudo requirement entirely.
+After re-login, both the ``libgpiod`` Python bindings and the
+``gpioset`` CLI work without ``sudo``.  The ``libgpiod`` backend is
+preferred by auto-detection because it is faster (no subprocess) and
+avoids sudo entirely.
 
 ---
 

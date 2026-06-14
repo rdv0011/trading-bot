@@ -259,6 +259,29 @@ python main.py --train-strategic --optimize-params --fan-control
 FAN_TEMP_THRESHOLD=30 python main.py --train-strategic --fan-control
 ```
 
+#### Passwordless setup (recommended)
+
+By default, GPIO access requires ``sudo``.  Set up a udev rule so
+everything works without it:
+
+```bash
+# Create the gpio group if it doesn't exist, then add your user.
+sudo groupadd gpio 2>/dev/null
+sudo usermod -aG gpio $USER
+
+# Grant the gpio group read-write access to GPIO devices.
+echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"' \
+  | sudo tee /etc/udev/rules.d/99-gpio.rules
+
+# Reload udev, then log out and back in.
+sudo udevadm control --reload-rules
+sudo udevadm trigger
+```
+
+After re-login, ``gpioset`` and the faster ``libgpiod`` Python backend
+both work without ``sudo``.  The fan control module auto-detects the
+best available backend.
+
 For other boards (Raspberry Pi, Orange Pi, Jetson, etc.) see the full
 documentation and board reference table:
 
