@@ -67,20 +67,20 @@ if __name__ == "__main__":
         from strategic.strategictraining import run_training
         from mlio import MODEL_DIR
 
-        df_5m_predictions = None
-        if args.optimize_params:
-            from dualmlsimulation import run_predictions_only
-            print(f"Running walk-forward tactical predictions ({args.tactical_days}d 5m)...")
-            df_5m_predictions, _ = run_predictions_only(
-                symbol="BTCUSDT",
-                days=args.tactical_days,
-                timeframe="5m",
-            )
-
         with fan_control(
             enable=args.fan_control,
             temp_threshold=args.fan_temp_threshold,
         ):
+            df_5m_predictions = None
+            if args.optimize_params:
+                from dualmlsimulation import run_predictions_only
+                print(f"Running walk-forward tactical predictions ({args.tactical_days}d 5m)...")
+                df_5m_predictions, _ = run_predictions_only(
+                    symbol="BTCUSDT",
+                    days=args.tactical_days,
+                    timeframe="5m",
+                )
+
             run_training(
                 symbol="BTCUSDT",
                 days=args.strategic_days,

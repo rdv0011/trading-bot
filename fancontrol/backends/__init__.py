@@ -11,6 +11,8 @@ Usage::
 import logging
 from typing import Optional, Type
 
+logger = logging.getLogger(__name__)
+
 from fancontrol.backends.base import GpioBackend
 
 _BUILTIN_BACKENDS: list[Type[GpioBackend]] = []
@@ -68,7 +70,7 @@ def detect_backend(preferred: Optional[str] = None) -> GpioBackend:
     for name in _PRIORITY:
         for cls in _BUILTIN_BACKENDS:
             if cls.name() == name and cls.available():
-                logging.info("FanControl: auto-detected backend '%s'", name)
+                logger.info("FanControl: auto-detected backend '%s'", name)
                 return cls()
 
     raise RuntimeError(

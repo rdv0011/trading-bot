@@ -86,6 +86,16 @@ class FanController:
         self._config = config or load_config()
         self._backend: GpioBackend = detect_backend(self._config.backend)
         self._is_on = False
+        logger.info(
+            "FanControl: config — chip=%s line=%d active_low=%s backend=%s "
+            "temp_threshold=%.1f°C hysteresis=%.1f°C",
+            self._config.pin.chip,
+            self._config.pin.line,
+            self._config.active_low,
+            self._config.backend or self._backend.name(),
+            self._config.temp_threshold,
+            self._config.temp_hysteresis,
+        )
 
     # -- read-only properties -----------------------------------------------
 
