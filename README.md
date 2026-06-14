@@ -241,46 +241,74 @@ python main.py --train-strategic --fan-control
 No env vars needed — the file is auto-discovered by searching the
 project root (alongside ``main.py``), then the current directory.
 
-#### Example: Radxa Zero 3W
+#### Radxa Zero 3W — full setup & heavy training
+
+**Step 1 — One-time GPIO setup**
 
 ```bash
-# 1. Verify the GPIO chip and line (gpiochip3 line 20 = physical pin 7)
+# Verify the GPIO chip and line (gpiochip3 line 20 = physical pin 7)
 sudo gpioset -c gpiochip3 20=1   # fan should spin up
 sudo gpioset -c gpiochip3 20=0   # fan stops
 
-# 2. Configure
+# Configure — copy template and edit chip/line
 cp fancontrol/fanctl.toml.example fanctl.toml
 # edit fanctl.toml: chip = "gpiochip3", line = 20
-
-# 3. Run training with fan control
-python main.py --train-strategic --optimize-params --fan-control
-
-# Quick test — set a low temp threshold to trigger immediately:
-FAN_TEMP_THRESHOLD=30 python main.py --train-strategic --fan-control
 ```
 
-#### Passwordless setup (recommended)
-
-By default, GPIO access requires ``sudo``.  Set up a udev rule so
-everything works without it:
+**Step 2 — Passwordless GPIO (recommended, one-time)**
 
 ```bash
-# Create the gpio group if it doesn't exist, then add your user.
 sudo groupadd gpio 2>/dev/null
 sudo usermod -aG gpio $USER
-
-# Grant the gpio group read-write access to GPIO devices.
 echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"' \
   | sudo tee /etc/udev/rules.d/99-gpio.rules
-
-# Reload udev, then log out and back in.
-sudo udevadm control --reload-rules
-sudo udevadm trigger
+sudo udevadm control --reload-rules && sudo udevadm trigger
+echo "Log out and back in for group changes to take effect."
 ```
 
-After re-login, ``gpioset`` and the faster ``libgpiod`` Python backend
-both work without ``sudo``.  The fan control module auto-detects the
-best available backend.
+After re-login, test without sudo:
+
+```bash
+python -c "
+from fancontrol.fanctl import FanController
+c = FanController()
+c.on(); print('Fan on:', c.is_on)
+c.off(); print('Fan off:', not c.is_on)
+"
+```
+
+**Step 3 — Launch heavy training in a tmux session**
+
+Simulation-driven training (`--optimize-params`) runs the CPU at 100%
+for hours.  Use tmux so the process survives SSH disconnects:
+
+```bash
+# Install tmux if not present
+sudo apt install tmux
+
+# Create a session named "tradingbot" and start training
+tmux new-session -s tradingbot
+```
+
+Inside the tmux session:
+
+```bash
+cd /home/armbian/trading-bot
+conda activate tradingbot
+python main.py --train-strategic --optimize-params --strategic-days 365 --tactical-days 45 --fan-control
+```
+
+Detach with **Ctrl+B D**, re-attach anytime with:
+
+```bash
+tmux attach -t tradingbot
+```
+
+Quick test (short run with low threshold to verify everything works):
+
+```bash
+FAN_TEMP_THRESHOLD=30 python main.py --train-strategic --fan-control
+```
 
 For other boards (Raspberry Pi, Orange Pi, Jetson, etc.) see the full
 documentation and board reference table:
