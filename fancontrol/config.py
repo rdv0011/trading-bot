@@ -31,6 +31,7 @@ Available environment variables:
 
 import os
 from dataclasses import dataclass, field
+from typing import Optional
 
 from fancontrol.backends.base import PinConfig
 
@@ -58,12 +59,12 @@ class FanConfig:
 
     pin: PinConfig = field(default_factory=lambda: PinConfig("gpiochip0", 20))
     active_low: bool = False
-    backend: str | None = None
+    backend: Optional[str] = None
     temp_threshold: float = 0.0
     temp_hysteresis: float = 5.0
 
 
-def load_config(path: str | None = None) -> FanConfig:
+def load_config(path: Optional[str] = None) -> FanConfig:
     """Load configuration from TOML file + environment variables.
 
     Resolution order (later wins):
@@ -80,7 +81,7 @@ def load_config(path: str | None = None) -> FanConfig:
     chip = "gpiochip0"
     line = 20
     active_low = False
-    backend: str | None = None
+    backend: Optional[str] = None
     temp_threshold = 0.0
     temp_hysteresis = 5.0
 

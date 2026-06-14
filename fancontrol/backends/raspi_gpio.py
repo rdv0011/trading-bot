@@ -9,11 +9,14 @@ pre-installed on Raspberry Pi OS.
     sudo raspi-gpio set <line> dl   # drive low  (fan off)
 """
 
+import logging
 import shutil
-import subprocess
 
+from fancontrol.backends._helpers import run_cli
 from fancontrol.backends.base import GpioBackend, PinConfig
 from fancontrol.backends import register
+
+logger = logging.getLogger(__name__)
 
 
 class RaspiGpioBackend(GpioBackend):
@@ -29,11 +32,17 @@ class RaspiGpioBackend(GpioBackend):
 
     def set_value(self, pin: PinConfig, value: bool) -> None:
         level = "dh" if value else "dl"
-        subprocess.run(
-            ["sudo", "raspi-gpio", "set", str(pin.line), level],
-            check=False,
-            capture_output=True,
-        )
+        try:
+            run_cli(
+                ["sudo", "raspi-gpio", "set", str(pin.line), level],
+                log_prefix="raspi-gpio",
+            )
+        except RuntimeError:
+            raise RuntimeError(
+                f"raspi-gpio failed for line {pin.line}. "
+                f"Check: (1) sudo passwordless rule, "
+                f"(2) you are on a Raspberry Pi 2-4 (Pi 5 needs pinctrl backend)."
+            )
 
 
 register(RaspiGpioBackend)

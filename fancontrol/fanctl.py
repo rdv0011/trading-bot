@@ -23,12 +23,11 @@ For manual control::
 
 import atexit
 import logging
-import os
 import signal
-import time
+import sys
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Generator
+from typing import Generator, Optional
 
 from fancontrol.backends import detect_backend
 from fancontrol.backends.base import GpioBackend
@@ -36,11 +35,21 @@ from fancontrol.config import FanConfig, load_config
 
 logger = logging.getLogger(__name__)
 
+# Ensure log messages are visible without requiring users to configure logging.
+# This only installs a handler if none exists, so user-configured logging
+# (e.g. via ``logging.basicConfig`` in main.py) takes priority.
+if not logger.handlers and not logging.root.handlers:
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(message)s",
+        stream=sys.stderr,
+    )
+
 
 # ── CPU temperature helpers ─────────────────────────────────────
 
 
-def _read_cpu_temp() -> float | None:
+def _read_cpu_temp() -> Optional[float]:
     """Read CPU temperature from Linux thermal zones.
 
     Returns:
@@ -73,7 +82,7 @@ class FanController:
             ``None``.
     """
 
-    def __init__(self, config: FanConfig | None = None):
+    def __init__(self, config: Optional[FanConfig] = None):
         self._config = config or load_config()
         self._backend: GpioBackend = detect_backend(self._config.backend)
         self._is_on = False
@@ -93,14 +102,30 @@ class FanController:
     # -- public API ---------------------------------------------------------
 
     def on(self) -> None:
-        """Turn the fan on immediately.  Idempotent — safe to call twice."""
+        """Turn the fan on immediately.  Idempotent — safe to call twice.
+
+        Raises:
+            RuntimeError: The GPIO backend command failed (e.g. sudo
+                requires a password, wrong chip/line, or permissions).
+                Check the error message and your configuration.
+        """
         if self._is_on:
             return
-        # active_low inverts the electrical signal:
-        #   active_low=False → value=True  → GPIO HIGH → fan ON
-        #   active_low=True  → value=False → GPIO LOW  → fan ON
         value = not self._config.active_low
-        self._backend.set_value(self._config.pin, value)
+        try:
+            self._backend.set_value(self._config.pin, value)
+        except RuntimeError:
+            self._is_on = False
+            logger.error(
+                "✗ Fan FAILED to turn on  (chip=%s line=%d). "
+                "Verify: (1) sudo passwordless rule, "
+                "(2) chip exists — 'ls /dev/gpiochip*', "
+                "(3) line is correct — 'gpioinfo %s'.",
+                self._config.pin.chip,
+                self._config.pin.line,
+                self._config.pin.chip,
+            )
+            raise
         self._is_on = True
         logger.info(
             "Fan ON  (chip=%s line=%d active_low=%s)",
@@ -114,7 +139,20 @@ class FanController:
         if not self._is_on:
             return
         value = self._config.active_low
-        self._backend.set_value(self._config.pin, value)
+        try:
+            self._backend.set_value(self._config.pin, value)
+        except RuntimeError:
+            logger.error(
+                "✗ Fan FAILED to turn off (chip=%s line=%d). "
+                "The GPIO line may be stuck.  Run manually: "
+                "'sudo gpioset -c %s %d=0'.",
+                self._config.pin.chip,
+                self._config.pin.line,
+                self._config.pin.chip,
+                self._config.pin.line,
+            )
+            self._is_on = False  # mark off regardless — state is uncertain
+            return
         self._is_on = False
         logger.info(
             "Fan OFF (chip=%s line=%d)",
@@ -171,10 +209,10 @@ class FanController:
 # ── Module-level singleton + crash safety ───────────────────────
 
 
-_controller: FanController | None = None
+_controller: Optional[FanController] = None
 
 
-def _get_controller(config: FanConfig | None = None) -> FanController:
+def _get_controller(config: Optional[FanConfig] = None) -> FanController:
     global _controller
     if _controller is None:
         _controller = FanController(config)
@@ -208,8 +246,8 @@ atexit.register(_shutdown)
 def fan_control(
     *,
     enable: bool = True,
-    temp_threshold: float | None = None,
-    config: FanConfig | None = None,
+    temp_threshold: Optional[float] = None,
+    config: Optional[FanConfig] = None,
 ) -> Generator[FanController, None, None]:
     """Context manager: fan ON during the block, OFF after (even on crash).
 

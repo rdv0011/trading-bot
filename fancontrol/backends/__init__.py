@@ -9,7 +9,7 @@ Usage::
 """
 
 import logging
-from typing import Type
+from typing import Optional, Type
 
 from fancontrol.backends.base import GpioBackend
 
@@ -30,7 +30,7 @@ def list_backends() -> list[str]:
 _PRIORITY = ["libgpiod", "gpioset", "pinctrl", "raspi-gpio", "sysfs"]
 
 
-def detect_backend(preferred: str | None = None) -> GpioBackend:
+def detect_backend(preferred: Optional[str] = None) -> GpioBackend:
     """Detect the best available GPIO backend.
 
     The detection order is:

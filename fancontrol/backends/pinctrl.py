@@ -9,11 +9,14 @@ firmware.  It replaces ``raspi-gpio`` on Pi 5.
     sudo pinctrl set <line> dl   # drive low  (fan off)
 """
 
+import logging
 import shutil
-import subprocess
 
+from fancontrol.backends._helpers import run_cli
 from fancontrol.backends.base import GpioBackend, PinConfig
 from fancontrol.backends import register
+
+logger = logging.getLogger(__name__)
 
 
 class PinctrlBackend(GpioBackend):
@@ -29,11 +32,17 @@ class PinctrlBackend(GpioBackend):
 
     def set_value(self, pin: PinConfig, value: bool) -> None:
         level = "dh" if value else "dl"
-        subprocess.run(
-            ["sudo", "pinctrl", "set", str(pin.line), level],
-            check=False,
-            capture_output=True,
-        )
+        try:
+            run_cli(
+                ["sudo", "pinctrl", "set", str(pin.line), level],
+                log_prefix="pinctrl",
+            )
+        except RuntimeError:
+            raise RuntimeError(
+                f"pinctrl failed for line {pin.line}. "
+                f"Check: (1) sudo passwordless rule, "
+                f"(2) you are on a Raspberry Pi 5 (BCM2712)."
+            )
 
 
 register(PinctrlBackend)
