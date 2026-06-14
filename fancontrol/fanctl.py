@@ -296,7 +296,12 @@ def fan_control(
     if temp_threshold is not None:
         ctrl._config.temp_threshold = temp_threshold
 
-    ctrl.on()
+    # temp_threshold > 0 → temperature-aware (only on when hot).
+    # temp_threshold == 0 → always-on during the block.
+    if ctrl._config.temp_threshold > 0:
+        ctrl.auto()
+    else:
+        ctrl.on()
     try:
         yield ctrl
     finally:
