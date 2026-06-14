@@ -48,7 +48,7 @@ DEFAULT_PARAMS = {
 }
 
 
-def _predict_chunk(df_full, features, tf_cfg, model_params, indices):
+def _predict_chunk(df_full, features, tf_cfg, model_params, indices, pbar=None):
     from tactical.tacticalml import TacticalML as _TacticalML
     tactical = _TacticalML(model_params=model_params, tf_cfg=tf_cfg)
     window = tf_cfg.max_history_candles
@@ -58,6 +58,8 @@ def _predict_chunk(df_full, features, tf_cfg, model_params, indices):
         df_pred_row = df_full.iloc[[i]]
         sig = tactical.fit_and_predict(df_train, df_pred_row, features)
         results.append((i, sig.prediction))
+        if pbar is not None:
+            pbar.update(1)
     return results
 
 
@@ -80,18 +82,17 @@ def _rolling_tactical_predictions(df_full: pd.DataFrame, tf_cfg) -> pd.DataFrame
 
     print(f"Running {len(all_indices)} walk-forward predictions on {n_jobs} workers...")
 
-    results_nested = Parallel(n_jobs=n_jobs, backend="threading")(
-        delayed(_predict_chunk)(df_full, features, tf_cfg, model_params, chunk)
-        for chunk in chunks
-    )
+    with tqdm(total=len(all_indices), desc="Walk-forward predictions", unit="row") as pbar:
+        results_nested = Parallel(n_jobs=n_jobs, backend="threading")(
+            delayed(_predict_chunk)(df_full, features, tf_cfg, model_params, chunk, pbar)
+            for chunk in chunks
+        )
 
     flat = sorted(
         [item for chunk_result in results_nested for item in chunk_result],
         key=lambda x: x[0],
     )
     preds = [p for _, p in flat]
-
-    print("Predictions complete.")
 
     df_out = df_full.iloc[window:].copy()
     df_out[SIGNAL_COLUMN] = preds
