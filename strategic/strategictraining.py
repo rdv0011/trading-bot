@@ -35,7 +35,6 @@ from mlio import (
 )
 from mltrainingcore import SIGNAL_COLUMN
 from mltraining import walkforward_label_forward_windows, build_param_grid
-from fancontrol.fanctl import fan_control
 from strategic.strategicfeatures import (
     make_strategic_features,
     get_strategic_features,
@@ -271,27 +270,11 @@ if __name__ == "__main__":
     parser.add_argument("--days", type=int, default=DEFAULT_DAYS)
     parser.add_argument("--timeframe", default=DEFAULT_TIMEFRAME, choices=list(TIMEFRAMES.keys()))
     parser.add_argument("--model-dir", default=str(MODEL_DIR))
-    parser.add_argument(
-        "--fan-control",
-        action="store_true",
-        help="Enable GPIO fan control for CPU cooling during training.",
-    )
-    parser.add_argument(
-        "--fan-temp-threshold",
-        type=float,
-        default=None,
-        help="CPU temperature threshold (°C) to trigger the fan. "
-        "Set low (e.g. 30) for testing. Requires --fan-control.",
-    )
     args = parser.parse_args()
 
-    with fan_control(
-        enable=args.fan_control,
-        temp_threshold=args.fan_temp_threshold,
-    ):
-        run_training(
-            symbol=args.symbol,
-            days=args.days,
-            timeframe=args.timeframe,
-            model_dir=args.model_dir,
-        )
+    run_training(
+        symbol=args.symbol,
+        days=args.days,
+        timeframe=args.timeframe,
+        model_dir=args.model_dir,
+    )
