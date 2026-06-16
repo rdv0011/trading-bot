@@ -1,0 +1,13 @@
+[Unit]
+Description=PWM Fan Controller
+After=multi-user.target
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /usr/local/bin/fan_pwm.py
+Restart=always
+RestartSec=5
+User=root
+
+[Install]
+WantedBy=multi-user.target
