@@ -221,99 +221,48 @@ keepawake/cancelkeepawake.sh
 
 ## Fan Control (CPU Cooling)
 
-During simulation-driven training the CPU runs at 100% for extended
-periods.  The `fancontrol/` module turns a GPIO-controlled fan on
-before training and off after — even if the process crashes.
+During heavy training the CPU runs at 100% for extended periods.  The
+`fancontrol/` folder contains a libgpiod v2 PWM fan controller that
+ramps fan speed based on CPU temperature, managed as a systemd service.
 
-**Board-agnostic**: auto-detects the GPIO interface (`gpioset`,
-`raspi-gpio`, `pinctrl`, sysfs, or Python `libgpiod` bindings) and
-works on any Linux SBC.
-
-#### Config file (recommended)
+### Quick Start (Radxa Zero 3W)
 
 ```bash
-# Copy the template to the project root (found automatically)
-cp fancontrol/fanctl.toml.example fanctl.toml
-# edit: chip = "gpiochip3", line = 20   (for Radxa Zero 3W)
-python main.py --train-strategic --fan-control
+# 1. Deploy the script and service
+sudo cp fancontrol/fan_pwm.py /usr/local/bin/fan_pwm.py
+sudo chmod +x /usr/local/bin/fan_pwm.py
+sudo cp fancontrol/fan-pwm.service /etc/systemd/system/fan-pwm.service
+
+# 2. Enable and start
+sudo systemctl daemon-reload
+sudo systemctl enable fan-pwm.service
+sudo systemctl start fan-pwm.service
+
+# 3. Verify
+sudo systemctl status fan-pwm.service
 ```
 
-No env vars needed — the file is auto-discovered by searching the
-project root (alongside ``main.py``), then the current directory.
-
-#### Radxa Zero 3W — full setup & heavy training
-
-**Step 1 — One-time GPIO setup**
+### Manual Test
 
 ```bash
-# Verify the GPIO chip and line (gpiochip3 line 20 = physical pin 7)
-sudo gpioset -c gpiochip3 20=1   # fan should spin up
-sudo gpioset -c gpiochip3 20=0   # fan stops
+# Verify GPIO (gpiochip3 line 20 = physical pin 7)
+sudo gpioset -c gpiochip3 20=1   # fan ON
+sudo gpioset -c gpiochip3 20=0   # fan OFF
 
-# Configure — copy template and edit chip/line
-cp fancontrol/fanctl.toml.example fanctl.toml
-# edit fanctl.toml: chip = "gpiochip3", line = 20
+# Run the controller directly
+sudo python3 /usr/local/bin/fan_pwm.py
+# Ctrl+C to stop
 ```
 
-**Step 2 — Passwordless GPIO (recommended, one-time)**
+### Full Documentation
 
-```bash
-sudo groupadd gpio 2>/dev/null
-sudo usermod -aG gpio $USER
-echo 'SUBSYSTEM=="gpio", KERNEL=="gpiochip*", GROUP="gpio", MODE="0660"' \
-  | sudo tee /etc/udev/rules.d/99-gpio.rules
-sudo udevadm control --reload-rules && sudo udevadm trigger
-echo "Log out and back in for group changes to take effect."
-```
+See **[`plans/update_fan_control.md`](plans/update_fan_control.md)** for:
 
-After re-login, test without sudo:
-
-```bash
-python -c "
-from fancontrol.fanctl import FanController
-c = FanController()
-c.on(); print('Fan on:', c.is_on)
-c.off(); print('Fan off:', not c.is_on)
-"
-```
-
-**Step 3 — Launch heavy training in a tmux session**
-
-Simulation-driven training (`--optimize-params`) runs the CPU at 100%
-for hours.  Use tmux so the process survives SSH disconnects:
-
-```bash
-# Install tmux if not present
-sudo apt install tmux
-
-# Create a session named "tradingbot" and start training
-tmux new-session -s tradingbot
-```
-
-Inside the tmux session:
-
-```bash
-cd /home/armbian/trading-bot
-conda activate tradingbot
-python main.py --train-strategic --optimize-params --strategic-days 365 --tactical-days 45 --fan-control
-```
-
-Detach with **Ctrl+B D**, re-attach anytime with:
-
-```bash
-tmux attach -t tradingbot
-```
-
-Quick test (short run with low threshold to verify everything works):
-
-```bash
-FAN_TEMP_THRESHOLD=30 python main.py --train-strategic --fan-control
-```
-
-For other boards (Raspberry Pi, Orange Pi, Jetson, etc.) see the full
-documentation and board reference table:
-
-➡️ **[`fancontrol/README.md`](fancontrol/README.md)**
+- Hardware verification and setup
+- Temperature curve tuning
+- Stress testing with `stress-ng`
+- Service management commands
+- Logs via `journalctl`
 
 ---
 
@@ -343,11 +292,9 @@ mltraining.py                  Walk-forward param optimisation (used by strategi
 mlio.py                        Model and data I/O utilities
 timeframe_config.py            Timeframe presets (5m / 15m / 1h / 4h)
 
-fancontrol/                    Board-agnostic GPIO fan control for CPU cooling
-  fanctl.py                    Context manager, signal handlers, temp monitoring
-  config.py                    TOML + env var configuration
-  backends/                    5 GPIO backends (auto-detected)
-  fanctl.toml.example          Board reference table + config template
+fancontrol/                    GPIO PWM fan controller (systemd + libgpiod v2)
+  fan_pwm.py                   CPU-temperature-based PWM controller script
+  fan-pwm.service              systemd unit for automatic startup
 
 binancebasebroker.py           Abstract broker interface
 binancefuturesbroker.py        Binance Futures implementation
