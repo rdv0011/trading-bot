@@ -192,13 +192,13 @@ crontab -e
 
 3. Add this line (replace `<user>` and `<repo_path>`):
 ```bash
-0 2 * * * /bin/bash -i -c "source /Users/<user>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<repo_path>/strategic/strategictraining.py >> /Users/<repo_path>/strategictraining.log 2>&1"
+0 2 * * * /bin/bash -i -c "source /Users/<user>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<repo_path>/main.py --train-strategic >> /Users/<repo_path>/training.log 2>&1"
 ```
 
-This runs rule-based training at 2:00 AM daily. The bot picks up the new model automatically on the next prediction cycle. To use simulation-driven training in cron, replace the script call with:
+This runs rule-based training at 2:00 AM daily. The bot picks up the new model automatically on the next prediction cycle. To use simulation-driven training in cron instead, add `--optimize-params`:
 
 ```bash
-python /Users/<repo_path>/main.py --train-strategic --optimize-params
+0 2 * * * /bin/bash -i -c "source /Users/<user>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<repo_path>/main.py --train-strategic --optimize-params >> /Users/<repo_path>/training.log 2>&1"
 ```
 
 ---
