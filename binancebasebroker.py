@@ -49,6 +49,8 @@ class BinanceBaseBroker(ABC):
         self._balance_cache_duration = 5
         # Klines cache: key=(symbol, timeframe) -> (DataFrame, fetch_timestamp)
         self._klines_cache: Dict[Tuple[str, str], Tuple[pd.DataFrame, float]] = {}
+        self._cached_position_leverage: Optional[int] = None
+        self._cached_leverage_time: float = 0
         self.setup_logging()
         self.setup_client()
 

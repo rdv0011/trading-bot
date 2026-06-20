@@ -161,11 +161,17 @@ class BinanceFuturesBroker(BinanceBaseBroker):
         )
 
     def get_position_leverage(self, symbol: str) -> Optional[int]:
+        now = time.time()
+        if self._cached_position_leverage is not None and now - self._cached_leverage_time < 60:
+            return self._cached_position_leverage
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             if not positions:
                 return None
-            return int(positions[0].get("leverage", 0)) or None
+            result = int(positions[0].get("leverage", 0)) or None
+            self._cached_position_leverage = result
+            self._cached_leverage_time = now
+            return result
         except Exception as e:
             self.logger.error(f"❌ Error fetching leverage for {symbol}: {e}")
             return None

@@ -91,14 +91,17 @@ class DualMLStrategy(BaseStrategy):
                 self.position_manager.emergency_close_live()
             return
 
-        pos = self.get_position(self.asset)
         lev = self._broker.get_position_leverage(self._pair_asset_symbol(self.asset))
         lev_str = f" | leverage={lev}x" if lev is not None else ""
-        if pos is not None and pos.amount is not None:
-            direction = "LONG" if pos.amount > 0 else "SHORT"
-            self.log_message(
-                f"Position | {direction} {abs(pos.amount)} {self.asset} @ {pos.entry_price:.2f}{lev_str}"
-            )
+        if self.position_manager.has_position:
+            pos = self.get_position(self.asset)
+            if pos is not None and pos.amount is not None:
+                direction = "LONG" if pos.amount > 0 else "SHORT"
+                self.log_message(
+                    f"Position | {direction} {abs(pos.amount)} {self.asset} @ {pos.entry_price:.2f}{lev_str}"
+                )
+            else:
+                self.log_message(f"Position | FLAT{lev_str}")
         else:
             self.log_message(f"Position | FLAT{lev_str}")
 
