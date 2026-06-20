@@ -17,6 +17,7 @@ class BaseStrategy:
         self.quote_asset_symbol = quote_symbol
         self.is_running = False
         self.sleep_time = parameters.get("sleeptime", '5m')  # Default 5 minutes
+        self._consecutive_iteration_failures = 0
         
     def get_cash(self) -> float:
         """Get available cash"""
@@ -97,6 +98,7 @@ class BaseStrategy:
             while self.is_running:
                 try:
                     self.on_trading_iteration()
+                    self._consecutive_iteration_failures = 0
                     
                     timeframe_minutes = int(self.sleep_time[:-1])
                     self._sleep_until_next_candle(timeframe_minutes)
@@ -105,9 +107,14 @@ class BaseStrategy:
                     self.log_message("⚠️  Strategy interrupted by user")
                     break
                 except Exception as e:
-                    self.log_message(f"❌ Error in trading iteration: {e}")
+                    self._consecutive_iteration_failures += 1
+                    backoff = min(300, 60 * (2 ** (self._consecutive_iteration_failures - 1)))
+                    self.log_message(
+                        f"❌ Error in trading iteration (failure #{self._consecutive_iteration_failures}): {e}"
+                    )
                     self.log_message(f"Traceback: {traceback.format_exc()}")
-                    time.sleep(60)  # Wait before retrying
+                    self.log_message(f"💤 Backing off {backoff}s before retry")
+                    time.sleep(backoff)
         
         except KeyboardInterrupt:
             self.log_message("⚠️  Strategy interrupted by user")

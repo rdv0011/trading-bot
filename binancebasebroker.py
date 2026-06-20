@@ -47,6 +47,12 @@ class BinanceRateLimiter:
     an estimated weight cost *before* the request so the bucket is
     never overdrawn; after the response arrives they *set* the
     actual header value to keep the bucket in sync with the server.
+
+    Also implements a circuit breaker that enters a **cooldown**
+    period on ``-1003`` (rate-limit ban).  During cooldown *every*
+    subsequent ``acquire()`` blocks until the ban is expected to
+    expire, preventing pointless retries that would keep the IP
+    banned.
     """
 
     def __init__(self, max_weight: int = 1000, window: int = 60):
@@ -54,6 +60,8 @@ class BinanceRateLimiter:
         self.window = window
         self._used = 0
         self._window_start = time.monotonic()
+        self._cooldown_until: float = 0.0
+        self._ban_count: int = 0
         self._lock = threading.Lock()
 
     def _reset_if_expired(self) -> None:
@@ -63,7 +71,13 @@ class BinanceRateLimiter:
             self._window_start = now
 
     def acquire(self, weight: int) -> None:
-        """Block until `weight` units of budget are available."""
+        """Block until ``weight`` units of budget are available.
+
+        If a rate-limit cooldown is active, blocks until it expires
+        first (checked outside the lock so the lock is never held
+        during a long sleep).
+        """
+        self._wait_cooldown()
         with self._lock:
             self._reset_if_expired()
             while self._used + weight > self.max_weight:
@@ -73,12 +87,46 @@ class BinanceRateLimiter:
                 self._reset_if_expired()
             self._used += weight
 
+    def _wait_cooldown(self) -> None:
+        now = time.monotonic()
+        if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            logging.warning(
+                "🧊 Rate-limit cooldown active — sleeping %.0fs "
+                "(ban #%d)",
+                remaining, self._ban_count,
+            )
+            time.sleep(remaining)
+
     def set_used(self, weight: int) -> None:
         """Sync the bucket with the server-reported weight."""
         with self._lock:
             self._reset_if_expired()
             self._used = weight
             self._window_start = time.monotonic()
+
+    def enter_cooldown(self, ban_until_ms: int = 0) -> None:
+        """Enter cooldown after a ``-1003`` (rate-limit ban).
+
+        Parameters
+        ----------
+        ban_until_ms
+            Server-reported ban expiration as a millisecond epoch
+            timestamp (parsed from the error message).  When zero
+            the cooldown duration uses exponential backoff instead.
+        """
+        with self._lock:
+            now = time.monotonic()
+            default_seconds = min(300.0, 30.0 * (2.0 ** self._ban_count))
+            self._ban_count += 1
+
+            if ban_until_ms > 0:
+                ban_remaining = (ban_until_ms / 1000.0) - time.time()
+                cooldown = max(default_seconds, ban_remaining)
+            else:
+                cooldown = default_seconds
+
+            self._cooldown_until = now + cooldown
 
 
 class BinanceBaseBroker(ABC):
@@ -106,22 +154,40 @@ class BinanceBaseBroker(ABC):
         self.logger = logging.getLogger(self.__class__.__name__)
 
     def _install_rate_limiter(self) -> None:
-        """Wrap Client._request with a BinanceRateLimiter."""
+        """Wrap Client._request with rate limiter + -1003 circuit breaker."""
+        import re as _re
+        from binance.exceptions import BinanceAPIException
+
         limiter = BinanceRateLimiter(max_weight=1000)
         original_request = self.client._request
 
+        def _parse_ban_ms(msg: str) -> int:
+            m = _re.search(r"banned until (\d+)", msg)
+            return int(m.group(1)) if m else 0
+
         def _wrapped(method, uri, signed, force_params=False, **kwargs):
             limiter.acquire(weight=40)
-            result = original_request(method, uri, signed, force_params, **kwargs)
-            resp = getattr(self.client, "response", None)
-            if resp is not None:
-                h = resp.headers.get("x-mbx-used-weight-1m")
-                if h is not None:
-                    try:
-                        limiter.set_used(int(h))
-                    except ValueError:
-                        pass
-            return result
+            try:
+                result = original_request(method, uri, signed, force_params, **kwargs)
+                resp = getattr(self.client, "response", None)
+                if resp is not None:
+                    h = resp.headers.get("x-mbx-used-weight-1m")
+                    if h is not None:
+                        try:
+                            limiter.set_used(int(h))
+                        except ValueError:
+                            pass
+                return result
+            except BinanceAPIException as exc:
+                if "-1003" in str(exc):
+                    ban_ms = _parse_ban_ms(str(exc))
+                    self.logger.error(
+                        "🚨 Binance -1003 ban detected — entering cooldown "
+                        "(ban_until=%s, countdown=%ds)",
+                        ban_ms, max(0, (ban_ms / 1000) - time.time()) if ban_ms else 0,
+                    )
+                    limiter.enter_cooldown(ban_until_ms=ban_ms)
+                raise
 
         self.client._request = _wrapped
         self.logger.info("✅ BinanceRateLimiter installed (max 1000 weight/min)")
