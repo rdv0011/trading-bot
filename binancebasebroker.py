@@ -1,3 +1,4 @@
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple
@@ -37,6 +38,49 @@ class BracketOrderResult:
     tp_order_id: str
     sl_order_id: str
 
+class BinanceRateLimiter:
+    """Token-bucket rate limiter enforcing a max API weight per 60s window.
+
+    Tracks the Binance `x-mbx-used-weight-1m` header to stay under
+    the exchange's per-minute weight quota (default 1000, leaving
+    headroom from the 1200 hard limit).  Callers should *acquire*
+    an estimated weight cost *before* the request so the bucket is
+    never overdrawn; after the response arrives they *set* the
+    actual header value to keep the bucket in sync with the server.
+    """
+
+    def __init__(self, max_weight: int = 1000, window: int = 60):
+        self.max_weight = max_weight
+        self.window = window
+        self._used = 0
+        self._window_start = time.monotonic()
+        self._lock = threading.Lock()
+
+    def _reset_if_expired(self) -> None:
+        now = time.monotonic()
+        if now - self._window_start >= self.window:
+            self._used = 0
+            self._window_start = now
+
+    def acquire(self, weight: int) -> None:
+        """Block until `weight` units of budget are available."""
+        with self._lock:
+            self._reset_if_expired()
+            while self._used + weight > self.max_weight:
+                remaining = self.window - (time.monotonic() - self._window_start)
+                if remaining > 0:
+                    time.sleep(min(remaining, 1.0))
+                self._reset_if_expired()
+            self._used += weight
+
+    def set_used(self, weight: int) -> None:
+        """Sync the bucket with the server-reported weight."""
+        with self._lock:
+            self._reset_if_expired()
+            self._used = weight
+            self._window_start = time.monotonic()
+
+
 class BinanceBaseBroker(ABC):
     """
     Base broker interface for both spot and futures
@@ -60,6 +104,27 @@ class BinanceBaseBroker(ABC):
             format="%(asctime)s - %(levelname)s - %(message)s"
         )
         self.logger = logging.getLogger(self.__class__.__name__)
+
+    def _install_rate_limiter(self) -> None:
+        """Wrap Client._request with a BinanceRateLimiter."""
+        limiter = BinanceRateLimiter(max_weight=1000)
+        original_request = self.client._request
+
+        def _wrapped(method, uri, signed, force_params=False, **kwargs):
+            limiter.acquire(weight=40)
+            result = original_request(method, uri, signed, force_params, **kwargs)
+            resp = getattr(self.client, "response", None)
+            if resp is not None:
+                h = resp.headers.get("x-mbx-used-weight-1m")
+                if h is not None:
+                    try:
+                        limiter.set_used(int(h))
+                    except ValueError:
+                        pass
+            return result
+
+        self.client._request = _wrapped
+        self.logger.info("✅ BinanceRateLimiter installed (max 1000 weight/min)")
 
     @abstractmethod
     def setup_client(self):

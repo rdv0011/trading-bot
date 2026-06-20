@@ -29,6 +29,7 @@ class BinanceSpotBroker(BinanceBaseBroker):
             kwargs["base_endpoint"] = "https://testnet.binance.vision"
 
         self.client = Client(**kwargs)
+        self._install_rate_limiter()
         self.logger.info("✅ Connected to Binance Spot")
 
     def get_cash(self, quote_asset_symbol="USDT") -> float:

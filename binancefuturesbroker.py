@@ -15,6 +15,7 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             api_secret=self.config["api_secret"],
             testnet=self.config.get("testnet", True)
         )
+        self._install_rate_limiter()
         self.logger.info("✅ Connected to Binance Futures")
 
     def get_cash(self, quote_asset_symbol="USDT") -> float:
