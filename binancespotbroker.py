@@ -32,9 +32,15 @@ class BinanceSpotBroker(BinanceBaseBroker):
         self.logger.info("✅ Connected to Binance Spot")
 
     def get_cash(self, quote_asset_symbol="USDT") -> float:
+        now = time.time()
+        if self._cached_balance is not None and now - self._balance_cache_time < self._balance_cache_duration:
+            return self._cached_balance
         balances = self.client.get_account()["balances"]
         bal = next((b for b in balances if b["asset"] == quote_asset_symbol), None)
-        return float(bal["free"]) if bal else 0.0
+        result = float(bal["free"]) if bal else 0.0
+        self._cached_balance = result
+        self._balance_cache_time = now
+        return result
 
     def get_position(self, symbol: str) -> Optional[PositionResult]:
         base = symbol.replace("USDT", "")
