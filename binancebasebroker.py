@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, Tuple
 import logging
 from datetime import datetime
 import pandas as pd
@@ -47,6 +47,8 @@ class BinanceBaseBroker(ABC):
         self._cached_balance = None
         self._balance_cache_time = 0
         self._balance_cache_duration = 5
+        # Klines cache: key=(symbol, timeframe) -> (DataFrame, fetch_timestamp)
+        self._klines_cache: Dict[Tuple[str, str], Tuple[pd.DataFrame, float]] = {}
         self.setup_logging()
         self.setup_client()
 
@@ -60,6 +62,27 @@ class BinanceBaseBroker(ABC):
     @abstractmethod
     def setup_client(self):
         pass
+
+    @staticmethod
+    def _parse_timeframe_to_minutes(timeframe: str) -> int:
+        """Parse timeframe string ('5m', '1h', '15m') to minutes."""
+        if not timeframe:
+            return 5
+        unit = timeframe[-1]
+        try:
+            value = int(timeframe[:-1])
+        except ValueError:
+            return 5
+        if unit == 'h':
+            return value * 60
+        elif unit == 'd':
+            return value * 1440
+        return value  # assume minutes
+
+    def _klines_cache_ttl(self, timeframe: str) -> float:
+        """TTL in seconds for a given klines timeframe."""
+        minutes = self._parse_timeframe_to_minutes(timeframe)
+        return max(30.0, minutes * 0.8 * 60.0)
 
     @abstractmethod
     def get_cash(self, quote_asset_symbol: str = "USDT") -> float:
@@ -176,10 +199,16 @@ class BinanceBaseBroker(ABC):
         length: int,
         timeframe: str = "5m"
     ) -> Optional[pd.DataFrame]:
-        """
-        Fetch historical OHLCV data.
-        Aligned 1:1 with original futures implementation.
-        """
+        """Fetch historical OHLCV data with TTL caching."""
+        cache_key = (symbol, timeframe)
+        now = time.time()
+
+        if cache_key in self._klines_cache:
+            cached_df, cached_at = self._klines_cache[cache_key]
+            ttl = self._klines_cache_ttl(timeframe)
+            if now - cached_at < ttl and len(cached_df) >= length:
+                return cached_df
+
         try:
             interval_map = {
                 "1m": Client.KLINE_INTERVAL_1MINUTE,
@@ -221,10 +250,15 @@ class BinanceBaseBroker(ABC):
             df.set_index("timestamp", inplace=True)
             df = df.astype(float)
 
+            self._klines_cache[cache_key] = (df, time.time())
             return df
 
         except Exception as e:
             self.logger.error(f"❌ Error fetching historical prices for {symbol}: {e}")
+            if cache_key in self._klines_cache:
+                cached_df, _ = self._klines_cache[cache_key]
+                self.logger.warning(f"⚠️ Returning stale cached data for {symbol} ({timeframe})")
+                return cached_df
             return None
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
