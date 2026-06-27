@@ -25,7 +25,6 @@ class BinanceSpotBroker(BinanceBaseBroker):
         )
 
         if testnet:
-            # Spot testnet requires explicit base_endpoint
             kwargs["base_endpoint"] = "https://testnet.binance.vision"
 
         self.client = Client(**kwargs)
@@ -42,6 +41,13 @@ class BinanceSpotBroker(BinanceBaseBroker):
         self._cached_balance = result
         self._balance_cache_time = now
         return result
+
+    def get_last_price(self, symbol: str) -> float:
+        """Return latest price via REST API."""
+        try:
+            return float(self.client.get_symbol_ticker(symbol=symbol)["price"])
+        except Exception:
+            return 0.0
 
     def get_position(self, symbol: str) -> Optional[PositionResult]:
         base = symbol.replace("USDT", "")
@@ -61,11 +67,8 @@ class BinanceSpotBroker(BinanceBaseBroker):
 
         return PositionResult(
             amount=total_qty,
-            entry_price=0.0  # spot API does not expose entry price
+            entry_price=0.0
         )
-    
-    def get_last_price(self, symbol: str) -> float:
-        return float(self.client.get_symbol_ticker(symbol=symbol)["price"])
 
     def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[MarketOrderResult]:
         try:

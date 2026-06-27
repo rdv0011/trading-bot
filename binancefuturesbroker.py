@@ -2,10 +2,15 @@ import time
 from typing import Optional
 from binance.client import Client
 from binance.enums import *
-from binancebasebroker import BinanceBaseBroker, MIN_TRADEABLE_QUANTITY, MarketOrderResult, PositionResult, BracketOrderResult
+from binancebasebroker import (
+    BinanceBaseBroker,
+    MIN_TRADEABLE_QUANTITY,
+    MarketOrderResult,
+    PositionResult,
+    BracketOrderResult,
+    _PositionData,
+)
 
-from binance.client import Client
-from binance.enums import *
 
 class BinanceFuturesBroker(BinanceBaseBroker):
 
@@ -13,10 +18,22 @@ class BinanceFuturesBroker(BinanceBaseBroker):
         self.client = Client(
             api_key=self.config["api_key"],
             api_secret=self.config["api_secret"],
-            testnet=self.config.get("testnet", True)
+            testnet=self.config.get("testnet", True),
         )
         self._install_rate_limiter()
         self.logger.info("✅ Connected to Binance Futures")
+
+    # ── Price feed ────────────────────────────────────────────────────
+
+    def get_last_price(self, symbol: str) -> float:
+        """Return latest price via REST API."""
+        try:
+            ticker = self.client.futures_symbol_ticker(symbol=symbol)
+            return float(ticker["price"])
+        except Exception:
+            return 0.0
+
+    # ── Cash ──────────────────────────────────────────────────────────
 
     def get_cash(self, quote_asset_symbol="USDT") -> float:
         now = time.time()
@@ -29,26 +46,68 @@ class BinanceFuturesBroker(BinanceBaseBroker):
         self._balance_cache_time = now
         return result
 
-    def get_position(self, symbol: str) -> Optional[PositionResult]:
+    # ── Position data (shared cache) ──────────────────────────────────
+
+    def _cache_position_data(self, symbol: str) -> Optional[_PositionData]:
+        """Fetch position data from exchange and populate the shared cache.
+
+        Both ``get_position`` and ``get_position_leverage`` call this
+        so that a single ``futures_position_information`` serves both.
+        """
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             if not positions:
+                self._position_cache.invalidate()
                 return None
             pos = positions[0]
             amt = float(pos.get("positionAmt", 0.0))
-            amt = amt if abs(amt) >= MIN_TRADEABLE_QUANTITY else None
-            price = float(pos.get("entryPrice", 0.0))
-            return PositionResult(amount=amt, entry_price=price)
+            entry = float(pos.get("entryPrice", 0.0))
+            lev = int(pos.get("leverage", 0)) or None
+            liq = float(pos.get("liquidationPrice", 0.0)) or None
+
+            data = _PositionData(
+                amount=amt,
+                entry_price=entry,
+                leverage=lev,
+                liquidation_price=liq if liq and liq > 0 else None,
+                cached_at=time.time(),
+            )
+            self._position_cache.set(data)
+            return data
         except Exception as e:
-            self.logger.error(f"❌ Error fetching position for {symbol}: {e}")
+            self.logger.error(f"❌ Error caching position data for {symbol}: {e}")
+            self._position_cache.invalidate()
             return None
 
-    def get_last_price(self, symbol: str) -> float:
-        try:
-            ticker = self.client.futures_symbol_ticker(symbol=symbol)
-            return float(ticker["price"])
-        except Exception:
-            return 0.0
+    def get_position(self, symbol: str) -> Optional[PositionResult]:
+        cached = self._position_cache.get()
+        if cached is not None:
+            amt = cached.amount if abs(cached.amount) >= MIN_TRADEABLE_QUANTITY else None
+            return PositionResult(amount=amt, entry_price=cached.entry_price)
+
+        data = self._cache_position_data(symbol)
+        if data is None:
+            return None
+        amt = data.amount if abs(data.amount) >= MIN_TRADEABLE_QUANTITY else None
+        return PositionResult(amount=amt, entry_price=data.entry_price)
+
+    def get_position_leverage(self, symbol: str) -> Optional[int]:
+        cached = self._position_cache.get()
+        if cached is not None:
+            return cached.leverage
+
+        data = self._cache_position_data(symbol)
+        return data.leverage if data else None
+
+    def get_liquidation_price(self, symbol: str) -> Optional[float]:
+        cached = self._position_cache.get()
+        if cached is not None:
+            return cached.liquidation_price
+
+        data = self._cache_position_data(symbol)
+        return data.liquidation_price if data else None
+
+    # ── Orders ────────────────────────────────────────────────────────
 
     def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[MarketOrderResult]:
         try:
@@ -56,7 +115,7 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 symbol=symbol,
                 side=side,
                 type=ORDER_TYPE_MARKET,
-                quantity=quantity
+                quantity=quantity,
             )
             return MarketOrderResult(order_id=str(order.get("orderId")), entry_price=None)
         except Exception as e:
@@ -71,14 +130,14 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 side=exit_side,
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                 stopPrice=tp_price,
-                closePosition=True
+                closePosition=True,
             )
             sl_order = self.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
                 stopPrice=sl_price,
-                closePosition=True
+                closePosition=True,
             )
             tp_id = str(tp_order.get("algoId"))
             sl_id = str(sl_order.get("algoId"))
@@ -93,14 +152,13 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             try:
                 open_orders = self.client.futures_get_open_orders(symbol=symbol, conditional=True)
                 if not open_orders:
-                    return  # nothing to cancel
+                    return
 
                 for o in open_orders:
                     algo_id = o.get("algoId")
                     if algo_id:
                         self.client.futures_cancel_order(symbol=symbol, algoId=algo_id, conditional=True)
 
-                # Verify all orders were cancelled
                 remaining = self.client.futures_get_open_orders(symbol=symbol, conditional=True)
                 if not remaining:
                     return
@@ -128,7 +186,7 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 side=side,
                 type=ORDER_TYPE_MARKET,
                 quantity=abs(position),
-                reduceOnly=True
+                reduceOnly=True,
             )
             self.logger.info(
                 "🔵 close_position result: orderId=%s status=%s executedQty=%s",
@@ -139,21 +197,6 @@ class BinanceFuturesBroker(BinanceBaseBroker):
         except Exception as e:
             self.logger.error(f"❌ Close position failed for {symbol}: {e}")
 
-    def get_liquidation_price(self, symbol: str) -> Optional[float]:
-        """Fetch the current liquidation price from the exchange position info."""
-        try:
-            positions = self.client.futures_position_information(symbol=symbol)
-            if not positions:
-                return None
-            liq_price = positions[0].get("liquidationPrice")
-            if liq_price is not None:
-                val = float(liq_price)
-                return val if val > 0 else None
-            return None
-        except Exception as e:
-            self.logger.error(f"❌ Error fetching liquidation price for {symbol}: {e}")
-            return None
-
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(
             symbol=symbol,
@@ -161,28 +204,12 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             limit=limit,
         )
 
-    def get_position_leverage(self, symbol: str) -> Optional[int]:
-        now = time.time()
-        if self._cached_position_leverage is not None and now - self._cached_leverage_time < 60:
-            return self._cached_position_leverage
-        try:
-            positions = self.client.futures_position_information(symbol=symbol)
-            if not positions:
-                return None
-            result = int(positions[0].get("leverage", 0)) or None
-            self._cached_position_leverage = result
-            self._cached_leverage_time = now
-            return result
-        except Exception as e:
-            self.logger.error(f"❌ Error fetching leverage for {symbol}: {e}")
-            return None
-
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
-        # ── Check current margin type to avoid unnecessary API calls ──
+        # ── Check current margin type ──
         try:
             positions = self.client.futures_position_information(symbol=symbol)
             current_margin = positions[0].get("marginType", "").upper() if positions else ""
-            current_lev = int(positions[0].get("leverage", 0)) if positions else 0
+            _ = int(positions[0].get("leverage", 0)) if positions else 0
             if current_margin != margin_type.upper():
                 for _attempt in range(2):
                     try:
@@ -206,7 +233,6 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             self.client.futures_change_leverage(symbol=symbol, leverage=leverage)
         except Exception as e:
             err_str = str(e)
-            # code -4161: leverage reduction not supported in isolated margin with open positions
             if "4161" in err_str:
                 self.logger.warning(f"⚠️ Leverage reduction not supported with open positions in isolated margin — skipping for {symbol}")
             else:

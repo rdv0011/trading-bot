@@ -17,31 +17,74 @@ SIGNAL_HOLD = "hold"
 MARKET_TYPE_SPOT = "spot"
 MARKET_TYPE_FUTURES = "futures"
 
+# ── Per-endpoint weight estimates (Binance Futures docs) ──────────────
+# Used by the rate limiter so we don't over-reserve for cheap endpoints.
+ENDPOINT_WEIGHTS: Dict[str, int] = {
+    "futures_account_balance": 25,
+    "futures_position_information": 10,
+    "futures_symbol_ticker": 2,
+    "futures_klines": 2,
+    "futures_create_order": 1,
+    "futures_change_leverage": 1,
+    "futures_change_margin_type": 1,
+    "futures_get_open_orders": 10,
+    "futures_cancel_order": 1,
+    # Spot endpoints
+    "get_account": 25,
+    "get_symbol_ticker": 2,
+    "get_klines": 2,
+    "create_order": 1,
+    "create_oco_order": 1,
+    "get_open_orders": 10,
+    "cancel_order": 1,
+}
+
+# Default weight when we cannot match a specific endpoint
+_DEFAULT_WEIGHT = 20
+
+# Minimum gap (seconds) between consecutive API calls to avoid
+# triggering Binance's per-second abuse detection.
+_INTER_REQUEST_DELAY = 0.5
+
+
+def _estimate_weight(uri: str, method: str = "GET") -> int:
+    """Guess the Binance API weight for a given request URI + method."""
+    for keyword, weight in ENDPOINT_WEIGHTS.items():
+        if keyword in uri:
+            return weight
+    # POST requests tend to be heavier
+    return _DEFAULT_WEIGHT + (10 if method.upper() == "POST" else 0)
+
+
 @dataclass
 class BracketResult:
     success: bool
     error: str = ""
     data: Dict[str, Any] = field(default_factory=dict)
 
+
 @dataclass
 class PositionResult:
     amount: float
     entry_price: float
+
 
 @dataclass
 class MarketOrderResult:
     order_id: str
     entry_price: Optional[float]
 
+
 @dataclass
 class BracketOrderResult:
     tp_order_id: str
     sl_order_id: str
 
+
 class BinanceRateLimiter:
     """Token-bucket rate limiter enforcing a max API weight per 60s window.
 
-    Tracks the Binance `x-mbx-used-weight-1m` header to stay under
+    Tracks the Binance ``x-mbx-used-weight-1m`` header to stay under
     the exchange's per-minute weight quota (default 1000, leaving
     headroom from the 1200 hard limit).  Callers should *acquire*
     an estimated weight cost *before* the request so the bucket is
@@ -53,22 +96,26 @@ class BinanceRateLimiter:
     subsequent ``acquire()`` blocks until the ban is expected to
     expire, preventing pointless retries that would keep the IP
     banned.
+
+    .. note::
+
+       All internal time tracking uses ``time.time()`` (wall clock)
+       so that cooldown durations computed from Binance's server-side
+       timestamps are directly comparable.  Using ``time.monotonic()``
+       here would cause drift when the two clocks diverge (e.g. NTP
+       adjustments or suspend/resume cycles).
     """
 
     def __init__(self, max_weight: int = 1000, window: int = 60):
         self.max_weight = max_weight
         self.window = window
         self._used = 0
-        self._window_start = time.monotonic()
+        self._window_start: float = 0.0  # set on first acquire
         self._cooldown_until: float = 0.0
         self._ban_count: int = 0
         self._lock = threading.Lock()
 
-    def _reset_if_expired(self) -> None:
-        now = time.monotonic()
-        if now - self._window_start >= self.window:
-            self._used = 0
-            self._window_start = now
+    # ── public API ────────────────────────────────────────────────────
 
     def acquire(self, weight: int) -> None:
         """Block until ``weight`` units of budget are available.
@@ -81,29 +128,18 @@ class BinanceRateLimiter:
         with self._lock:
             self._reset_if_expired()
             while self._used + weight > self.max_weight:
-                remaining = self.window - (time.monotonic() - self._window_start)
+                remaining = self.window - (time.time() - self._window_start)
                 if remaining > 0:
                     time.sleep(min(remaining, 1.0))
                 self._reset_if_expired()
             self._used += weight
-
-    def _wait_cooldown(self) -> None:
-        now = time.monotonic()
-        if now < self._cooldown_until:
-            remaining = self._cooldown_until - now
-            logging.warning(
-                "🧊 Rate-limit cooldown active — sleeping %.0fs "
-                "(ban #%d)",
-                remaining, self._ban_count,
-            )
-            time.sleep(remaining)
 
     def set_used(self, weight: int) -> None:
         """Sync the bucket with the server-reported weight."""
         with self._lock:
             self._reset_if_expired()
             self._used = weight
-            self._window_start = time.monotonic()
+            self._window_start = time.time()
 
     def enter_cooldown(self, ban_until_ms: int = 0) -> None:
         """Enter cooldown after a ``-1003`` (rate-limit ban).
@@ -116,23 +152,85 @@ class BinanceRateLimiter:
             the cooldown duration uses exponential backoff instead.
         """
         with self._lock:
-            now = time.monotonic()
+            now = time.time()
+            # Exponential backoff capped at 5 minutes when there is no
+            # server-provided ban_until.
             default_seconds = min(300.0, 30.0 * (2.0 ** self._ban_count))
             self._ban_count += 1
 
             if ban_until_ms > 0:
-                ban_remaining = (ban_until_ms / 1000.0) - time.time()
+                ban_remaining = (ban_until_ms / 1000.0) - now
                 cooldown = max(default_seconds, ban_remaining)
             else:
                 cooldown = default_seconds
 
             self._cooldown_until = now + cooldown
 
+    # ── internals ─────────────────────────────────────────────────────
+
+    def _reset_if_expired(self) -> None:
+        now = time.time()
+        if now - self._window_start >= self.window:
+            self._used = 0
+            self._window_start = now
+
+    def _wait_cooldown(self) -> None:
+        now = time.time()
+        if now < self._cooldown_until:
+            remaining = self._cooldown_until - now
+            logging.warning(
+                "🧊 Rate-limit cooldown active — sleeping %.0fs "
+                "(ban #%d)",
+                remaining, self._ban_count,
+            )
+            time.sleep(remaining)
+
+
+# ── shared position-data cache ────────────────────────────────────────
+# Avoids redundant futures_position_information calls by caching the
+# raw exchange response for a short TTL.
+
+@dataclass
+class _PositionData:
+    amount: float
+    entry_price: float
+    leverage: Optional[int]
+    liquidation_price: Optional[float]
+    cached_at: float
+
+
+class _PositionCache:
+    """Thread-safe short-lived cache for exchange position data."""
+
+    def __init__(self, ttl: float = 2.0):
+        self._ttl = ttl
+        self._lock = threading.Lock()
+        self._data: Optional[_PositionData] = None
+
+    def get(self) -> Optional[_PositionData]:
+        with self._lock:
+            if self._data is None:
+                return None
+            if time.time() - self._data.cached_at > self._ttl:
+                self._data = None
+                return None
+            return self._data
+
+    def set(self, data: _PositionData) -> None:
+        with self._lock:
+            self._data = data
+
+    def invalidate(self) -> None:
+        with self._lock:
+            self._data = None
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# Base broker
+# ═══════════════════════════════════════════════════════════════════════
 
 class BinanceBaseBroker(ABC):
-    """
-    Base broker interface for both spot and futures
-    """
+    """Base broker interface for both spot and futures."""
 
     def __init__(self, config: Dict[str, Any]):
         self.config = config
@@ -141,8 +239,8 @@ class BinanceBaseBroker(ABC):
         self._balance_cache_duration = 5
         # Klines cache: key=(symbol, timeframe) -> (DataFrame, fetch_timestamp)
         self._klines_cache: Dict[Tuple[str, str], Tuple[pd.DataFrame, float]] = {}
-        self._cached_position_leverage: Optional[int] = None
-        self._cached_leverage_time: float = 0
+        # Shared position cache
+        self._position_cache = _PositionCache(ttl=2.0)
         self.setup_logging()
         self.setup_client()
 
@@ -153,20 +251,44 @@ class BinanceBaseBroker(ABC):
         )
         self.logger = logging.getLogger(self.__class__.__name__)
 
+    # ── Rate limiter ──────────────────────────────────────────────────
+
     def _install_rate_limiter(self) -> None:
-        """Wrap Client._request with rate limiter + -1003 circuit breaker."""
+        """Wrap ``Client._request`` with rate limiter + -1003 circuit breaker.
+
+        Also inserts a small inter-request delay (0.5 s) between calls
+        so the bot never triggers Binance's per-second abuse detection.
+        """
         import re as _re
         from binance.exceptions import BinanceAPIException
 
         limiter = BinanceRateLimiter(max_weight=1000)
         original_request = self.client._request
+        _last_request_time: float = 0.0
 
         def _parse_ban_ms(msg: str) -> int:
             m = _re.search(r"banned until (\d+)", msg)
             return int(m.group(1)) if m else 0
 
         def _wrapped(method, uri, signed, force_params=False, **kwargs):
-            limiter.acquire(weight=40)
+            nonlocal _last_request_time
+
+            # ── inter-request delay ──────────────────────────────
+            # Prevents burst of requests from triggering -1003 abuse
+            # detection.  The delay is skipped after a cooldown sleep
+            # (which is already much longer) so we only enforce it
+            # during normal operation.
+            now = time.time()
+            since_last = now - _last_request_time
+            if since_last < _INTER_REQUEST_DELAY:
+                time.sleep(_INTER_REQUEST_DELAY - since_last)
+
+            # ── estimate weight ──────────────────────────────────
+            weight = _estimate_weight(uri, method)
+
+            # ── acquire budget ───────────────────────────────────
+            limiter.acquire(weight=weight)
+
             try:
                 result = original_request(method, uri, signed, force_params, **kwargs)
                 resp = getattr(self.client, "response", None)
@@ -188,13 +310,21 @@ class BinanceBaseBroker(ABC):
                     )
                     limiter.enter_cooldown(ban_until_ms=ban_ms)
                 raise
+            finally:
+                _last_request_time = time.time()
 
         self.client._request = _wrapped
-        self.logger.info("✅ BinanceRateLimiter installed (max 1000 weight/min)")
+        self.logger.info(
+            "✅ BinanceRateLimiter installed (max %d weight/min, "
+            "inter-request delay %.1fs)",
+            limiter.max_weight, _INTER_REQUEST_DELAY,
+        )
 
     @abstractmethod
     def setup_client(self):
         pass
+
+    # ── Timeframe helpers ─────────────────────────────────────────────
 
     @staticmethod
     def _parse_timeframe_to_minutes(timeframe: str) -> int:
@@ -216,6 +346,8 @@ class BinanceBaseBroker(ABC):
         """TTL in seconds for a given klines timeframe."""
         minutes = self._parse_timeframe_to_minutes(timeframe)
         return max(30.0, minutes * 0.8 * 60.0)
+
+    # ── Abstract interface ────────────────────────────────────────────
 
     @abstractmethod
     def get_cash(self, quote_asset_symbol: str = "USDT") -> float:
@@ -245,7 +377,8 @@ class BinanceBaseBroker(ABC):
     def close_position(self, symbol: str, position: float):
         pass
 
-    # shared public method for both brokers
+    # ── Shared public methods ─────────────────────────────────────────
+
     def open_position_with_bracket(
         self,
         symbol: str,
@@ -254,10 +387,7 @@ class BinanceBaseBroker(ABC):
         tp_frac: float = 0.02,
         sl_frac: float = 0.01
     ) -> BracketResult:
-        """
-        Open a long or short position with TP/SL bracket.
-        Unified interface for spot & futures.
-        """
+        """Open a long or short position with TP/SL bracket."""
         if signal not in [SIGNAL_LONG, SIGNAL_SHORT]:
             return BracketResult(success=False, error="Invalid signal")
 
@@ -268,7 +398,7 @@ class BinanceBaseBroker(ABC):
             order_result = self._create_market_order(symbol, market_order_side, quantity)
             if order_result is None:
                 return BracketResult(success=False, error="Market order returned None")
-            
+
             entry_price = order_result.entry_price
             if entry_price is None:
                 entry_price = None
@@ -280,7 +410,6 @@ class BinanceBaseBroker(ABC):
                         break
 
                 if entry_price is None:
-                    # Use signed quantity: positive for LONG (sell), negative for SHORT (buy to cover)
                     close_qty = quantity if signal == SIGNAL_LONG else -quantity
                     self.close_position(symbol, close_qty)
                     return BracketResult(success=False, error="Fill confirmation timeout after 5 attempts")
@@ -299,15 +428,17 @@ class BinanceBaseBroker(ABC):
                 sl_price = round(entry_price * (1 + sl_frac), 2)
 
             # 3️⃣ Place bracket orders
-            bracket_order_result = self._create_bracket_order(symbol, quantity, market_order_side, tp_price, sl_price)
+            bracket_order_result = self._create_bracket_order(
+                symbol, quantity, market_order_side, tp_price, sl_price
+            )
 
             # 4️⃣ TP/SL failure → close position
             if not bracket_order_result:
                 position = self.get_position(symbol)
-                if position.amount:
+                if position and position.amount:
                     self.close_position(symbol, position.amount)
                 return BracketResult(success=False, error="TP/SL placement failed; position closed")
-            
+
             tp_id = bracket_order_result.tp_order_id
             sl_id = bracket_order_result.sl_order_id
 
@@ -319,13 +450,15 @@ class BinanceBaseBroker(ABC):
                     "tp_price": tp_price,
                     "sl_price": sl_price,
                     "tp_algo_id": tp_id,
-                    "sl_algo_id": sl_id
+                    "sl_algo_id": sl_id,
                 }
             )
 
         except Exception as e:
             return BracketResult(success=False, error=str(e))
-        
+
+    # ── Historical prices ─────────────────────────────────────────────
+
     def get_historical_prices(
         self,
         symbol: str,
@@ -395,20 +528,29 @@ class BinanceBaseBroker(ABC):
             return None
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
-        """
-        Implemented by Spot / Futures brokers.
+        """Implemented by Spot / Futures brokers."""
+        raise NotImplementedError
+
+    # ── Position cache helpers ────────────────────────────────────────
+
+    def _cache_position_data(self, symbol: str) -> Optional[_PositionData]:
+        """Fetch and cache position data from the exchange.
+
+        Subclasses that call ``futures_position_information`` should use
+        this method instead of calling the endpoint directly so that
+        both ``get_position()`` and ``get_position_leverage()`` share
+        a single API call.
         """
         raise NotImplementedError
 
+    # ── Other shared methods ──────────────────────────────────────────
+
     def get_liquidation_price(self, symbol: str) -> Optional[float]:
-        """Return the current estimated liquidation price from the exchange, or None if unavailable."""
+        """Return the current estimated liquidation price, or None."""
         return None
 
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
-        """
-        Set leverage for a symbol. No-op for spot; implemented by futures broker.
-        Returns True on success, False otherwise.
-        """
+        """Set leverage for a symbol. No-op for spot; implemented by futures broker."""
         return True
 
     def get_datetime(self) -> datetime:
