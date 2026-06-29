@@ -113,7 +113,10 @@ class BaseStrategy:
                         f"❌ Error in trading iteration (failure #{self._consecutive_iteration_failures}): {e}"
                     )
                     self.log_message(f"Traceback: {traceback.format_exc()}")
-                    self.log_message(f"💤 Backing off {backoff}s before retry")
+                    self.log_message(
+                        f"💤 Backing off {backoff}s before retry "
+                        f"(failure #{self._consecutive_iteration_failures})"
+                    )
                     time.sleep(backoff)
         
         except KeyboardInterrupt:

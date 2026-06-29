@@ -1,4 +1,5 @@
 from basestrategy import BaseStrategy
+import time as _time
 import traceback
 from dataclasses import replace
 from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT, MARKET_TYPE_SPOT
@@ -23,6 +24,7 @@ class DualMLStrategy(BaseStrategy):
     def initialize(self):
         self.asset = self.parameters.get("asset_symbol", "BTC")
         self.market_type = self.parameters.get("market_type", "futures")
+        self._iteration_count = 0
 
         self.tf_cfg_tactical = TIMEFRAMES[self.parameters.get("tactical_timeframe", "5m")]
         self.tf_cfg_strategic = TIMEFRAMES[self.parameters.get("strategic_timeframe", "1h")]
@@ -84,6 +86,9 @@ class DualMLStrategy(BaseStrategy):
         self.log_message("✅ DualMLStrategy initialized")
 
     def on_trading_iteration(self):
+        self._iteration_count += 1
+        self._iteration_start = _time.time()
+        self.log_message(f"🔄 Iteration #{self._iteration_count} starting")
         current_equity = self.get_cash()
         if not self.risk_guard.update(current_equity):
             self.log_message(f"🛑 RiskGuard halted trading — equity={current_equity:.2f}")
@@ -161,6 +166,8 @@ class DualMLStrategy(BaseStrategy):
 
         current_price = self.get_last_price(self.asset)
         self.position_manager.on_signal(tactical_signal, strategic_decision, current_price)
+        elapsed = _time.time() - self._iteration_start
+        self.log_message(f"✅ Iteration #{self._iteration_count} complete ({elapsed:.1f}s)")
 
     def on_abrupt_closing(self):
         try:

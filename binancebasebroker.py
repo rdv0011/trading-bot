@@ -261,26 +261,72 @@ class BinanceBaseBroker(ABC):
         """
         import re as _re
         from binance.exceptions import BinanceAPIException
+        from collections import deque
+        import traceback
 
         limiter = BinanceRateLimiter(max_weight=1000)
         original_request = self.client._request
         _last_request_time: float = 0.0
+        # Rolling log of recent requests: (timestamp, method, uri)
+        _request_log: deque = deque(maxlen=500)
+        _request_count = 0
+        _last_summary_log: float = 0.0
+        _SUMMARY_INTERVAL = 60.0  # log summary once per minute
 
         def _parse_ban_ms(msg: str) -> int:
             m = _re.search(r"banned until (\d+)", msg)
             return int(m.group(1)) if m else 0
 
+        def _log_request_summary(now: float) -> None:
+            """Log a summary of all API calls made in the last 60 seconds."""
+            cutoff = now - 60.0
+            recent = [(ts, m, u) for ts, m, u in _request_log if ts >= cutoff]
+            if not recent:
+                return
+            # Count per endpoint
+            counts: dict = {}
+            for _, m, u in recent:
+                key = f"{m} {u.split('?')[0]}"
+                counts[key] = counts.get(key, 0) + 1
+            total = len(recent)
+            detail = " | ".join(f"{k}={v}" for k, v in sorted(counts.items()))
+            self.logger.info(
+                "📊 API call summary (last 60s): %d total — %s",
+                total, detail,
+            )
+
         def _wrapped(method, uri, signed, force_params=False, **kwargs):
-            nonlocal _last_request_time
+            nonlocal _last_request_time, _request_count, _last_summary_log
+
+            now = time.time()
+            since_last = now - _last_request_time
+
+            # ── log every request ─────────────────────────────────
+            _request_count += 1
+            _request_log.append((now, method, uri))
+
+            # Trim endpoint for readability — strip query params, keep last 80 chars
+            short_uri = uri.split("?")[0].split("/")[-1] if "?" in uri else uri.split("/")[-1]
+            self.logger.info(
+                "📞 API call #%d: %s %s (since_last=%.1fs)",
+                _request_count, method, short_uri, since_last,
+            )
+
+            # ── periodic summary ──────────────────────────────────
+            if now - _last_summary_log >= _SUMMARY_INTERVAL:
+                _log_request_summary(now)
+                _last_summary_log = now
 
             # ── inter-request delay ──────────────────────────────
             # Prevents burst of requests from triggering -1003 abuse
             # detection.  The delay is skipped after a cooldown sleep
             # (which is already much longer) so we only enforce it
             # during normal operation.
-            now = time.time()
-            since_last = now - _last_request_time
             if since_last < _INTER_REQUEST_DELAY:
+                self.logger.debug(
+                    "⏳ Inter-request delay: sleeping %.1fs",
+                    _INTER_REQUEST_DELAY - since_last,
+                )
                 time.sleep(_INTER_REQUEST_DELAY - since_last)
 
             # ── estimate weight ──────────────────────────────────
@@ -290,17 +336,33 @@ class BinanceBaseBroker(ABC):
             limiter.acquire(weight=weight)
 
             try:
+                t0 = time.time()
                 result = original_request(method, uri, signed, force_params, **kwargs)
+                elapsed = time.time() - t0
                 resp = getattr(self.client, "response", None)
+                server_weight = None
                 if resp is not None:
                     h = resp.headers.get("x-mbx-used-weight-1m")
                     if h is not None:
                         try:
-                            limiter.set_used(int(h))
+                            server_weight = int(h)
+                            limiter.set_used(server_weight)
                         except ValueError:
                             pass
+                self.logger.debug(
+                    "✅ API response #%d: %s %s (%.1fms, weight=%s)",
+                    _request_count, method, short_uri,
+                    elapsed * 1000, server_weight or "?",
+                )
                 return result
             except BinanceAPIException as exc:
+                elapsed = time.time() - t0 if 't0' in dir() else 0
+                self.logger.error(
+                    "❌ API error #%d: %s %s — code=%s (%.1fms)",
+                    _request_count, method, short_uri,
+                    exc.code if hasattr(exc, 'code') else '?',
+                    elapsed * 1000,
+                )
                 if "-1003" in str(exc):
                     ban_ms = _parse_ban_ms(str(exc))
                     self.logger.error(
@@ -316,7 +378,7 @@ class BinanceBaseBroker(ABC):
         self.client._request = _wrapped
         self.logger.info(
             "✅ BinanceRateLimiter installed (max %d weight/min, "
-            "inter-request delay %.1fs)",
+            "inter-request delay %.1fs, request logging enabled)",
             limiter.max_weight, _INTER_REQUEST_DELAY,
         )
 
@@ -472,8 +534,20 @@ class BinanceBaseBroker(ABC):
         if cache_key in self._klines_cache:
             cached_df, cached_at = self._klines_cache[cache_key]
             ttl = self._klines_cache_ttl(timeframe)
-            if now - cached_at < ttl and len(cached_df) >= length:
+            cache_age = now - cached_at
+            self.logger.debug(
+                "📦 get_historical_prices(%s, %s): cache age=%.0fs ttl=%.0fs len=%d need=%d",
+                symbol, timeframe, cache_age, ttl, len(cached_df), length,
+            )
+            if cache_age < ttl and len(cached_df) >= length:
+                self.logger.debug("📦 Cache HIT for %s %s (age=%.0fs)", symbol, timeframe, cache_age)
                 return cached_df
+            self.logger.info(
+                "📦 Cache MISS for %s %s: age=%.0fs>=%.0fs or len=%d<%d — fetching via REST",
+                symbol, timeframe, cache_age, ttl, len(cached_df), length,
+            )
+        else:
+            self.logger.info("📦 Cache COLD for %s %s — fetching via REST", symbol, timeframe)
 
         try:
             interval_map = {
