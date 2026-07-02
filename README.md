@@ -100,6 +100,14 @@ Available flags for `--train-strategic`:
 | `--optimize-params` | off | Use simulation-driven parameter optimisation |
 | `--tactical-days` | `45` | Days of 5m data for walk-forward param search (requires `--optimize-params`) |
 
+##### Choosing these values
+
+`--strategic-days` controls the **feature context window** (1h data). It should cover several market regime cycles so EMAs, volatility ratios, and regime detection are stable. 180d (~6 months) is a solid middle ground. Compute cost is negligible (cached after first run).
+
+`--tactical-days` controls the **label window** (5m data). It determines how much data feeds the walk-forward param search — the expensive part (~12,960 CatBoost fits for 45d). It also sets how much 1h training data survives after the inner join (only the overlap between both windows is labeled). 25–45d is the sweet spot: enough for stable walk-forward selection, short enough to reflect recent market microstructure.
+
+The two windows stack — features in the overlap benefit from the full strategic-days lookback. A typical combo: `--strategic-days 180 --tactical-days 45` → 6 months of feature history supports a focused 45-day label window (~1,080 1h training rows, ~449 walk-forward windows).
+
 The trained model is saved with a UTC timestamp (e.g. `strategic_meta_model_20260101T020000Z.pkl`). The running bot detects the new file and hot-swaps it automatically — no restart needed.
 
 ---
