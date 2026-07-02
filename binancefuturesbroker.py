@@ -75,6 +75,11 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             self._position_cache.set(data)
             return data
         except Exception as e:
+            # Let -1003 propagate so the iteration aborts immediately.
+            # The cooldown is already set by _wrapped(); the run() loop
+            # handles backoff + retry on the next iteration.
+            if "-1003" in str(e):
+                raise
             self.logger.error(f"❌ Error caching position data for {symbol}: {e}")
             self._position_cache.invalidate()
             return None
