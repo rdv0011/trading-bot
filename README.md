@@ -182,6 +182,8 @@ python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 5m
 python main.py
 ```
 
+Note: step 1 (`--train-strategic`) does **not** report theoretical profit — it prints dataset sizes, validation RMSE, and saves the model. Profit output comes from step 2 (`dualmlsimulation.py`), which prints final wallet, win rate, and mean return to the console and saves the per-candle wallet history to `labeleddata/dual_*_final_test_sim.csv`.
+
 ---
 
 ### Schedule periodic retraining with cron
