@@ -1,5 +1,6 @@
 import time
 import traceback
+import random
 from datetime import datetime
 from typing import Dict, Any, Optional
 import pandas as pd
@@ -129,7 +130,14 @@ class BaseStrategy:
         now = datetime.utcnow()
         seconds_into_candle = (now.minute % timeframe_minutes) * 60 + now.second
         seconds_to_next = timeframe_minutes * 60 - seconds_into_candle + 5
-        self.log_message(f"💤 Sleeping {seconds_to_next}s until next {timeframe_minutes}m candle close")
+        # ±30s jitter: desync from other users on the same CloudFront edge
+        jitter = random.uniform(-30, 30)
+        seconds_to_next += jitter
+        seconds_to_next = max(int(seconds_to_next), 5)
+        self.log_message(
+            f"💤 Sleeping {seconds_to_next}s until next {timeframe_minutes}m candle close "
+            f"(jitter={jitter:+.0f}s)"
+        )
         elapsed = 0
         while self.is_running and elapsed < seconds_to_next:
             time.sleep(1)
