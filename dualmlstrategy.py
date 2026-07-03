@@ -6,7 +6,7 @@ from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT, MARKET_TYP
 from mlio import MODEL_DIR
 from mltrainingcore import make_features, make_labels, get_features
 from timeframe_config import TIMEFRAMES
-from tactical.tacticalml import TacticalML
+from tactical.tacticalml import TacticalML, TacticalSignal
 from strategic.strategicml import StrategicML
 from positionmanager import PositionManager
 from riskguard import RiskGuard
@@ -83,6 +83,14 @@ class DualMLStrategy(BaseStrategy):
             max_leverage=self.parameters.get("max_leverage", 10.0),
         )
 
+        self._last_tactical_candle_ts = None
+        self._cached_tactical_signal = TacticalSignal(
+            signal=SIGNAL_HOLD,
+            prediction=0.0,
+            min_threshold=0.0,
+            max_threshold=0.0,
+        )
+
         self.log_message("✅ DualMLStrategy initialized")
 
     def on_trading_iteration(self):
@@ -128,72 +136,89 @@ class DualMLStrategy(BaseStrategy):
             self.log_message("❌ Insufficient strategic data, skipping")
             return
 
-        df_tactical_raw = df_tactical
-        df_tactical = make_features(df_tactical, self.tf_cfg_tactical)
-        df_tactical = make_labels(df_tactical, self.tf_cfg_tactical)
-        features = get_features(df_tactical)
-
-        df_pred = make_features(df_tactical_raw, self.tf_cfg_tactical).iloc[[-1]]
-
-        tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, df_pred, features)
-
         strategic_decision = self.strategic_ml.predict(df_strategic)
         strategic_decision = replace(
             strategic_decision,
             recommended_leverage=self.risk_guard.clamp_leverage(strategic_decision.recommended_leverage),
         )
 
-        if self.market_type.lower() == MARKET_TYPE_SPOT and tactical_signal.signal == SIGNAL_SHORT:
-            tactical_signal = type(tactical_signal)(
-                signal=SIGNAL_HOLD,
-                prediction=tactical_signal.prediction,
-                min_threshold=tactical_signal.min_threshold,
-                max_threshold=tactical_signal.max_threshold,
+        # Only re-run the tactical model when a new 15m candle has formed.
+        # On heartbeat iterations (every 5m) between 15m candles, reuse the
+        # previous signal — avoids wasted CatBoost retrains and signal flapping.
+        current_tactical_ts = df_tactical.index[-1]
+        tactical_is_new = current_tactical_ts != self._last_tactical_candle_ts
+
+        if tactical_is_new:
+            self._last_tactical_candle_ts = current_tactical_ts
+
+            df_tactical_raw = df_tactical
+            df_tactical = make_features(df_tactical, self.tf_cfg_tactical)
+            df_tactical = make_labels(df_tactical, self.tf_cfg_tactical)
+            features = get_features(df_tactical)
+
+            df_pred = make_features(df_tactical_raw, self.tf_cfg_tactical).iloc[[-1]]
+
+            tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, df_pred, features)
+
+            if self.market_type.lower() == MARKET_TYPE_SPOT and tactical_signal.signal == SIGNAL_SHORT:
+                tactical_signal = type(tactical_signal)(
+                    signal=SIGNAL_HOLD,
+                    prediction=tactical_signal.prediction,
+                    min_threshold=tactical_signal.min_threshold,
+                    max_threshold=tactical_signal.max_threshold,
+                )
+
+            if tactical_signal.signal != SIGNAL_HOLD:
+                vol_sma20 = df_tactical_raw["volume"].rolling(20).mean().iloc[-1]
+                current_vol = df_tactical_raw["volume"].iloc[-1]
+                if vol_sma20 > 0 and current_vol < vol_sma20 * 0.8:
+                    self.log_message(
+                        f"🔇 Volume filter: vol={current_vol:.0f} < 80% SMA20={vol_sma20:.0f} "
+                        f"— overriding {tactical_signal.signal.upper()} to HOLD"
+                    )
+                    tactical_signal = type(tactical_signal)(
+                        signal=SIGNAL_HOLD,
+                        prediction=tactical_signal.prediction,
+                        min_threshold=tactical_signal.min_threshold,
+                        max_threshold=tactical_signal.max_threshold,
+                    )
+
+            if tactical_signal.signal != SIGNAL_HOLD:
+                df_strategic["ema50"] = df_strategic["close"].ewm(span=50, adjust=False).mean()
+                current_1h_close = df_strategic["close"].iloc[-1]
+                current_ema50 = df_strategic["ema50"].iloc[-1]
+                above_ema50 = current_1h_close > current_ema50
+
+                if tactical_signal.signal == SIGNAL_LONG and not above_ema50:
+                    self.log_message(
+                        f"🔇 HTF filter: LONG but 1h close={current_1h_close:.0f} < EMA50={current_ema50:.0f}"
+                        f" — overriding to HOLD"
+                    )
+                    tactical_signal = type(tactical_signal)(
+                        signal=SIGNAL_HOLD,
+                        prediction=tactical_signal.prediction,
+                        min_threshold=tactical_signal.min_threshold,
+                        max_threshold=tactical_signal.max_threshold,
+                    )
+                elif tactical_signal.signal == SIGNAL_SHORT and above_ema50:
+                    self.log_message(
+                        f"🔇 HTF filter: SHORT but 1h close={current_1h_close:.0f} > EMA50={current_ema50:.0f}"
+                        f" — overriding to HOLD"
+                    )
+                    tactical_signal = type(tactical_signal)(
+                        signal=SIGNAL_HOLD,
+                        prediction=tactical_signal.prediction,
+                        min_threshold=tactical_signal.min_threshold,
+                        max_threshold=tactical_signal.max_threshold,
+                    )
+
+            self._cached_tactical_signal = tactical_signal
+        else:
+            self.log_message(
+                f"⏭ Same {self.tf_cfg_tactical.name} candle {current_tactical_ts} "
+                f"— reusing previous tactical signal"
             )
-
-        if tactical_signal.signal != SIGNAL_HOLD:
-            vol_sma20 = df_tactical_raw["volume"].rolling(20).mean().iloc[-1]
-            current_vol = df_tactical_raw["volume"].iloc[-1]
-            if vol_sma20 > 0 and current_vol < vol_sma20 * 0.8:
-                self.log_message(
-                    f"🔇 Volume filter: vol={current_vol:.0f} < 80% SMA20={vol_sma20:.0f} "
-                    f"— overriding {tactical_signal.signal.upper()} to HOLD"
-                )
-                tactical_signal = type(tactical_signal)(
-                    signal=SIGNAL_HOLD,
-                    prediction=tactical_signal.prediction,
-                    min_threshold=tactical_signal.min_threshold,
-                    max_threshold=tactical_signal.max_threshold,
-                )
-
-        if tactical_signal.signal != SIGNAL_HOLD:
-            df_strategic["ema50"] = df_strategic["close"].ewm(span=50, adjust=False).mean()
-            current_1h_close = df_strategic["close"].iloc[-1]
-            current_ema50 = df_strategic["ema50"].iloc[-1]
-            above_ema50 = current_1h_close > current_ema50
-
-            if tactical_signal.signal == SIGNAL_LONG and not above_ema50:
-                self.log_message(
-                    f"🔇 HTF filter: LONG but 1h close={current_1h_close:.0f} < EMA50={current_ema50:.0f}"
-                    f" — overriding to HOLD"
-                )
-                tactical_signal = type(tactical_signal)(
-                    signal=SIGNAL_HOLD,
-                    prediction=tactical_signal.prediction,
-                    min_threshold=tactical_signal.min_threshold,
-                    max_threshold=tactical_signal.max_threshold,
-                )
-            elif tactical_signal.signal == SIGNAL_SHORT and above_ema50:
-                self.log_message(
-                    f"🔇 HTF filter: SHORT but 1h close={current_1h_close:.0f} > EMA50={current_ema50:.0f}"
-                    f" — overriding to HOLD"
-                )
-                tactical_signal = type(tactical_signal)(
-                    signal=SIGNAL_HOLD,
-                    prediction=tactical_signal.prediction,
-                    min_threshold=tactical_signal.min_threshold,
-                    max_threshold=tactical_signal.max_threshold,
-                )
+            tactical_signal = self._cached_tactical_signal
 
         self.log_message(
             f"Tactical | signal={tactical_signal.signal.upper()} "

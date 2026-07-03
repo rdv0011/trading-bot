@@ -103,7 +103,7 @@ if __name__ == "__main__":
             "tactical_timeframe": "15m",
             "strategic_timeframe": "1h",
             "model_params": {"iterations": 300, "verbose": False},
-            "sleeptime": "15m",
+            "sleeptime": "5m",
         }
         strategy = DualMLStrategy(
             broker=broker,

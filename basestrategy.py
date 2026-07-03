@@ -17,7 +17,7 @@ class BaseStrategy:
         self.parameters = parameters
         self.quote_asset_symbol = quote_symbol
         self.is_running = False
-        self.sleep_time = parameters.get("sleeptime", "15m")  # Default 15 minutes
+        self.sleep_time = parameters.get("sleeptime", "5m")  # Default monitoring interval
         self._consecutive_iteration_failures = 0
         
     def get_cash(self) -> float:
