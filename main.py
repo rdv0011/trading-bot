@@ -100,7 +100,7 @@ if __name__ == "__main__":
             "asset_symbol": base_symbol,
             "model_type": "cat",
             "market_type": args.market_type,
-            "tactical_timeframe": "5m",
+            "tactical_timeframe": "15m",
             "strategic_timeframe": "1h",
             "model_params": {"iterations": 300, "verbose": False},
             "sleeptime": "5m",
