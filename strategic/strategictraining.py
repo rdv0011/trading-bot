@@ -69,7 +69,7 @@ def _build_strategic_labels(df: pd.DataFrame, tf_cfg: TimeframeConfig) -> pd.Dat
     df["stake_short_frac"] = np.where(df["regime"] == "trend", 0.1, 0.05)
 
     df["stop_loss_frac"] = np.where(
-        df["regime"] == "high_vol", 0.03, np.where(df["regime"] == "trend", 0.015, 0.02)
+        df["regime"] == "high_vol", 0.03, np.where(df["regime"] == "trend", 0.025, 0.02)
     )
     df["take_profit_frac"] = df["stop_loss_frac"] * 2.0
 
