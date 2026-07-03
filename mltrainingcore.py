@@ -187,6 +187,7 @@ def simulate_trades_core(
 
     adaptive_source = df_hist[signal_col].tolist()
     entry_stake = None
+    entry_leverage = 1.0
 
     # Regime multipliers
     regime_stake_mult = {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.0}
@@ -231,6 +232,7 @@ def simulate_trades_core(
                 cost = TAKER_FEE + SLIPPAGE
                 entry_price = price * (1 + cost) if position == 1 else price * (1 - cost)
                 entry_stake = stake_long if position == 1 else stake_short
+                entry_leverage = param_row.get("recommended_leverage", 1.0)
                 entry_index = i
                 entry_time = timestamp
                 trade_markers.append({
@@ -253,7 +255,7 @@ def simulate_trades_core(
             exit_on_time = elapsed_minutes >= max_hold * 60
 
             if exit_on_stop or exit_on_take or exit_on_time:
-                perf = perf_raw * entry_stake
+                perf = perf_raw * entry_stake * entry_leverage
                 wallet *= (1.0 + perf)
                 exit_reason = 'stop_loss' if exit_on_stop else ('take_profit' if exit_on_take else 'max_hold')
                 trades.append({
@@ -281,6 +283,7 @@ def simulate_trades_core(
                 position = 0
                 entry_price = 0.0
                 entry_stake = None
+                entry_leverage = 1.0
                 entry_index = None
                 entry_time = None
 
@@ -294,7 +297,7 @@ def simulate_trades_core(
         cost = TAKER_FEE + SLIPPAGE
         final_exit_price = final_price * (1 - cost) if position == 1 else final_price * (1 + cost)
         perf_raw = (final_exit_price / entry_price - 1.0) * position
-        perf = perf_raw * entry_stake
+        perf = perf_raw * entry_stake * entry_leverage
         wallet *= (1.0 + perf)
         trades.append({
             'position': position,

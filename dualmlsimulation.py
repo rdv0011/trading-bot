@@ -44,6 +44,7 @@ DEFAULT_PARAMS = {
     "stop_loss_frac": 0.02,
     "take_profit_frac": 0.04,
     "max_hold_hours": 4.0,
+    "recommended_leverage": 1.0,
 }
 
 
@@ -139,6 +140,7 @@ def _build_strategic_param_list(
             "stop_loss_frac": decision.stop_loss_frac,
             "take_profit_frac": decision.take_profit_frac,
             "max_hold_hours": decision.max_hold_hours,
+            "recommended_leverage": decision.recommended_leverage,
         }
         param_list.append(params)
 
