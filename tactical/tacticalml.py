@@ -27,7 +27,7 @@ class TacticalSignal:
 
 class TacticalML:
     """
-    Ephemeral 5m predictor. Retrained on every candle from a rolling window.
+    Ephemeral 15m predictor. Retrained on every candle from a rolling window.
     Never persisted to disk — purely in-memory.
     Produces LONG / SHORT / HOLD signals via adaptive thresholding.
     """

@@ -39,7 +39,7 @@ if __name__ == "__main__":
         "--tactical-days",
         type=int,
         default=45,
-        help="Days of 5m data used for walk-forward param optimisation (requires --train-strategic).",
+        help="Days of 15m data used for walk-forward param optimisation (requires --train-strategic).",
     )
     parser.add_argument(
         "--optimize-params",
@@ -55,11 +55,11 @@ if __name__ == "__main__":
         df_5m_predictions = None
         if args.optimize_params:
             from dualmlsimulation import run_predictions_only
-            print(f"Running walk-forward tactical predictions ({args.tactical_days}d 5m)...")
+            print(f"Running walk-forward tactical predictions ({args.tactical_days}d 15m)...")
             df_5m_predictions, _ = run_predictions_only(
                 symbol="BTCUSDT",
                 days=args.tactical_days,
-                timeframe="5m",
+                timeframe="15m",
             )
 
         run_training(
@@ -103,7 +103,7 @@ if __name__ == "__main__":
             "tactical_timeframe": "15m",
             "strategic_timeframe": "1h",
             "model_params": {"iterations": 300, "verbose": False},
-            "sleeptime": "5m",
+            "sleeptime": "15m",
         }
         strategy = DualMLStrategy(
             broker=broker,
@@ -113,10 +113,10 @@ if __name__ == "__main__":
     else:
         parameters = {
             "asset_symbol": base_symbol,
-            "historical_prices_unit": "5m",
+            "historical_prices_unit": "15m",
             "model_type": "cat",
             "auto_reload": True,
-            "sleeptime": "5m",
+            "sleeptime": "15m",
             "market_type": args.market_type,
         }
         strategy = MLStrategy(

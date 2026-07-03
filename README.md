@@ -12,8 +12,8 @@ Inspired by:
 
 The bot runs two ML models simultaneously:
 
-**Tier 1 — TacticalML (5m, ephemeral)**
-Retrained from scratch on every candle using a rolling window of recent 5m data. Never saved to disk. Produces `LONG`, `SHORT`, or `HOLD` signals using adaptive min/max thresholds computed from prediction history.
+**Tier 1 — TacticalML (15m, ephemeral)**
+Retrained from scratch on every candle using a rolling window of recent 15m data. Never saved to disk. Produces `LONG`, `SHORT`, or `HOLD` signals using adaptive min/max thresholds computed from prediction history.
 
 **Tier 2 — StrategicML (1h, persisted)**
 Trained offline on historical data and saved to `model/`. Loaded at startup and hot-swapped at runtime when a new model file appears. Controls leverage, position sizing, stop-loss, take-profit, and max hold time. Acts as a gatekeeper: if it detects extreme volatility or a choppy regime, no trades are opened regardless of what TacticalML signals.
@@ -85,7 +85,7 @@ python strategic/strategictraining.py --symbol BTCUSDT --days 25 --timeframe 1h
 
 #### Simulation-driven training (recommended)
 
-Labels are produced by a walk-forward parameter search: for each 24h window the parameter combination that maximised the trading objective score against the tactical signal is selected as the training target. Requires generating 5m tactical predictions first (controlled by `--tactical-days`).
+Labels are produced by a walk-forward parameter search: for each 24h window the parameter combination that maximised the trading objective score against the tactical signal is selected as the training target. Requires generating 15m tactical predictions first (controlled by `--tactical-days`).
 
 ```bash
 python main.py --train-strategic --optimize-params --strategic-days 25 --tactical-days 25
@@ -98,13 +98,13 @@ Available flags for `--train-strategic`:
 | `--strategic-days` | `365` | Days of 1h historical data for strategic model training |
 | `--strategic-timeframe` | `1h` | Candle interval for strategic features |
 | `--optimize-params` | off | Use simulation-driven parameter optimisation |
-| `--tactical-days` | `45` | Days of 5m data for walk-forward param search (requires `--optimize-params`) |
+| `--tactical-days` | `45` | Days of 15m data for walk-forward param search (requires `--optimize-params`) |
 
 ##### Choosing these values
 
 `--strategic-days` controls the **feature context window** (1h data). It should cover several market regime cycles so EMAs, volatility ratios, and regime detection are stable. 180d (~6 months) is a solid middle ground. Compute cost is negligible (cached after first run).
 
-`--tactical-days` controls the **label window** (5m data). It determines how much data feeds the walk-forward param search — the expensive part (~12,960 CatBoost fits for 45d). It also sets how much 1h training data survives after the inner join (only the overlap between both windows is labeled). 25–45d is the sweet spot: enough for stable walk-forward selection, short enough to reflect recent market microstructure.
+`--tactical-days` controls the **label window** (15m data). It determines how much data feeds the walk-forward param search — the expensive part (~4,320 CatBoost fits per 45d of 15m data, vs ~12,960 for 5m). It also sets how much 1h training data survives after the inner join (only the overlap between both windows is labeled). 25–45d is the sweet spot: enough for stable walk-forward selection, short enough to reflect recent market microstructure.
 
 The two windows stack — features in the overlap benefit from the full strategic-days lookback. A typical combo: `--strategic-days 180 --tactical-days 45` → 6 months of feature history supports a focused 45-day label window (~1,080 1h training rows, ~449 walk-forward windows).
 
@@ -117,7 +117,7 @@ The trained model is saved with a UTC timestamp (e.g. `strategic_meta_model_2026
 `dualmlsimulation.py` runs a full walk-forward backtest of the two-tier system over historical data without touching the live broker.
 
 ```bash
-python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 5m
+python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 15m
 ```
 
 Available flags:
@@ -126,14 +126,14 @@ Available flags:
 |------|---------|-------------|
 | `--symbol` | `BTCUSDT` | Trading pair |
 | `--days` | `45` | Days of historical data to simulate |
-| `--timeframe` | `5m` | Candle interval for tactical predictions |
+| `--timeframe` | `15m` | Candle interval for tactical predictions |
 | `--model-dir` | `model/` | Directory containing the trained strategic model |
 
 The script produces three files in `labeleddata/`:
 
 | File | Contents |
 |------|----------|
-| `dual_*_featured.csv` | 5m OHLCV with tactical features and labels |
+| `dual_*_featured.csv` | OHLCV with tactical features and labels |
 | `dual_*_predictions.csv` | Walk-forward tactical predictions over the full window |
 | `dual_*_final_test_sim.csv` | Simulated trades with wallet, PnL, entry/exit prices, and fees |
 
@@ -141,15 +141,15 @@ Set `USE_SAVED_FEATURED = True` or `USE_SAVED_PREDICTIONS = True` at the top of 
 
 #### Data breakdown
 
-For `--days 180 --timeframe 5m` the 180-day window is used as follows:
+For `--days 180 --timeframe 15m` the 180-day window is used as follows:
 
 | Phase | Rows | Calendar time |
 |---|---|---|
-| Raw fetch from Binance | ~51,840 | 180 days |
-| Feature engineering warmup (dropped) | ~68 | ~6 hours |
-| TacticalML training window (first predictions skipped) | 600 | 50 hours |
-| Walk-forward training — 80% of predictions, not traded | ~40,938 | ~142 days |
-| **Simulation / backtest — 20% of predictions, traded** | **~10,234** | **~36 days** |
+| Raw fetch from Binance | ~17,280 | 180 days |
+| Feature engineering warmup (dropped) | ~23 | ~6 hours |
+| TacticalML training window (first predictions skipped) | 200 | 50 hours |
+| Walk-forward training — 80% of predictions, not traded | ~13,646 | ~142 days |
+| **Simulation / backtest — 20% of predictions, traded** | **~3,411** | **~36 days** |
 
 The backtest trades only the last ~36 days. The preceding ~144 days exist so TacticalML has enough history to produce well-calibrated predictions before the test period begins — the model never sees the test period during training.
 
@@ -158,7 +158,7 @@ To read the results from the terminal:
 ```bash
 python -c "
 import pandas as pd
-df = pd.read_csv('labeleddata/dual_BTCUSDT_5m_25d_final_test_sim.csv', index_col=0)
+df = pd.read_csv('labeleddata/dual_BTCUSDT_15m_25d_final_test_sim.csv', index_col=0)
 trades = (df['wallet'].diff().abs() > 0).sum()
 start, end = df['wallet'].iloc[0], df['wallet'].iloc[-1]
 print(f'Trades: {trades}   Wallet: {start:.5f} → {end:.5f}   PnL: {(end-1)*100:+.3f}%')
@@ -176,7 +176,7 @@ Run these three commands in order. Each step caches its output so re-runs are fa
 python main.py --train-strategic --optimize-params --strategic-days 25 --tactical-days 25
 
 # 2. Run the full dual-ML backtest
-python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 5m
+python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 15m
 
 # 3. Start the live bot (uses the model trained in step 1)
 python main.py
@@ -285,7 +285,7 @@ dualmlstrategy.py              Two-tier ML strategy (default)
 mlstrategy.py                  Legacy single-ML strategy
 
 tactical/
-  tacticalml.py                Ephemeral 5m predictor, retrained every candle
+  tacticalml.py                Ephemeral 15m predictor, retrained every candle
 
 strategic/
   strategicml.py               Persisted strategic model with hot-swap

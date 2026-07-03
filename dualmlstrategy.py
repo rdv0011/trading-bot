@@ -26,7 +26,7 @@ class DualMLStrategy(BaseStrategy):
         self.market_type = self.parameters.get("market_type", "futures")
         self._iteration_count = 0
 
-        self.tf_cfg_tactical = TIMEFRAMES[self.parameters.get("tactical_timeframe", "5m")]
+        self.tf_cfg_tactical = TIMEFRAMES[self.parameters.get("tactical_timeframe", "15m")]
         self.tf_cfg_strategic = TIMEFRAMES[self.parameters.get("strategic_timeframe", "1h")]
 
         tactical_init_length = self.compute_required_history(self.tf_cfg_tactical)

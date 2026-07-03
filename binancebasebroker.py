@@ -525,7 +525,7 @@ class BinanceBaseBroker(ABC):
         self,
         symbol: str,
         length: int,
-        timeframe: str = "5m"
+        timeframe: str = "15m"
     ) -> Optional[pd.DataFrame]:
         """Fetch historical OHLCV data with TTL caching."""
         cache_key = (symbol, timeframe)

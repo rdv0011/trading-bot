@@ -25,7 +25,7 @@ class MLStrategy(BaseStrategy):
         self.asset = self.parameters.get("asset_symbol", "BTC")
         self.market_type = self.parameters.get("market_type", "futures")
         
-        self.historical_prices_unit = self.parameters.get("historical_prices_unit", "5m")
+        self.historical_prices_unit = self.parameters.get("historical_prices_unit", "15m")
         self.tf_cfg = TIMEFRAMES[self.historical_prices_unit]
 
         # Historical candles for fetching data (can be larger than adaptive history)
