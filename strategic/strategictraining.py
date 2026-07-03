@@ -71,7 +71,11 @@ def _build_strategic_labels(df: pd.DataFrame, tf_cfg: TimeframeConfig) -> pd.Dat
     df["stop_loss_frac"] = np.where(
         df["regime"] == "high_vol", 0.03, np.where(df["regime"] == "trend", 0.025, 0.02)
     )
-    df["take_profit_frac"] = df["stop_loss_frac"] * 2.0
+    df["take_profit_frac"] = np.where(
+        df["regime"] == "trend", df["stop_loss_frac"] * 3.0,
+        np.where(df["regime"] == "high_vol", df["stop_loss_frac"] * 1.5,
+                 df["stop_loss_frac"] * 2.0)
+    )
 
     df["max_hold_hours"] = np.where(
         df["regime"] == "trend", 8.0, np.where(df["regime"] == "high_vol", 2.0, 4.0)
