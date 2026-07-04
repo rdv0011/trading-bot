@@ -188,7 +188,14 @@ def run_simulation(symbol: str, days: int, timeframe: str, model_dir=MODEL_DIR):
     n_total = len(df_predictions)
     n_train = int(np.floor(n_total * TRAINING_FRACTION))
     df_test = df_predictions.iloc[n_train:].copy()
-    print(f"Split: total={n_total}, train={n_train}, test={len(df_test)}")
+    test_start = df_test.index[0]
+    test_end = df_test.index[-1]
+    test_calendar_days = (test_end - test_start).total_seconds() / 86400.0
+    print(
+        f"Split: total={n_total}, train={n_train}, test={len(df_test)} "
+        f"({test_start.date()} to {test_end.date()}, "
+        f"{test_calendar_days:.2f} calendar days)"
+    )
 
     strategic = StrategicML(model_dir=model_dir, tf_cfg=strategic_tf_cfg)
     param_list = _build_strategic_param_list(df_test, df_raw, strategic, strategic_tf_cfg)
@@ -211,10 +218,17 @@ def run_simulation(symbol: str, days: int, timeframe: str, model_dir=MODEL_DIR):
     trades = df_result.attrs.get("trades", [])
     _, full_metrics = calculate_metrics(trades, metrics.get("final_wallet", 1.0))
 
+    total_return = full_metrics.get('final_wallet', 1.0) - 1.0
+    annualized_return = (1.0 + total_return) ** (365.0 / test_calendar_days) - 1.0
+
     print("\n" + "=" * 60)
     print("DUAL-ML SIMULATION RESULTS")
     print("=" * 60)
+    print(f"  Test window:       {test_calendar_days:.2f} days")
+    print(f"  Test period:       {test_start.date()} to {test_end.date()}")
     print(f"  Final wallet:      {full_metrics.get('final_wallet', 1.0):.4f}")
+    print(f"  Total return:      {total_return * 100:.2f}%")
+    print(f"  Annualized return: {annualized_return * 100:.2f}%")
     print(f"  Trades:            {full_metrics.get('trades_count', 0)}")
     print(f"  Win rate:          {full_metrics.get('win_rate', 0.0):.2%}")
     print(f"  Mean return/trade: {full_metrics.get('mean_return', 0.0):.4%}")
