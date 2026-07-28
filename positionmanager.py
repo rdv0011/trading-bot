@@ -16,10 +16,10 @@ from binancebasebroker import (
 from tactical.tacticalml import TacticalSignal
 
 TRADEABLE_QUANTITY_PRECISION = 3
-MAX_SCALE_COUNT = 3
-SCALE_INCREMENT_FRAC = 0.5
+MAX_SCALE_COUNT = 5
+SCALE_INCREMENT_FRAC = 1.0
 PARTIAL_CLOSE_FRAC = 0.33
-CONSECUTIVE_SIGNALS_REQUIRED = 2
+CONSECUTIVE_SIGNALS_REQUIRED = 1
 MIN_LIQUIDATION_BUFFER_FRAC = 0.008  # 0.8% minimum gap between SL trigger and liquidation
 
 
@@ -72,13 +72,13 @@ class PositionManager:
         current_price: float,
     ):
         if not strategic.allow_trading:
-            self.log("🚫 StrategicML veto — trading blocked")
+            self.log("GATE: strategic_veto blocked — allow_trading=false")
             if self._state is not None:
                 self._full_close("STRATEGIC_VETO")
             return
 
         if strategic.market_regime == "chop":
-            self.log("⏸ Chop regime — no new entries")
+            self.log("GATE: chop_regime blocked — no new entries in chop")
             return
 
         signal = tactical.signal
@@ -91,7 +91,7 @@ class PositionManager:
                     strategic.margin_type,
                 )
                 if not ok:
-                    self.log("⚠️ Leverage setup failed — skipping entry")
+                    self.log("GATE: leverage_setup failed — skipping entry")
                     return
                 self._open_position(signal, current_price, strategic)
             return
@@ -116,10 +116,16 @@ class PositionManager:
 
         if same_direction:
             consecutive = self._count_consecutive_tail(signal)
-            if (
-                consecutive >= CONSECUTIVE_SIGNALS_REQUIRED
-                and self._state.scale_count < MAX_SCALE_COUNT
-            ):
+            if consecutive < CONSECUTIVE_SIGNALS_REQUIRED:
+                self.log(
+                    f"GATE: scale_up_blocked — only {consecutive}/{CONSECUTIVE_SIGNALS_REQUIRED} "
+                    f"consecutive signals"
+                )
+            elif self._state.scale_count >= MAX_SCALE_COUNT:
+                self.log(
+                    f"GATE: scale_up_blocked — max scales ({MAX_SCALE_COUNT}) reached"
+                )
+            else:
                 self._scale_up(signal, current_price, strategic)
             return
 
@@ -217,7 +223,7 @@ class PositionManager:
         )
 
         if qty < MIN_TRADEABLE_QUANTITY:
-            self.log("⚠️ Quantity below minimum, skipping entry")
+            self.log(f"GATE: qty_too_small (entry) — {qty:.4f} < {MIN_TRADEABLE_QUANTITY}")
             return
 
         res = self._broker.open_position_with_bracket(
@@ -260,7 +266,7 @@ class PositionManager:
         )
 
         if add_qty < MIN_TRADEABLE_QUANTITY:
-            self.log("⚠️ Scale-up quantity below minimum, skipping")
+            self.log(f"GATE: qty_too_small (scale_up) — {add_qty:.4f} < {MIN_TRADEABLE_QUANTITY}")
             return
 
         # Record position size before scale-up to verify later
