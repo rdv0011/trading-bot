@@ -152,7 +152,7 @@ def detect_regime(row) -> str:
     trend_strength = abs(row["ema_20"] - row["ema_100"]) / atr
     vol_ratio = row["vol_12"] / max(row["vol_48"], 1e-8)
 
-    if trend_strength < 0.6:
+    if trend_strength < 0.4:
         return "chop"
     if vol_ratio > 1.4:
         return "high_vol"
@@ -190,7 +190,7 @@ def simulate_trades_core(
     entry_leverage = 1.0
 
     # Regime multipliers
-    regime_stake_mult = {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.0}
+    regime_stake_mult = {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.3}
 
     for i, (timestamp, row) in enumerate(df_iter.iterrows()):
         price = row[close_col]

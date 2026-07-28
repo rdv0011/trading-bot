@@ -9,7 +9,7 @@ logger = logging.getLogger(__name__)
 class RiskGuard:
     max_daily_loss_frac: float = 0.05
     max_drawdown_frac: float = 0.15
-    max_leverage: float = 10.0
+    max_leverage: float = 20.0
 
     _start_of_day_equity: float = field(default=0.0, init=False)
     _peak_equity: float = field(default=0.0, init=False)

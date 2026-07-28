@@ -65,6 +65,7 @@ TIMEFRAMES = {
         name="15m",
         minutes=15,
         binance_interval=Client.KLINE_INTERVAL_15MINUTE,
+        label_window_hours=8.0,
     ),
     "1h": TimeframeConfig(
         name="1h",
