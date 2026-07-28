@@ -65,8 +65,8 @@ def _build_strategic_labels(df: pd.DataFrame, tf_cfg: TimeframeConfig) -> pd.Dat
         vol_ratio >= HIGH_VOL_RATIO, 0.3, np.where(vol_ratio >= 1.0, 0.6, 1.0)
     )
 
-    df["stake_long_frac"] = np.where(df["regime"] == "trend", 0.2, 0.1)
-    df["stake_short_frac"] = np.where(df["regime"] == "trend", 0.1, 0.05)
+    df["stake_long_frac"] = np.where(df["regime"] == "trend", 0.35, 0.15)
+    df["stake_short_frac"] = np.where(df["regime"] == "trend", 0.20, 0.10)
 
     df["stop_loss_frac"] = np.where(
         df["regime"] == "high_vol", 0.03, np.where(df["regime"] == "trend", 0.025, 0.02)
@@ -106,11 +106,12 @@ def _build_strategic_labels_from_simulation(
     df = df.dropna(subset=[SIGNAL_COLUMN])
 
     param_grid = build_param_grid(
-        stake_short=[0.05, 0.10, 0.15],
-        stake_long=[0.10, 0.15, 0.25],
+        stake_short=[0.05, 0.10, 0.15, 0.20, 0.30],
+        stake_long=[0.10, 0.15, 0.25, 0.35, 0.50],
         stop_loss=[0.01, 0.015, 0.02, 0.03, 0.05],
-        max_hold_hours=[2, 4, 8, 12, 24],
+        max_hold_hours=[2, 4, 8, 12, 24, 48],
         take_profit_mult=2.0,
+        leverage=[1, 2, 3, 5],
     )
 
     labels_df = walkforward_label_forward_windows(

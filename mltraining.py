@@ -478,7 +478,8 @@ def build_param_grid(
         stake_long,
         stop_loss, 
         max_hold_hours,
-        take_profit_mult=2.0
+        take_profit_mult=2.0,
+        leverage=None,
     ):
     """
     Build a baseline parameter set for optimization.
@@ -520,6 +521,19 @@ def build_param_grid(
             'take_profit_frac': float(sl * take_profit_mult),
             'max_hold_hours': float(mh)
         })
+
+    # Expand across leverage values only when explicitly requested.
+    if leverage is not None:
+        if not isinstance(leverage, (list, tuple)):
+            leverage = [leverage]
+        grid_with_leverage = []
+        for params in grid:
+            for lev in leverage:
+                extended = dict(params)
+                extended['recommended_leverage'] = float(lev)
+                grid_with_leverage.append(extended)
+        grid = grid_with_leverage
+
     return grid
 
 import pandas as pd
@@ -655,9 +669,9 @@ if __name__ == "__main__":
     else:
         # build param grid
         # You may benefit from a rise to 120k, but avoid heavy exposure due to possible crash to 80k
-        stake_values_long = [0.10, 0.15, 0.25]
+        stake_values_long = [0.10, 0.15, 0.25, 0.35, 0.50]
         # Short risk is asymmetric: downside limited, upside unlimited; keep smaller size
-        stake_values_short = [0.05, 0.10, 0.15]
+        stake_values_short = [0.05, 0.10, 0.15, 0.20, 0.30]
         stop_loss_values = [
             0.01,
             0.015,
@@ -667,14 +681,15 @@ if __name__ == "__main__":
             0.075,
             0.10
         ]
-        max_hold_values = [1, 2, 4, 8, 12, 24]
+        max_hold_values = [1, 2, 4, 8, 12, 24, 48]
         
         param_grid = build_param_grid(
             stake_short=stake_values_short,
             stake_long=stake_values_long,
             stop_loss=stop_loss_values,
             max_hold_hours=max_hold_values,
-            take_profit_mult=2.0
+            take_profit_mult=2.0,
+            leverage=[1, 2, 3, 5],
         )
 
         summary_df, all_labels, all_results, best_hours, best_labels = label_and_evaluate_intervals(
