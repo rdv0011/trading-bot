@@ -1,7 +1,9 @@
 from basestrategy import BaseStrategy
 import time as _time
 import traceback
+from collections import deque
 from dataclasses import replace
+from datetime import datetime
 from binancebasebroker import SIGNAL_HOLD, SIGNAL_LONG, SIGNAL_SHORT, MARKET_TYPE_SPOT
 from mlio import MODEL_DIR
 from mltrainingcore import make_features, make_labels, get_features
@@ -80,7 +82,7 @@ class DualMLStrategy(BaseStrategy):
         self.risk_guard = RiskGuard(
             max_daily_loss_frac=self.parameters.get("max_daily_loss_frac", 0.05),
             max_drawdown_frac=self.parameters.get("max_drawdown_frac", 0.15),
-            max_leverage=self.parameters.get("max_leverage", 10.0),
+            max_leverage=self.parameters.get("max_leverage", 20.0),
         )
 
         self._last_tactical_candle_ts = None
@@ -90,8 +92,72 @@ class DualMLStrategy(BaseStrategy):
             min_threshold=0.0,
             max_threshold=0.0,
         )
+        self._gate_counter_day = None
+        self._daily_gate_counters = {
+            "volume_filter": 0,
+            "htf_trend": 0,
+            "adaptive_threshold": 0,
+            "riskguard": 0,
+            "chop_regime": 0,
+            "strategic_veto": 0,
+        }
+        self._regime_counts = {"trend": 0, "chop": 0, "high_vol": 0}
+        self._prediction_history = deque(maxlen=1000)
 
         self.log_message("✅ DualMLStrategy initialized")
+
+    def _ensure_daily_gate_counters(self, candle_ts):
+        counter_day = candle_ts.date() if hasattr(candle_ts, "date") else None
+        if counter_day != self._gate_counter_day:
+            # Log previous day's regime distribution before resetting
+            if self._gate_counter_day is not None:
+                total = sum(self._regime_counts.values()) or 1
+                pct_str = " | ".join(
+                    f"{k}={v/total*100:.0f}%"
+                    for k, v in sorted(self._regime_counts.items())
+                )
+                self.log_message(
+                    f"📊 Regime distribution ({self._gate_counter_day}): {pct_str}"
+                )
+            self._gate_counter_day = counter_day
+            self._daily_gate_counters = {
+                "volume_filter": 0,
+                "htf_trend": 0,
+                "adaptive_threshold": 0,
+                "riskguard": 0,
+                "chop_regime": 0,
+                "strategic_veto": 0,
+            }
+            self._regime_counts = {"trend": 0, "chop": 0, "high_vol": 0}
+
+    def _increment_gate_counter(self, gate_name, candle_ts):
+        self._ensure_daily_gate_counters(candle_ts)
+        self._daily_gate_counters[gate_name] = self._daily_gate_counters.get(gate_name, 0) + 1
+
+    def _log_daily_gate_summary(self, candle_ts):
+        self._ensure_daily_gate_counters(candle_ts)
+        counters = self._daily_gate_counters
+        # Prediction distribution stats
+        pred_stats = ""
+        if len(self._prediction_history) >= 10:
+            arr = list(self._prediction_history)
+            mean = sum(arr) / len(arr)
+            near_zero = sum(1 for v in arr if abs(v) < 0.001) / len(arr)
+            pred_stats = (
+                f" | pred(mean={mean:.5f} near_zero={near_zero:.0%} "
+                f"n={len(arr)})"
+            )
+        self.log_message(
+            "ℹ️ Gate counter summary | "
+            f"day={self._gate_counter_day} "
+            f"vol_flt={counters.get('volume_filter', 0)} "
+            f"htf_trd={counters.get('htf_trend', 0)} "
+            f"adapt_thr={counters.get('adaptive_threshold', 0)} "
+            f"riskguard={counters.get('riskguard', 0)} "
+            f"chop={counters.get('chop_regime', 0)} "
+            f"veto={counters.get('strategic_veto', 0)}"
+            f"{pred_stats}"
+        )
 
     def on_trading_iteration(self):
         self._iteration_count += 1
@@ -99,7 +165,8 @@ class DualMLStrategy(BaseStrategy):
         self.log_message(f"🔄 Iteration #{self._iteration_count} starting")
         current_equity = self.get_cash()
         if not self.risk_guard.update(current_equity):
-            self.log_message(f"🛑 RiskGuard halted trading — equity={current_equity:.2f}")
+            self.log_message(f"GATE: riskguard halted — equity={current_equity:.2f}")
+            self._increment_gate_counter("riskguard", datetime.utcnow())
             if self.position_manager.has_position:
                 self.position_manager.emergency_close_live()
             return
@@ -168,13 +235,30 @@ class DualMLStrategy(BaseStrategy):
                     max_threshold=tactical_signal.max_threshold,
                 )
 
+            # Count adaptive-threshold HOLD (signal was inside thresholds, no trade generated)
+            if tactical_signal.signal == SIGNAL_HOLD:
+                self._increment_gate_counter("adaptive_threshold", current_tactical_ts)
+            # Collect prediction values for distribution analysis
+            self._prediction_history.append(tactical_signal.prediction)
+
+            # Track regime distribution from current tactical candle
+            if "regime" in df_tactical.columns:
+                current_regime = df_tactical["regime"].iloc[-1]
+                self._regime_counts[current_regime] = self._regime_counts.get(current_regime, 0) + 1
+
             if tactical_signal.signal != SIGNAL_HOLD:
+                market_regime = strategic_decision.market_regime
+                volume_threshold = 0.5 if market_regime == "chop" else 0.8
                 vol_sma20 = df_tactical_raw["volume"].rolling(20).mean().iloc[-1]
                 current_vol = df_tactical_raw["volume"].iloc[-1]
-                if vol_sma20 > 0 and current_vol < vol_sma20 * 0.8:
+                if vol_sma20 > 0 and current_vol < vol_sma20 * volume_threshold:
+                    blocked_signal = tactical_signal.signal.upper()
+                    self.log_message(f"GATE: volume_filter blocked {blocked_signal}")
+                    self._increment_gate_counter("volume_filter", current_tactical_ts)
                     self.log_message(
-                        f"🔇 Volume filter: vol={current_vol:.0f} < 80% SMA20={vol_sma20:.0f} "
-                        f"— overriding {tactical_signal.signal.upper()} to HOLD"
+                        f"🔇 Volume filter: regime={market_regime} vol={current_vol:.0f} "
+                        f"< {volume_threshold:.0%} SMA20={vol_sma20:.0f} "
+                        f"— overriding {blocked_signal} to HOLD"
                     )
                     tactical_signal = type(tactical_signal)(
                         signal=SIGNAL_HOLD,
@@ -190,6 +274,9 @@ class DualMLStrategy(BaseStrategy):
                 above_ema50 = current_1h_close > current_ema50
 
                 if tactical_signal.signal == SIGNAL_LONG and not above_ema50:
+                    blocked_signal = tactical_signal.signal.upper()
+                    self.log_message(f"GATE: htf_trend blocked {blocked_signal}")
+                    self._increment_gate_counter("htf_trend", current_tactical_ts)
                     self.log_message(
                         f"🔇 HTF filter: LONG but 1h close={current_1h_close:.0f} < EMA50={current_ema50:.0f}"
                         f" — overriding to HOLD"
@@ -201,6 +288,9 @@ class DualMLStrategy(BaseStrategy):
                         max_threshold=tactical_signal.max_threshold,
                     )
                 elif tactical_signal.signal == SIGNAL_SHORT and above_ema50:
+                    blocked_signal = tactical_signal.signal.upper()
+                    self.log_message(f"GATE: htf_trend blocked {blocked_signal}")
+                    self._increment_gate_counter("htf_trend", current_tactical_ts)
                     self.log_message(
                         f"🔇 HTF filter: SHORT but 1h close={current_1h_close:.0f} > EMA50={current_ema50:.0f}"
                         f" — overriding to HOLD"
@@ -232,8 +322,34 @@ class DualMLStrategy(BaseStrategy):
             f"leverage={strategic_decision.recommended_leverage:.1f}x "
             f"exposure={strategic_decision.max_exposure_frac:.2f}"
         )
+        self._log_daily_gate_summary(current_tactical_ts)
+
+        # Track regime distribution on non-new-candle iterations too
+        if not tactical_is_new:
+            self._regime_counts[strategic_decision.market_regime] = (
+                self._regime_counts.get(strategic_decision.market_regime, 0) + 1
+            )
 
         current_price = self.get_last_price(self.asset)
+
+        # --- GATE: StrategicML veto ---
+        if not strategic_decision.allow_trading:
+            self.log_message(f"GATE: strategic_veto blocked — allow_trading=false")
+            self._increment_gate_counter("strategic_veto", current_tactical_ts)
+            if self.position_manager.has_position:
+                self.position_manager.emergency_close_live()
+            elapsed = _time.time() - self._iteration_start
+            self.log_message(f"✅ Iteration #{self._iteration_count} complete ({elapsed:.1f}s)")
+            return
+
+        # --- GATE: Chop regime (no new entries) ---
+        if strategic_decision.market_regime == "chop":
+            self.log_message(f"GATE: chop_regime blocked — regime=chop")
+            self._increment_gate_counter("chop_regime", current_tactical_ts)
+            elapsed = _time.time() - self._iteration_start
+            self.log_message(f"✅ Iteration #{self._iteration_count} complete ({elapsed:.1f}s)")
+            return
+
         self.position_manager.on_signal(tactical_signal, strategic_decision, current_price)
         elapsed = _time.time() - self._iteration_start
         self.log_message(f"✅ Iteration #{self._iteration_count} complete ({elapsed:.1f}s)")
