@@ -32,6 +32,8 @@ class TacticalML:
     Produces LONG / SHORT / HOLD signals via adaptive thresholding.
     """
 
+    ABSOLUTE_THRESHOLD = 0.003
+
     def __init__(
         self,
         model_params: dict,
@@ -92,8 +94,17 @@ class TacticalML:
                 pred_series.iloc[-hist_len:], self.tf_cfg
             )
 
-        if np.isnan(max_th):
-            signal = SIGNAL_HOLD
+        if np.isnan(max_th) or np.isnan(min_th):
+            self.log(
+                "TacticalML warmup active: adaptive thresholds unavailable, "
+                f"using absolute threshold +/-{self.ABSOLUTE_THRESHOLD:.4f}"
+            )
+            if prediction > self.ABSOLUTE_THRESHOLD:
+                signal = SIGNAL_LONG
+            elif prediction < -self.ABSOLUTE_THRESHOLD:
+                signal = SIGNAL_SHORT
+            else:
+                signal = SIGNAL_HOLD
         elif prediction > max_th:
             signal = SIGNAL_LONG
         elif prediction < min_th:
