@@ -44,6 +44,7 @@ class TacticalML:
         self.tf_cfg = tf_cfg
         self.log = logger if logger is not None else print
         self._pred_history: deque = deque(maxlen=tf_cfg.max_history_candles)
+        self._warmup_logged = False
 
     def warmup(self, df: pd.DataFrame, features: List[str]):
         n = len(df)
@@ -95,10 +96,12 @@ class TacticalML:
             )
 
         if np.isnan(max_th) or np.isnan(min_th):
-            self.log(
-                "TacticalML warmup active: adaptive thresholds unavailable, "
-                f"using absolute threshold +/-{self.ABSOLUTE_THRESHOLD:.4f}"
-            )
+            if not self._warmup_logged:
+                self.log(
+                    "TacticalML warmup active: adaptive thresholds unavailable, "
+                    f"using absolute threshold +/-{self.ABSOLUTE_THRESHOLD:.4f}"
+                )
+                self._warmup_logged = True
             if prediction > self.ABSOLUTE_THRESHOLD:
                 signal = SIGNAL_LONG
             elif prediction < -self.ABSOLUTE_THRESHOLD:
