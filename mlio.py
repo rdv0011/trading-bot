@@ -91,7 +91,7 @@ def load_model(model_path, model_meta_path):
             logger.warning("load_model: failed to read metadata from %s: %s", model_meta_path, exc)
             metadata = None
 
-    print(f"[load_model] Loaded model: {model_path}, meta info: {model_meta_path}")
+    logger.info("load_model: loaded model %s, meta info: %s", model_path, model_meta_path)
 
     return model, metadata
 
