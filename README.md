@@ -211,22 +211,60 @@ print(f'Trades: {trades}   Wallet: {start:.5f} → {end:.5f}   PnL: {(end-1)*100
 
 ---
 
-### Recommended workflow for 25 days
+### Recommended workflow
 
-Run these three commands in order. Each step caches its output so re-runs are fast.
+Run these commands in order. Each step caches its output so re-runs are fast.
 
 ```bash
 # 1. Train the strategic model with simulation-driven parameter optimisation
-python main.py --train-strategic --optimize-params --strategic-days 25 --tactical-days 25
+python main.py --train-strategic --optimize-params --strategic-days 180 --tactical-days 45
 
-# 2. Run the full dual-ML backtest
-python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 15m
+# 2. Run the full dual-ML backtest (reference benchmark)
+python dualmlsimulation.py --symbol BTCUSDT --days 180 --timeframe 15m
 
 # 3. Start the live bot (uses the model trained in step 1)
 python main.py
 ```
 
 Note: step 1 (`--train-strategic`) does **not** report theoretical profit — it prints dataset sizes, validation RMSE, and saves the model. Profit output comes from step 2 (`dualmlsimulation.py`), which prints final wallet, win rate, and mean return to the console and saves the per-candle wallet history to `labeleddata/dual_*_final_test_sim.csv`.
+
+#### Cyclic logging: keep the last 10 days of demo trading
+
+Run the live bot with the built-in rotating log file so the last 10 days of trading are always available for comparison. Logs are written daily to `logs/trading_YYYY-MM-DD.log` and older files are deleted automatically:
+
+- keeps the last 10 daily files (`logs/trading_*.log`)
+- caps each day's file at 5 MB (truncates to the last 10k lines if exceeded)
+- console output is still shown in tmux for live monitoring
+
+```bash
+python main.py
+```
+
+If the built-in logger is not enabled yet, capture the tmux scrollback to a file as a fallback:
+
+```bash
+tmux capture-pane -t trading -pS - > trading_log_$(date +%Y%m%d).txt
+```
+
+#### After 10 days: replay the simulation over the same period and compare
+
+Once ~10 days of demo logs have accrued, run a windowed simulation over the exact same calendar window and diff the results:
+
+```bash
+# 4. Windowed simulation over the same period as the demo logs
+#    (--days covers the 10-day window + ~25 days of warmup history)
+python dualmlsimulation.py --symbol BTCUSDT --days 35 --start-date 2026-07-25 --end-date 2026-08-03 --live-faithful
+
+# 5. Extract demo trades from the daily logs
+python demo_log_parser.py --log logs --start-date 2026-07-25 --end-date 2026-08-03
+
+# 6. Compare demo vs simulation — per-day table, win rate, PnL, gate attribution
+python compare_demo_vs_sim.py --demo trades/demo_trades.csv --sim trades/sim_trades.csv
+```
+
+The comparison report shows, per day: trade counts, win rate, PnL, regime distribution, and which live gates (volume filter, HTF trend, chop block, RiskGuard) suppressed signals that the raw simulation would have taken. The biggest gaps point to the gates most worth tuning.
+
+> ⚠️ Steps 4–6 use the comparison harness specified in [`plans/demo_vs_sim_comparison.md`](plans/demo_vs_sim_comparison.md) — it is planned, not yet implemented.
 
 ---
 
