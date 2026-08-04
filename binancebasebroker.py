@@ -1,9 +1,12 @@
 import threading
+import os
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple
 import logging
 from datetime import datetime
+from logging.handlers import TimedRotatingFileHandler
+from pathlib import Path
 import pandas as pd
 from binance.client import Client
 from binance.enums import *
@@ -16,6 +19,26 @@ SIGNAL_SHORT = "short"
 SIGNAL_HOLD = "hold"
 MARKET_TYPE_SPOT = "spot"
 MARKET_TYPE_FUTURES = "futures"
+
+# ── Trading log file ──────────────────────────────────────────────────
+# Daily-rotating log with 10-day retention, written by setup_logging().
+LOG_DIR = Path(os.environ.get("TBOT_LOG_DIR", "logs"))
+MAX_LOG_BYTES = int(os.environ.get("TBOT_MAX_LOG_BYTES", str(5 * 1024 * 1024)))  # 5 MB per day
+LOG_RETENTION_DAYS = 10   # keep the last 10 daily files
+LOG_MAX_LINES = 10_000    # truncate today's file to this many lines when over the size cap
+
+
+def _rotating_log_namer(name: str) -> str:
+    """Rename rotated log files ``trading.log.2026-08-04`` -> ``trading_2026-08-04.log``.
+
+    TimedRotatingFileHandler appends ``.<date>`` by default; this matches the
+    documented ``logs/trading_YYYY-MM-DD.log`` convention used by the
+    demo-log parser (plans/demo_vs_sim_comparison.md).
+    """
+    base, dot, date = name.rpartition(".")
+    if dot and len(date) == 10 and date[4] == "-":
+        return f"{base}_{date}.log"
+    return name
 
 # ── Per-endpoint weight estimates (Binance Futures docs) ──────────────
 # Used by the rate limiter so we don't over-reserve for cheap endpoints.
@@ -245,10 +268,43 @@ class BinanceBaseBroker(ABC):
         self.setup_client()
 
     def setup_logging(self):
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s"
-        )
+        """Configure a daily-rotating log file plus console output.
+
+        Attaches handlers to the root logger (idempotently — repeated broker
+        instantiations don't duplicate them) so module-level loggers in
+        riskguard.py / mlio.py propagate to the same file.
+
+        - File:  ``logs/trading.log``, rotated at UTC midnight to
+                 ``logs/trading_YYYY-MM-DD.log``, keeping the last 10 files.
+        - Size:  today's file is capped at ``MAX_LOG_BYTES`` (5 MB) and
+                 truncated to the last ``LOG_MAX_LINES`` lines by
+                 ``BaseStrategy._enforce_log_size_cap``.
+        - Console output is preserved so tmux still shows live activity.
+        """
+        root = logging.getLogger()
+        fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
+
+        if not any(isinstance(h, TimedRotatingFileHandler) for h in root.handlers):
+            LOG_DIR.mkdir(parents=True, exist_ok=True)
+            file_handler = TimedRotatingFileHandler(
+                LOG_DIR / "trading.log",
+                when="midnight",
+                backupCount=LOG_RETENTION_DAYS,
+                utc=True,
+                encoding="utf-8",
+            )
+            file_handler.setFormatter(fmt)
+            file_handler.namer = _rotating_log_namer
+            file_handler.setLevel(logging.INFO)
+            root.addHandler(file_handler)
+
+        if not any(isinstance(h, logging.StreamHandler) for h in root.handlers):
+            console = logging.StreamHandler()
+            console.setFormatter(fmt)
+            console.setLevel(logging.INFO)
+            root.addHandler(console)
+
+        root.setLevel(logging.INFO)
         self.logger = logging.getLogger(self.__class__.__name__)
 
     # ── Rate limiter ──────────────────────────────────────────────────

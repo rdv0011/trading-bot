@@ -1,10 +1,19 @@
 import time
 import traceback
 import random
+import logging
 from datetime import datetime
 from typing import Dict, Any, Optional
+from logging.handlers import TimedRotatingFileHandler
 import pandas as pd
-from binancebasebroker import BinanceBaseBroker, BracketResult, PositionResult
+from binancebasebroker import (
+    BinanceBaseBroker,
+    BracketResult,
+    PositionResult,
+    LOG_DIR,
+    MAX_LOG_BYTES,
+    LOG_MAX_LINES,
+)
 from timeframe_config import TimeframeConfig
 
 class BaseStrategy:
@@ -86,7 +95,38 @@ class BaseStrategy:
     def log_message(self, message: str):
         """Log message"""
         self._broker.log_message(message)
-    
+
+    def _enforce_log_size_cap(self):
+        """Truncate today's log file if it exceeds ``MAX_LOG_BYTES``.
+
+        TimedRotatingFileHandler rotates daily but has no byte cap, so a
+        single day's file could grow unbounded during error-backoff storms.
+        When today's file (``logs/trading.log``) exceeds the cap, keep only
+        the last ``LOG_MAX_LINES`` lines. Also resets the open handler's
+        stream offset so subsequent writes land at the new EOF.
+        """
+        try:
+            log_path = LOG_DIR / "trading.log"
+            if not log_path.exists() or log_path.stat().st_size <= MAX_LOG_BYTES:
+                return
+            with open(log_path, "r", encoding="utf-8", errors="replace") as f:
+                lines = f.readlines()
+            if len(lines) <= LOG_MAX_LINES:
+                return
+            with open(log_path, "w", encoding="utf-8") as f:
+                f.writelines(lines[-LOG_MAX_LINES:])
+            # Reset open handler streams so they keep writing at the new EOF.
+            for handler in logging.getLogger().handlers:
+                if isinstance(handler, TimedRotatingFileHandler):
+                    handler.flush()
+                    handler.stream.seek(0, 2)  # SEEK_END
+            self.log_message(
+                f"⚠️ Trading log exceeded {MAX_LOG_BYTES} bytes — "
+                f"truncated to last {LOG_MAX_LINES} lines"
+            )
+        except Exception as exc:
+            self.log_message(f"⚠️ Log size-cap enforcement failed: {exc}")
+
     def run(self):
         """Main strategy loop"""
         self.log_message("🚀 Starting ML Trading Strategy...")
@@ -100,6 +140,7 @@ class BaseStrategy:
                 try:
                     self.on_trading_iteration()
                     self._consecutive_iteration_failures = 0
+                    self._enforce_log_size_cap()
                     
                     timeframe_minutes = int(self.sleep_time[:-1])
                     self._sleep_until_next_candle(timeframe_minutes)
