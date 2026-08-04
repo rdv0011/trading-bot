@@ -1,13 +1,39 @@
 """Tests for the daily-rotating trading log (Task 7 of plans/demo_vs_sim_comparison.md)."""
 import logging
-import os
 from logging.handlers import TimedRotatingFileHandler
-from pathlib import Path
 
 import pytest
 
 import binancebasebroker as bbb
 from basestrategy import BaseStrategy
+
+
+class StubBroker(bbb.BinanceBaseBroker):
+    """Concrete broker for tests — implements the abstract interface."""
+
+    def setup_client(self):
+        pass
+
+    def get_cash(self, *a):
+        return 1000.0
+
+    def get_position(self, *a):
+        return None
+
+    def get_last_price(self, *a):
+        return 40000.0
+
+    def _create_market_order(self, symbol, side, quantity):
+        return None
+
+    def _create_bracket_order(self, *a, **kw):
+        return None
+
+    def cancel_open_orders(self, *a, **kw):
+        pass
+
+    def close_position(self, *a):
+        pass
 
 
 @pytest.fixture
@@ -29,22 +55,19 @@ def isolated_logging(tmp_path, monkeypatch):
 
 @pytest.fixture
 def broker(isolated_logging):
-    return bbb.BinanceBaseBroker(config={})
+    return StubBroker(config={})
 
 
 def test_bb_log_setup_creates_file_and_stream_handlers(broker):
-    handlers = broker.logger.handlers
-    # logger itself has no direct handlers; handlers live on the root logger
     root_handlers = logging.getLogger().handlers
     assert any(isinstance(h, TimedRotatingFileHandler) for h in root_handlers)
     assert any(isinstance(h, logging.StreamHandler) for h in root_handlers)
-    assert not isinstance(broker.logger, type(None))
 
 
 def test_bb_log_setup_is_idempotent(isolated_logging):
     """Repeated broker instantiations must not duplicate root handlers."""
-    bbb.BinanceBaseBroker(config={})
-    bbb.BinanceBaseBroker(config={})
+    StubBroker(config={})
+    StubBroker(config={})
     root_handlers = logging.getLogger().handlers
     file_handlers = [h for h in root_handlers if isinstance(h, TimedRotatingFileHandler)]
     stream_handlers = [h for h in root_handlers if isinstance(h, logging.StreamHandler)]
@@ -53,7 +76,7 @@ def test_bb_log_setup_is_idempotent(isolated_logging):
 
 
 def test_bb_log_writes_to_daily_file(isolated_logging, tmp_path):
-    bbb.BinanceBaseBroker(config={}).log_message("🟢 OPEN LONG @ 64200.0 qty=0.012")
+    StubBroker(config={}).log_message("🟢 OPEN LONG @ 64200.0 qty=0.012")
     log_file = tmp_path / "trading.log"
     assert log_file.exists()
     content = log_file.read_text(encoding="utf-8")
@@ -84,14 +107,11 @@ def test_bb_log_rotating_handler_config(broker):
 
 def test_bb_log_env_overrides(tmp_path, monkeypatch, isolated_logging):
     """TBOT_LOG_DIR / TBOT_MAX_LOG_BYTES env vars override the defaults."""
-    monkeypatch.setattr(bbb, "LOG_DIR", Path(os.environ.get("TBOT_LOG_DIR", "logs")))
     monkeypatch.setenv("TBOT_LOG_DIR", str(tmp_path))
     monkeypatch.setenv("TBOT_MAX_LOG_BYTES", str(2048))
-    # Reload constants the way the module would on a fresh process
-    monkeypatch.setattr(bbb, "LOG_DIR", Path(tmp_path))
+    monkeypatch.setattr(bbb, "LOG_DIR", tmp_path)
     monkeypatch.setattr(bbb, "MAX_LOG_BYTES", 2048)
-    broker = bbb.BinanceBaseBroker(config={})
-    broker.log_message("test env override")
+    StubBroker(config={}).log_message("test env override")
     assert (tmp_path / "trading.log").exists()
     assert bbb.MAX_LOG_BYTES == 2048
 
@@ -101,7 +121,7 @@ def test_bb_log_size_cap_truncates_to_last_lines(isolated_logging, tmp_path, mon
     monkeypatch.setattr(bbb, "MAX_LOG_BYTES", 1)  # any file is "over cap"
     monkeypatch.setattr(bbb, "LOG_MAX_LINES", 3)
 
-    broker = bbb.BinanceBaseBroker(config={})
+    broker = StubBroker(config={})
     strategy = BaseStrategy(broker=broker, quote_symbol="USDT", parameters={})
     for i in range(10):
         broker.log_message(f"line {i}")
@@ -110,9 +130,12 @@ def test_bb_log_size_cap_truncates_to_last_lines(isolated_logging, tmp_path, mon
 
     log_file = tmp_path / "trading.log"
     lines = [l for l in log_file.read_text(encoding="utf-8").splitlines() if l.strip()]
-    assert len(lines) == 3
-    assert "line 7" in lines[0]  # last 3 lines kept
-    assert "line 9" in lines[-1]
+    # Kept lines: last 3 ("line 7".."line 9") plus the truncation warning line
+    assert "line 7" in lines
+    assert "line 8" in lines
+    assert "line 9" in lines
+    assert "line 0" not in " ".join(lines)  # oldest lines dropped
+    assert any("truncated to last 3 lines" in l for l in lines)
 
 
 def test_bb_log_size_cap_noop_under_limit(isolated_logging, tmp_path, monkeypatch):
@@ -120,7 +143,7 @@ def test_bb_log_size_cap_noop_under_limit(isolated_logging, tmp_path, monkeypatc
     monkeypatch.setattr(bbb, "MAX_LOG_BYTES", 10_000_000)  # huge cap
     monkeypatch.setattr(bbb, "LOG_MAX_LINES", 3)
 
-    broker = bbb.BinanceBaseBroker(config={})
+    broker = StubBroker(config={})
     strategy = BaseStrategy(broker=broker, quote_symbol="USDT", parameters={})
     for i in range(10):
         broker.log_message(f"line {i}")
