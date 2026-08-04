@@ -65,6 +65,50 @@ Available flags:
 
 ---
 
+### Run the bot in a tmux session (remote machine)
+
+For unattended 24/7 operation on a remote machine (VPS, Radxa, etc.), run the bot inside a **tmux** session so it survives SSH disconnects and keeps the full console log in the scrollback buffer.
+
+#### 1. Configure the scrollback buffer (one-time)
+
+The bot logs ~2,300 lines/day (288 iterations × ~8 lines) at the default `5m` cadence. The tmux default of 2,000 lines covers **less than one day**. To preserve **10 days of trading log**, raise `history-limit` to **100,000 lines** (~3× headroom, ≈ 40+ days):
+
+```bash
+echo "set -g history-limit 100000" >> ~/.tmux.conf
+tmux kill-server   # or restart tmux to apply
+```
+
+#### 2. Start the bot in a session
+
+```bash
+tmux new-session -d -s trading "cd /path/to/trading-bot && conda activate tradingbot && python main.py"
+```
+
+Attach/detach:
+
+```bash
+tmux attach -t trading      # attach
+tmux detach                 # inside session: Ctrl-b d
+tmux ls                     # list sessions
+```
+
+#### 3. Save the log to a file
+
+tmux **can** dump the scrollback buffer to a file:
+
+```bash
+# One-shot snapshot of the entire scrollback (all 100k lines):
+tmux capture-pane -t trading -pS - > trading_log_$(date +%Y%m%d).txt
+
+# Continuous logging (writes everything from now on, survives crashes):
+tmux pipe-pane -t trading -o 'cat >> trading_log_$(date +%Y%m%d).txt'
+tmux pipe-pane -t trading   # stop continuous logging
+```
+
+> ⚠️ **Caveat:** `capture-pane` / `pipe-pane` output includes **ANSI escape codes** (colors) and can wrap lines at terminal width, so it is fine for human inspection but not reliable input for automated parsing. For machine-readable logs, use the **built-in rotating log file** described in [`plans/demo_vs_sim_comparison.md`](plans/demo_vs_sim_comparison.md) (Task 7), which writes clean daily files with a max-size cap.
+
+---
+
 ### Train the strategic model
 
 The strategic model must be trained before the first run. Training fetches historical data from Binance (public endpoint — no API credentials required) and saves the model to `model/`.
