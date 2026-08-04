@@ -298,23 +298,26 @@ class BinanceBaseBroker(ABC):
             file_handler.setLevel(logging.INFO)
             root.addHandler(file_handler)
 
-        # Console: reuse any existing root StreamHandler (a library may have
-        # attached one via basicConfig, e.g. python-binance / catboost) but
-        # force it to INFO so our lines reach the tmux pane — a foreign
-        # handler is often at WARNING and would silently swallow them.
-        # Reusing instead of adding a second handler avoids duplicated output.
-        console = next(
-            (h for h in root.handlers if isinstance(h, logging.StreamHandler)),
-            None,
-        )
-        if console is None:
-            console = logging.StreamHandler()
-            root.addHandler(console)
-        console.setLevel(logging.INFO)
+        # Console: install exactly one StreamHandler on stderr. Libraries
+        # (python-binance, catboost) may attach their own root StreamHandler,
+        # often at WARNING or bound to a non-terminal stream; replace any
+        # foreign plain StreamHandler so our INFO lines deterministically
+        # reach the tmux pane and are never duplicated. The file handler is a
+        # StreamHandler subclass but is kept (exact-type check only).
+        for handler in [h for h in root.handlers if type(h) is logging.StreamHandler]:
+            root.removeHandler(handler)
+        console = logging.StreamHandler()
         console.setFormatter(fmt)
+        console.setLevel(logging.INFO)
+        root.addHandler(console)
 
         root.setLevel(logging.INFO)
         self.logger = logging.getLogger(self.__class__.__name__)
+        self.logger.info(
+            "Logging ready: root level=%s, handlers=%s",
+            logging.getLevelName(root.level),
+            [type(h).__name__ for h in root.handlers],
+        )
 
     # ── Rate limiter ──────────────────────────────────────────────────
 
