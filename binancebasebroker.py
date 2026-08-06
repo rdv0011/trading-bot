@@ -4,8 +4,7 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, Tuple
 import logging
-from datetime import datetime
-from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 import pandas as pd
 from binance.client import Client
@@ -26,19 +25,73 @@ LOG_DIR = Path(os.environ.get("TBOT_LOG_DIR", "logs"))
 MAX_LOG_BYTES = int(os.environ.get("TBOT_MAX_LOG_BYTES", str(5 * 1024 * 1024)))  # 5 MB per day
 LOG_RETENTION_DAYS = 10   # keep the last 10 daily files
 LOG_MAX_LINES = 10_000    # truncate today's file to this many lines when over the size cap
+LOG_FILE_LEVEL = logging.DEBUG    # full detail goes to the daily file
+LOG_CONSOLE_LEVEL = logging.INFO  # console only in the tmux console
 
 
-def _rotating_log_namer(name: str) -> str:
-    """Rename rotated log files ``trading.log.2026-08-04`` -> ``trading_2026-08-04.log``.
+def _today_log_path() -> Path:
+    """Path of the current UTC-day log file ``logs/trading_YYYY-MM-DD.log``."""
+    return LOG_DIR / f"trading_{datetime.now(timezone.utc):%Y-%m-%d}.log"
 
-    TimedRotatingFileHandler appends ``.<date>`` by default; this matches the
-    documented ``logs/trading_YYYY-MM-DD.log`` convention used by the
-    demo-log parser (plans/demo_vs_sim_comparison.md).
+
+class DailyDatedLogHandler(logging.Handler):
+    """Writes one daily file ``logs/trading_YYYY-MM-DD.log`` per UTC date.
+
+    Unlike TimedRotatingFileHandler, the active file already carries the date
+    suffix so it never mixes with unrelated logs. Rolls to a fresh file when
+    the UTC date changes and prunes files older than ``LOG_RETENTION_DAYS``.
     """
-    base, dot, date = name.rpartition(".")
-    if dot and len(date) == 10 and date[4] == "-":
-        return f"{base}_{date}.log"
-    return name
+
+    def __init__(self, log_dir: Path, level: int = LOG_FILE_LEVEL):
+        super().__init__(level=level)
+        self.log_dir = log_dir
+        self._stream: Optional[object] = None
+
+    @property
+    def stream(self):
+        """Open file stream (None until first emit); lets the size-cap logic
+        reseat the write offset after external truncation."""
+        return self._stream
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            if self._stream is None:
+                self._open_today()
+            msg = self.format(record)
+            if "\n" in msg:
+                msg = msg.replace("\n", " | ")
+            self._stream.write(msg + "\n")
+            self.flush()
+        except Exception:
+            self.handleError(record)
+
+    def _open_today(self) -> None:
+        self._prune_old_files()
+        self._stream = open(self._today(), "a", encoding="utf-8")
+
+    def _today(self) -> Path:
+        return _today_log_path()
+
+    def _prune_old_files(self) -> None:
+        cutoff = datetime.now(timezone.utc).date() - timedelta(days=LOG_RETENTION_DAYS)
+        if not self.log_dir.exists():
+            return
+        for f in self.log_dir.glob("trading_????-??-??.log"):
+            try:
+                fdate = datetime.strptime(f.stem.split("_", 1)[1], "%Y-%m-%d").date()
+                if fdate < cutoff:
+                    f.unlink()
+            except (IndexError, ValueError):
+                continue
+
+    def flush(self) -> None:
+        if self._stream is not None:
+            self._stream.flush()
+
+    def close(self) -> None:
+        if self._stream is not None:
+            self._stream.close()
+        super().close()
 
 # ── Per-endpoint weight estimates (Binance Futures docs) ──────────────
 # Used by the rate limiter so we don't over-reserve for cheap endpoints.
@@ -268,34 +321,28 @@ class BinanceBaseBroker(ABC):
         self.setup_client()
 
     def setup_logging(self):
-        """Configure a daily-rotating log file plus console output.
+        """Configure a daily-dated log file plus console output.
 
         Attaches handlers to the root logger (idempotently — repeated broker
         instantiations don't duplicate them) so module-level loggers in
         riskguard.py / mlio.py propagate to the same file.
 
-        - File:  ``logs/trading.log``, rotated at UTC midnight to
-                 ``logs/trading_YYYY-MM-DD.log``, keeping the last 10 files.
+        - File:  ``logs/trading_YYYY-MM-DD.log`` per UTC date, keeping the
+                 last ``LOG_RETENTION_DAYS`` files. Full detail (DEBUG).
         - Size:  today's file is capped at ``MAX_LOG_BYTES`` (5 MB) and
                  truncated to the last ``LOG_MAX_LINES`` lines by
                  ``BaseStrategy._enforce_log_size_cap``.
-        - Console output is preserved so tmux still shows live activity.
+        - Console: INFO summaries only, so tmux shows live activity without
+                 the DEBUG noise that goes to the file.
         """
         root = logging.getLogger()
         fmt = logging.Formatter("%(asctime)s - %(levelname)s - %(message)s")
 
-        if not any(isinstance(h, TimedRotatingFileHandler) for h in root.handlers):
+        if not any(isinstance(h, DailyDatedLogHandler) for h in root.handlers):
             LOG_DIR.mkdir(parents=True, exist_ok=True)
-            file_handler = TimedRotatingFileHandler(
-                LOG_DIR / "trading.log",
-                when="midnight",
-                backupCount=LOG_RETENTION_DAYS,
-                utc=True,
-                encoding="utf-8",
-            )
+            file_handler = DailyDatedLogHandler(LOG_DIR)
             file_handler.setFormatter(fmt)
-            file_handler.namer = _rotating_log_namer
-            file_handler.setLevel(logging.INFO)
+            file_handler.setLevel(LOG_FILE_LEVEL)
             root.addHandler(file_handler)
 
         # Console: install exactly one StreamHandler on stderr. Libraries
@@ -303,15 +350,16 @@ class BinanceBaseBroker(ABC):
         # often at WARNING or bound to a non-terminal stream; replace any
         # foreign plain StreamHandler so our INFO lines deterministically
         # reach the tmux pane and are never duplicated. The file handler is a
-        # StreamHandler subclass but is kept (exact-type check only).
+        # Handler but not a plain StreamHandler, so it is kept (exact-type
+        # check only).
         for handler in [h for h in root.handlers if type(h) is logging.StreamHandler]:
             root.removeHandler(handler)
         console = logging.StreamHandler()
         console.setFormatter(fmt)
-        console.setLevel(logging.INFO)
+        console.setLevel(LOG_CONSOLE_LEVEL)
         root.addHandler(console)
 
-        root.setLevel(logging.INFO)
+        root.setLevel(LOG_FILE_LEVEL)
         self.logger = logging.getLogger(self.__class__.__name__)
         self.logger.info(
             "Logging ready: root level=%s, handlers=%s",
@@ -700,3 +748,6 @@ class BinanceBaseBroker(ABC):
 
     def log_message(self, msg: str):
         self.logger.info(msg)
+
+    def log_debug(self, msg: str):
+        self.logger.debug(msg)

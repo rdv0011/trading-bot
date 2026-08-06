@@ -227,6 +227,18 @@ class DualMLStrategy(BaseStrategy):
 
             tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, df_pred, features)
 
+            self.log_debug(
+                f"tactical: signal={tactical_signal.signal} "
+                f"prediction={tactical_signal.prediction:.6f} "
+                f"min_thr={tactical_signal.min_threshold:.6f} "
+                f"max_thr={tactical_signal.max_threshold:.6f}"
+            )
+            self.log_debug(
+                f"strategic: regime={strategic_decision.market_regime} "
+                f"direction={strategic_decision.direction} "
+                f"confidence={strategic_decision.confidence}"
+            )
+
             if self.market_type.lower() == MARKET_TYPE_SPOT and tactical_signal.signal == SIGNAL_SHORT:
                 tactical_signal = type(tactical_signal)(
                     signal=SIGNAL_HOLD,

@@ -13,6 +13,8 @@ from binancebasebroker import (
     LOG_DIR,
     MAX_LOG_BYTES,
     LOG_MAX_LINES,
+    _today_log_path,
+    DailyDatedLogHandler,
 )
 from timeframe_config import TimeframeConfig
 
@@ -96,17 +98,21 @@ class BaseStrategy:
         """Log message"""
         self._broker.log_message(message)
 
+    def log_debug(self, message: str):
+        """Log detailed message (DEBUG level, file only)"""
+        self._broker.log_debug(message)
+
     def _enforce_log_size_cap(self):
         """Truncate today's log file if it exceeds ``MAX_LOG_BYTES``.
 
-        TimedRotatingFileHandler rotates daily but has no byte cap, so a
-        single day's file could grow unbounded during error-backoff storms.
-        When today's file (``logs/trading.log``) exceeds the cap, keep only
-        the last ``LOG_MAX_LINES`` lines. Also resets the open handler's
-        stream offset so subsequent writes land at the new EOF.
+        The daily handler has no byte cap, so a single day's file could grow
+        unbounded during error-backoff storms. When today's file
+        (``logs/trading_YYYY-MM-DD.log``) exceeds the cap, keep only the
+        last ``LOG_MAX_LINES`` lines. Also resets the open handler's stream
+        offset so subsequent writes land at the new EOF.
         """
         try:
-            log_path = LOG_DIR / "trading.log"
+            log_path = _today_log_path()
             if not log_path.exists() or log_path.stat().st_size <= MAX_LOG_BYTES:
                 return
             with open(log_path, "r", encoding="utf-8", errors="replace") as f:
@@ -117,7 +123,7 @@ class BaseStrategy:
                 f.writelines(lines[-LOG_MAX_LINES:])
             # Reset open handler streams so they keep writing at the new EOF.
             for handler in logging.getLogger().handlers:
-                if isinstance(handler, TimedRotatingFileHandler):
+                if isinstance(handler, DailyDatedLogHandler):
                     handler.flush()
                     handler.stream.seek(0, 2)  # SEEK_END
             self.log_message(

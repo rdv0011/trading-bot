@@ -1,6 +1,6 @@
-"""Tests for the daily-rotating trading log (Task 7 of plans/demo_vs_sim_comparison.md)."""
+"""Tests for the daily-dated trading log (Task 7 of plans/demo_vs_sim_comparison.md)."""
 import logging
-from logging.handlers import TimedRotatingFileHandler
+from datetime import datetime, timezone
 
 import pytest
 
@@ -60,7 +60,7 @@ def broker(isolated_logging):
 
 def test_bb_log_setup_creates_file_and_stream_handlers(broker):
     root_handlers = logging.getLogger().handlers
-    assert any(isinstance(h, TimedRotatingFileHandler) for h in root_handlers)
+    assert any(isinstance(h, bbb.DailyDatedLogHandler) for h in root_handlers)
     assert any(isinstance(h, logging.StreamHandler) for h in root_handlers)
 
 
@@ -69,40 +69,44 @@ def test_bb_log_setup_is_idempotent(isolated_logging):
     StubBroker(config={})
     StubBroker(config={})
     root_handlers = logging.getLogger().handlers
-    file_handlers = [h for h in root_handlers if isinstance(h, TimedRotatingFileHandler)]
+    file_handlers = [h for h in root_handlers if isinstance(h, bbb.DailyDatedLogHandler)]
     stream_handlers = [h for h in root_handlers if isinstance(h, logging.StreamHandler)]
     assert len(file_handlers) == 1
     assert len(stream_handlers) == 1
 
 
+def test_bb_log_level_split_file_debug_console_info(broker):
+    """Full detail (DEBUG) goes to the file; the console only sees INFO+."""
+    root = logging.getLogger()
+    file_handler = next(
+        h for h in root.handlers if isinstance(h, bbb.DailyDatedLogHandler)
+    )
+    console = next(h for h in root.handlers if type(h) is logging.StreamHandler)
+    assert file_handler.level <= logging.DEBUG
+    assert console.level == logging.INFO
+
+
 def test_bb_log_writes_to_daily_file(isolated_logging, tmp_path):
     StubBroker(config={}).log_message("🟢 OPEN LONG @ 64200.0 qty=0.012")
-    log_file = tmp_path / "trading.log"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log_file = tmp_path / f"trading_{day}.log"
     assert log_file.exists()
+    assert not (tmp_path / "trading.log").exists()  # no undated file
     content = log_file.read_text(encoding="utf-8")
     assert "🟢 OPEN LONG @ 64200.0 qty=0.012" in content
-    assert "INFO" in content  # basicConfig-style format preserved
+    assert "INFO" in content  # format preserved
 
 
-def test_bb_log_rotation_namer(broker):
-    """Rotated files follow the trading_YYYY-MM-DD.log convention."""
-    name = bbb._rotating_log_namer("/tmp/logs/trading.log.2026-07-27")
-    assert name == "/tmp/logs/trading_2026-07-27.log"
-    # Non-rotated names pass through unchanged
-    assert bbb._rotating_log_namer("/tmp/logs/trading.log") == "/tmp/logs/trading.log"
+def test_bb_log_debug_goes_to_file_not_console(isolated_logging, tmp_path):
+    """DEBUG lines are written to the file but not shown in the console."""
+    broker = StubBroker(config={})
+    broker.log_message("summary line")
+    broker.log_debug("secret detail 12345")
 
-
-def test_bb_log_rotating_handler_config(broker):
-    """Handler rotates at UTC midnight and keeps 10 backups."""
-    file_handler = next(
-        h for h in logging.getLogger().handlers
-        if isinstance(h, TimedRotatingFileHandler)
-    )
-    assert file_handler.when == "midnight"
-    assert file_handler.backupCount == 10
-    assert file_handler.utc is True
-    assert file_handler.encoding == "utf-8"
-    assert file_handler.namer is bbb._rotating_log_namer
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    content = (tmp_path / f"trading_{day}.log").read_text(encoding="utf-8")
+    assert "secret detail 12345" in content
+    assert "summary line" in content
 
 
 def test_bb_log_env_overrides(tmp_path, monkeypatch, isolated_logging):
@@ -112,7 +116,8 @@ def test_bb_log_env_overrides(tmp_path, monkeypatch, isolated_logging):
     monkeypatch.setattr(bbb, "LOG_DIR", tmp_path)
     monkeypatch.setattr(bbb, "MAX_LOG_BYTES", 2048)
     StubBroker(config={}).log_message("test env override")
-    assert (tmp_path / "trading.log").exists()
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    assert (tmp_path / f"trading_{day}.log").exists()
     assert bbb.MAX_LOG_BYTES == 2048
 
 
@@ -128,7 +133,8 @@ def test_bb_log_size_cap_truncates_to_last_lines(isolated_logging, tmp_path, mon
 
     strategy._enforce_log_size_cap()
 
-    log_file = tmp_path / "trading.log"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log_file = tmp_path / f"trading_{day}.log"
     lines = [l for l in log_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     # Kept lines: last 3 ("line 7".."line 9") plus the truncation warning line
     assert "line 7" in lines
@@ -150,6 +156,7 @@ def test_bb_log_size_cap_noop_under_limit(isolated_logging, tmp_path, monkeypatc
 
     strategy._enforce_log_size_cap()
 
-    log_file = tmp_path / "trading.log"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    log_file = tmp_path / f"trading_{day}.log"
     lines = [l for l in log_file.read_text(encoding="utf-8").splitlines() if l.strip()]
     assert len(lines) == 10  # untouched
