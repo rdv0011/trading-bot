@@ -165,12 +165,24 @@ def simulate_trades_core(
     tf_cfg: TimeframeConfig,
     param_list,
     close_col="close",
+    regime_stake_mult=None,          # None -> {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.3}
+    volume_filter_threshold=None,    # None = off; e.g. 0.8 = live-like volume SMA20 filter
+    htf_ema_span=None,               # None = off; e.g. 50 = live-like HTF EMA filter (needs htf_close/htf_ema{span} df cols)
+    max_daily_loss_frac=None,        # None = off; 0.05 = live-like RiskGuard daily-loss halt
+    max_drawdown_frac=None,          # None = off; 0.15 = live-like RiskGuard drawdown halt
 ):
     """
     Regime-aware trade simulation with dynamic stake scaling:
     - trend: full stake
     - high_vol: reduced stake (e.g., 0.5x)
-    - chop: skip trades (0 stake)
+    - chop: reduced stake (e.g., 0.3x); pass {'chop': 0.0} to mirror live's hard block
+
+    Optional live-fidelity gates (all off by default, preserving prior behavior):
+    - volume_filter_threshold: skip entries with volume below SMA20 * threshold.
+    - htf_ema_span: skip counter-trend entries vs a higher-timeframe EMA. Requires
+      the harness to merge f'htf_ema{span}' + 'htf_close' onto df (carry-forward).
+    - max_daily_loss_frac / max_drawdown_frac: halt new entries after a daily
+      loss / equity drawdown (existing positions still exit normally).
     """
     timeframe_minutes = tf_cfg.minutes
     df_iter = df.copy()
@@ -189,13 +201,36 @@ def simulate_trades_core(
     entry_stake = None
     entry_leverage = 1.0
 
-    # Regime multipliers
-    regime_stake_mult = {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.3}
+    default_regime_mult = {'trend': 1.0, 'high_vol': 0.5, 'chop': 0.3}
+    regime_stake_mult = default_regime_mult if regime_stake_mult is None else regime_stake_mult
+
+    volume_sma20 = None
+    if volume_filter_threshold is not None and "volume" in df_iter.columns:
+        volume_sma20 = df_iter["volume"].rolling(20).mean()
+
+    active_htf_col = None
+    if htf_ema_span is not None:
+        candidate = f"htf_ema{htf_ema_span}"
+        if candidate in df_iter.columns and "htf_close" in df_iter.columns:
+            active_htf_col = candidate
+
+    riskguard_day = None
+    start_of_day_equity = 0.0
+    peak_equity = 0.0
+    halted = False
 
     for i, (timestamp, row) in enumerate(df_iter.iterrows()):
         price = row[close_col]
         signal_value = row[signal_col]
         regime = row['regime']
+
+        if max_daily_loss_frac is not None or max_drawdown_frac is not None:
+            today = timestamp.date()
+            if riskguard_day != today:
+                riskguard_day = today
+                start_of_day_equity = wallet
+                peak_equity = wallet
+                halted = False
 
         # Skip trades if zero stake
         if regime_stake_mult.get(regime, 0.0) == 0.0:
@@ -228,21 +263,37 @@ def simulate_trades_core(
             enter_long = signal_value > adaptive_max
             enter_short = signal_value < adaptive_min
             if enter_long or enter_short:
-                position = 1 if enter_long else -1
-                cost = TAKER_FEE + SLIPPAGE
-                entry_price = price * (1 + cost) if position == 1 else price * (1 - cost)
-                entry_stake = stake_long if position == 1 else stake_short
-                entry_leverage = param_row.get("recommended_leverage", 1.0)
-                entry_index = i
-                entry_time = timestamp
-                trade_markers.append({
-                    'timestamp': timestamp,
-                    'price': price,
-                    'type': 'entry',
-                    'position': 'long' if position == 1 else 'short',
-                    'regime': regime,
-                    'stake': entry_stake
-                })
+                # --- Live-fidelity gates (skip entry; existing position unaffected) ---
+                can_enter = True
+                if halted:
+                    can_enter = False
+                if can_enter and volume_sma20 is not None:
+                    sma20 = volume_sma20.iloc[i]
+                    if sma20 > 0 and row["volume"] < sma20 * volume_filter_threshold:
+                        can_enter = False
+                if can_enter and active_htf_col is not None:
+                    above_ema = row["htf_close"] > row[active_htf_col]
+                    if enter_long and not above_ema:
+                        can_enter = False
+                    elif enter_short and above_ema:
+                        can_enter = False
+
+                if can_enter:
+                    position = 1 if enter_long else -1
+                    cost = TAKER_FEE + SLIPPAGE
+                    entry_price = price * (1 + cost) if position == 1 else price * (1 - cost)
+                    entry_stake = stake_long if position == 1 else stake_short
+                    entry_leverage = param_row.get("recommended_leverage", 1.0)
+                    entry_index = i
+                    entry_time = timestamp
+                    trade_markers.append({
+                        'timestamp': timestamp,
+                        'price': price,
+                        'type': 'entry',
+                        'position': 'long' if position == 1 else 'short',
+                        'regime': regime,
+                        'stake': entry_stake
+                    })
 
         # Exit logic
         if position != 0 and entry_index is not None:
@@ -257,6 +308,16 @@ def simulate_trades_core(
             if exit_on_stop or exit_on_take or exit_on_time:
                 perf = perf_raw * entry_stake * entry_leverage
                 wallet *= (1.0 + perf)
+                if max_daily_loss_frac is not None or max_drawdown_frac is not None:
+                    peak_equity = max(peak_equity, wallet)
+                    if start_of_day_equity > 0 and max_daily_loss_frac is not None:
+                        daily_loss = (start_of_day_equity - wallet) / start_of_day_equity
+                        if daily_loss >= max_daily_loss_frac:
+                            halted = True
+                    if peak_equity > 0 and max_drawdown_frac is not None:
+                        drawdown = (peak_equity - wallet) / peak_equity
+                        if drawdown >= max_drawdown_frac:
+                            halted = True
                 exit_reason = 'stop_loss' if exit_on_stop else ('take_profit' if exit_on_take else 'max_hold')
                 trades.append({
                     'position': position,
