@@ -67,18 +67,7 @@ Available flags:
 
 ### Run the bot in a tmux session (remote machine)
 
-For unattended 24/7 operation on a remote machine (VPS, Radxa, etc.), run the bot inside a **tmux** session so it survives SSH disconnects and keeps the full console log in the scrollback buffer.
-
-#### 1. Configure the scrollback buffer (one-time)
-
-The bot logs ~2,300 lines/day (288 iterations × ~8 lines) at the default `5m` cadence. The tmux default of 2,000 lines covers **less than one day**. To preserve **10 days of trading log**, raise `history-limit` to **100,000 lines** (~3× headroom, ≈ 40+ days):
-
-```bash
-echo "set -g history-limit 100000" >> ~/.tmux.conf
-tmux kill-server   # or restart tmux to apply
-```
-
-#### 2. Start the bot in a session
+For unattended 24/7 operation on a remote machine (VPS, Radxa, etc.), run the bot inside a **tmux** session so it survives SSH disconnects.
 
 ```bash
 tmux new-session -d -s trading "cd /path/to/trading-bot && conda activate tradingbot && python main.py"
@@ -91,21 +80,6 @@ tmux attach -t trading      # attach
 tmux detach                 # inside session: Ctrl-b d
 tmux ls                     # list sessions
 ```
-
-#### 3. Save the log to a file
-
-tmux **can** dump the scrollback buffer to a file:
-
-```bash
-# One-shot snapshot of the entire scrollback (all 100k lines):
-tmux capture-pane -t trading -pS - > trading_log_$(date +%Y%m%d).txt
-
-# Continuous logging (writes everything from now on, survives crashes):
-tmux pipe-pane -t trading -o 'cat >> trading_log_$(date +%Y%m%d).txt'
-tmux pipe-pane -t trading   # stop continuous logging
-```
-
-> ⚠️ **Caveat:** `capture-pane` / `pipe-pane` output includes **ANSI escape codes** (colors) and can wrap lines at terminal width, so it is fine for human inspection but not reliable input for automated parsing. For machine-readable logs, use the **built-in rotating log file** described in [`plans/demo_vs_sim_comparison.md`](plans/demo_vs_sim_comparison.md) (Task 7), which writes clean daily files with a max-size cap.
 
 ---
 
@@ -234,16 +208,29 @@ Run the live bot with the built-in rotating log file so the last 10 days of trad
 
 - keeps the last 10 daily files (`logs/trading_*.log`)
 - caps each day's file at 5 MB (truncates to the last 10k lines if exceeded)
-- console output is still shown in tmux for live monitoring
+
+**Detail split between file and console** — implemented in `binancebasebroker.py`:
+
+| Destination | Level | What you see |
+|---|---|---|
+| `logs/trading_YYYY-MM-DD.log` | `DEBUG` (`LOG_FILE_LEVEL`) | everything, incl. raw per-candle signals |
+| console | `INFO` (`LOG_CONSOLE_LEVEL`) | generic summaries only |
+
+Each line is `YYYY-MM-DD HH:MM:SS,mmm - LEVEL - message` (UTC):
+
+```
+2026-07-19 14:00:03,123 - DEBUG - tactical: signal=BUY prediction=0.712300 min_thr=0.600000 max_thr=0.400000
+2026-07-19 14:00:03,123 - DEBUG - strategic: regime=trend direction=LONG confidence=0.83
+2026-07-19 14:00:03,123 - INFO - Tactical | signal=BUY ...
+2026-07-19 14:00:03,123 - INFO - 🟢 OPEN LONG @ 64200.0 qty=0.012
+```
+
+The `DEBUG` `tactical:` / `strategic:` lines are the **signal-level record** the simulation comparison keys on (see below); the `INFO` lines drive positions.
+
+Directories/sizes are tunable via env vars: `TBOT_LOG_DIR` (default `logs`), `TBOT_MAX_LOG_BYTES` (default 5 MB). Retention is fixed in code at 10 daily files.
 
 ```bash
 python main.py
-```
-
-If the built-in logger is not enabled yet, capture the tmux scrollback to a file as a fallback:
-
-```bash
-tmux capture-pane -t trading -pS - > trading_log_$(date +%Y%m%d).txt
 ```
 
 #### After 10 days: replay the simulation over the same period and compare
@@ -253,18 +240,81 @@ Once ~10 days of demo logs have accrued, run a windowed simulation over the exac
 ```bash
 # 4. Windowed simulation over the same period as the demo logs
 #    (--days covers the 10-day window + ~25 days of warmup history)
+#    writes trades/sim_trades_2026-07-25_2026-08-03.csv + sim_daily_summary_*.csv
 python dualmlsimulation.py --symbol BTCUSDT --days 35 --start-date 2026-07-25 --end-date 2026-08-03 --live-faithful
 
-# 5. Extract demo trades from the daily logs
+# 5. Extract demo trades from the daily logs (writes trades/demo_trades.csv + demo_daily_summary.csv)
 python demo_log_parser.py --log logs --start-date 2026-07-25 --end-date 2026-08-03
 
 # 6. Compare demo vs simulation — per-day table, win rate, PnL, gate attribution
-python compare_demo_vs_sim.py --demo trades/demo_trades.csv --sim trades/sim_trades.csv
+python compare_demo_vs_sim.py \
+  --demo trades/demo_trades.csv \
+  --sim trades/sim_trades_2026-07-25_2026-08-03.csv \
+  --demo-daily trades/demo_daily_summary.csv \
+  --sim-daily trades/sim_daily_summary_2026-07-25_2026-08-03.csv \
+  --out comparison_report.md
 ```
 
-The comparison report shows, per day: trade counts, win rate, PnL, regime distribution, and which live gates (volume filter, HTF trend, chop block, RiskGuard) suppressed signals that the raw simulation would have taken. The biggest gaps point to the gates most worth tuning.
+The comparison report shows, per day: trade counts, win rate, PnL, regime distribution, and which live gates (volume filter, HTF trend, chop block, RiskGuard) suppressed signals that the raw simulation would have taken. The biggest gaps point to the gates most worth tuning. The comparison writes `comparison_report.md`; the `--live-faithful` sim mode mirrors live's gates (chop hard block, 0.8xSMA20 volume, HTF-EMA50 trend, 5% daily-loss / 15% drawdown RiskGuard) so the raw-vs-faithful trade-count delta directly explains the gap.
 
-> ⚠️ Steps 4–6 use the comparison harness specified in [`plans/demo_vs_sim_comparison.md`](plans/demo_vs_sim_comparison.md) — it is planned, not yet implemented.
+> ℹ️ Steps 4–6 implement [`plans/demo_vs_sim_comparison.md`](plans/demo_vs_sim_comparison.md) — live-faithful gates in `mltrainingcore.py` (`simulate_trades_core`), `run_windowed_simulation` + CLI in `dualmlsimulation.py`, parser in `demo_log_parser.py`, harness in `compare_demo_vs_sim.py`.
+
+##### Finding discrepancies, manually
+
+When you want to dig deeper than the report (e.g. scale-ups/partials, exact candle alignment), inspect the two sides directly:
+
+**1. What the sim records.** `dualmlsimulation.py --symbol BTCUSDT --days N --timeframe 15m` writes `labeleddata/dual_BTCUSDT_15m_{N}d_final_test_sim.csv` — **per-candle** rows (index, `close`, `wallet`) over the test window, plus a `Split:` console line showing the exact `TEST START date` → `TEST END date` range. Individual trades live in `df.attrs['trades']` at runtime (fields: `entry_timestamp`, `exit_timestamp`, `side` (via `position` ±1), `entry_price`, `exit_price`, `stake_frac`, `exit_reason`, `regime`) but are **not** exported to CSV — so to get the trade list out today, add a one-line `save_labels(pd.DataFrame(sim.attrs['trades']), 'sim_trades.csv')` after `run_simulation()`.
+
+**2. What the log records.** `logs/trading_YYYY-MM-DD.log` holds the same per-day truth against the bot's live decisions:
+
+- Entries / exits — parse every position lifecycle:
+  ```
+  🟢 OPEN LONG @ 64200.0 qty=0.012
+  📈 SCALE UP LONG +0.006 (total=0.0180, scale#1)
+  🔽 PARTIAL CLOSE -0.004 (remaining=0.0080)
+  🔵 FULL CLOSE (start) reason=MAX_HOLD_TIME — side=LONG amount=0.0120 entry=64200.0
+  🔵 FULL CLOSE reason=MAX_HOLD_TIME — position closed
+  ```
+- Signal-level record — why each decision fired (the sim-comparable keys):
+  ```
+  DEBUG tactical: signal=BUY prediction=0.712300 min_thr=0.600000 max_thr=0.400000
+  DEBUG strategic: regime=trend direction=LONG confidence=0.83
+  ```
+- Gates, per day — for live-faithful attribution:
+  ```
+  INFO ℹ️ Gate counter summary | day=2026-07-19 vol_flt=5 htf_trd=12 adapt_thr=34 riskguard=0 chop=8 veto=2
+  INFO 📊 Regime distribution (2026-07-19): chop=45% | high_vol=12% | trend=43%
+  ```
+
+**3. Correlation mechanics.** A live entry and a sim-taken entry agree when, on the same candle (`index` in the sim CSV == a `DEBUG` signal timestamp in the log), the tactical signal fired and neither the live gates nor the sim skip logic blocked it. Using `grep`/`awk` on the daily log:
+
+```bash
+# every entry/exit in the log, most → least recent
+grep -nE "OPEN LONG|OPEN SHORT|FULL CLOSE" logs/trading_*.log
+
+# all raw tactical decisions for one day (signal-level)
+grep "2026-07-19.*tactical:" logs/trading_2026-07-19.log
+
+# gate activity the live bot hit that day
+grep "2026-07-19" logs/trading_2026-07-19.log | grep -E "Gate counter|Regime distribution"
+```
+
+**4. Where live and sim diverge (and how it shows up).** Each discrepancy leaves a readable trace:
+
+| # | Divergence | Live log evidence | Sim effect |
+|---|---|---|---|
+| D1 | Chop hard-block | `Gate counter ... chop=N` rising | sim opens trades live skips (`chop` regime) |
+| D2 | Volume SMA20 filter | `vol_flt=N` > 0 | sim takes low-volume entries live skips |
+| D3 | HTF EMA50 trend filter | `htf_trend=N` > 0 | sim trades against the 1h trend |
+| D4 | RiskGuard daily-loss halt | `riskguard=N` / halts logged | sim keeps trading after a stop-out |
+| D5 | Regime source | STRATEGIC model (`regime=`) | sim recomputes regime per window |
+| D6 | Scaling/partials | `SCALE UP` / `PARTIAL CLOSE` | sim treats each as one close |
+| D7 | Retrain cadence | model age on live | sim trains once over full window |
+| D8 | Signal caching | repeated identical `tactical:` | sim recomputes every candle |
+
+Roughly: **D1–D4 are purpose-built live gates the raw sim ignores; D5–D8 are modeling-fidelity gaps.** The per-day trade-count delta between `demo_entries` and `sim_entries` is dominated by D1–D4, and the `Gate counter summary` / `Regime distribution` lines are exactly the attribution source the harness (Task 4) turns into the per-day report.
+
+**How the pieces fit:** sim CSV + trades → the per-day `sim_entries`; log `OPEN`/`FULL CLOSE` → the live `demo_entries`; gate counter lines → which live gates suppressed the sim's extras.
 
 ---
 

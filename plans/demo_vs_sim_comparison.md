@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-27
 **Branch:** profitability-improvements
-**Status:** Analysis complete — ready for implementation
+**Status:** Implemented (Tasks 1–6, 7). Audit & tuning tools live; see §8 How to run.
 **Objective:** Compare 8 days of demo (live) trading against a simulation of the *same* 8 calendar days, and explain why live makes far fewer trades.
 
 ---
@@ -361,3 +361,51 @@ def setup_logging(self):
 Tasks 2 and 3 are independent and can be built in parallel once Task 1 lands.
 
 **Task 7 ordering note:** Task 7 (rotating log file) is independent of Tasks 1-6 and can land at any time. It becomes the **primary input** for Task 2's parser, so ideally Task 7 ships *before* the next demo-trading run begins (so the 10-day window is captured in clean files). If the demo bot is already running with `logging.basicConfig` only, the tmux scrollbuffer export in the README is the fallback until Task 7 is deployed and the next 10 days accrue.
+
+---
+
+## 8. Implementation status & how to run
+
+**Status:** Tasks 1–7 implemented. Task 1 gates are **off by default** in
+`simulate_trades_core` (defaults preserve prior behavior); Task 7 rotating log
+ships in `binancebasebroker.py` (see README "Cyclic logging").
+
+| Task | File | Status |
+|---|---|---|
+| 1. Parameterize `simulate_trades_core` | `mltrainingcore.py` | Done — `regime_stake_mult`, `volume_filter_threshold`, `htf_ema_span`, `max_daily_loss_frac`, `max_drawdown_frac` |
+| 2. Demo log parser | `demo_log_parser.py` | Done — `trades/demo_trades.csv` + `demo_daily_summary.csv` |
+| 3. Windowed simulation | `dualmlsimulation.py` | Done — `run_windowed_simulation` + `--start-date/--end-date/--live-faithful` CLI |
+| 4. Comparison report | `compare_demo_vs_sim.py` | Done — per-day table, gate attribution, regime diff, ranking |
+| 5. Unit tests | `tests/test_demo_log_parser.py`, `tests/test_windowed_simulation.py` | Done — plus `tests/_verify_sim_core.py` gate checks |
+| 6. Documentation | `plans/`, `README.md` | Done (this section + README "Recommended workflow") |
+| 7. Rotating log file | `binancebasebroker.py` | Done (README "Cyclic logging") |
+
+### Working commands
+
+```bash
+# 1. Extract live trades from the accumulated daily logs (UTC window)
+python demo_log_parser.py --log logs --start-date 2026-07-19 --end-date 2026-07-26
+
+# 2. Aligned simulation: fetch 35 days, simulate only the 8-day window, live-faithful gates
+python dualmlsimulation.py --symbol BTCUSDT --days 35 --timeframe 15m \
+    --start-date 2026-07-19 --end-date 2026-07-26 --live-faithful
+
+# 3. Compare demo vs sim (per-day side-by-side + gate attribution + regime diff)
+python compare_demo_vs_sim.py \
+    --demo trades/demo_trades.csv \
+    --sim trades/sim_trades_2026-07-19_2026-07-26.csv \
+    --demo-daily trades/demo_daily_summary.csv \
+    --sim-daily trades/sim_daily_summary_2026-07-19_2026-07-26.csv \
+    --out comparison_report.md
+```
+
+Notes on drift from the original plan text:
+- `run_windowed_simulation(df_test)` filters to `[start_date, end_date]` **inclusive
+  (end + 1 day)**, warmup history = the `adaptive_history_candles` rows strictly
+  before the window.
+- `--live-faithful` sets `regime_stake_mult={'trend':1.0,'high_vol':0.5,'chop':0.0}`,
+  `volume_filter_threshold=0.8`, `htf_ema_span=50`, `max_daily_loss_frac=0.05`,
+  `max_drawdown_frac=0.15`.
+- Gate parameterization lives entirely in `mltrainingcore.py:simulate_trades_core`;
+  the tests in `tests/_verify_sim_core.py` third-party-check each gate preserves
+  prior behavior with defaults.
