@@ -9,12 +9,10 @@ catboost_info/
 
 # Board-specific fan control config (copy from fancontrol/fanctl.toml.example)
 fanctl.toml
-
 # Files
 .env
 .DS_Store
 optimized_params.csv
-
 # Python
 __pycache__/
 *.py[cod]
@@ -36,8 +34,8 @@ var/
 *.egg-info/
 .installed.cfg
 *.egg
-
 # Virtual Environment
 venv/
-env/
 ENV/
+# Generated demo-vs-sim comparison outputs
+trades/
