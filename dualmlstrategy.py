@@ -227,6 +227,10 @@ class DualMLStrategy(BaseStrategy):
 
             tactical_signal = self.tactical_ml.fit_and_predict(df_tactical, df_pred, features)
 
+            # Cache immediately — if any downstream step raises, the next heartbeat
+            # reuses a real signal instead of the all-zero placeholder.
+            self._cached_tactical_signal = tactical_signal
+
             self.log_debug(
                 f"tactical: signal={tactical_signal.signal} "
                 f"prediction={tactical_signal.prediction:.6f} "
@@ -235,7 +239,7 @@ class DualMLStrategy(BaseStrategy):
             )
             self.log_debug(
                 f"strategic: regime={strategic_decision.market_regime} "
-                f"direction={strategic_decision.direction} "
+                f"vol={strategic_decision.volatility_state} "
                 f"confidence={strategic_decision.confidence}"
             )
 
@@ -314,7 +318,6 @@ class DualMLStrategy(BaseStrategy):
                         max_threshold=tactical_signal.max_threshold,
                     )
 
-            self._cached_tactical_signal = tactical_signal
         else:
             self.log_message(
                 f"⏭ Same {self.tf_cfg_tactical.name} candle {current_tactical_ts} "
