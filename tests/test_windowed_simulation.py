@@ -79,7 +79,7 @@ def test_window_boundary_filters_input(mocked_pipeline, monkeypatch):
     assert len(calls["df_hist"]) <= TIMEFRAMES["15m"].adaptive_history_candles
 
 
-def test_live_faithful_passes_gates(mocked_pipeline, monkeypatch):
+def test_gates_always_applied(mocked_pipeline, monkeypatch):
     calls = {}
 
     def fake_sim(**kwargs):
@@ -91,7 +91,6 @@ def test_live_faithful_passes_gates(mocked_pipeline, monkeypatch):
     d.run_windowed_simulation(
         symbol="TESTUSDT", days=30, timeframe="15m",
         start_date="2026-05-10", end_date="2026-05-12",
-        live_faithful=True,
     )
 
     assert calls["regime_stake_mult"] == {"trend": 1.0, "high_vol": 0.5, "chop": 0.0}

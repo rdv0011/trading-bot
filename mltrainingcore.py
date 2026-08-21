@@ -178,11 +178,21 @@ def simulate_trades_core(
     - chop: reduced stake (e.g., 0.3x); pass {'chop': 0.0} to mirror live's hard block
 
     Optional live-fidelity gates (all off by default, preserving prior behavior):
-    - volume_filter_threshold: skip entries with volume below SMA20 * threshold.
+    - volume_filter_threshold: skip entries with volume below SMA20 * threshold
+      (live uses 0.5x instead when regime is chop).
     - htf_ema_span: skip counter-trend entries vs a higher-timeframe EMA. Requires
       the harness to merge f'htf_ema{span}' + 'htf_close' onto df (carry-forward).
     - max_daily_loss_frac / max_drawdown_frac: halt new entries after a daily
       loss / equity drawdown (existing positions still exit normally).
+
+    Gate counters (df_result.attrs['gate_counters'], per UTC day) mirror the
+    live daily summary from dualmlstrategy.py:
+    - vol_flt / htf_trd / adapt_thr: counted per candle (one tactical signal per
+      candle). adapt_thr = candles whose prediction sat inside the adaptive
+      thresholds (HOLD), matching live's counter.
+    - riskguard / veto / chop: live counts these on every 5m heartbeat (up to
+      288/day), so per-candle counts are scaled by heartbeats-per-candle
+      (candle_minutes // 5).
     """
     timeframe_minutes = tf_cfg.minutes
     df_iter = df.copy()
@@ -219,81 +229,128 @@ def simulate_trades_core(
     peak_equity = 0.0
     halted = False
 
+    # Gate counters per day (mirrors live gate counter summary)
+    gate_counters: Dict[str, Dict[str, int]] = {}
+
+    def _day_key(ts) -> str:
+        return ts.strftime("%Y-%m-%d")
+
+    def _ensure_day(day: str):
+        if day not in gate_counters:
+            gate_counters[day] = {"vol_flt": 0, "htf_trd": 0, "adapt_thr": 0,
+                                  "riskguard": 0, "chop": 0, "veto": 0}
+
+    # Live checks the per-iteration gates (riskguard/veto/chop) on every 5m
+    # heartbeat; scale per-candle counts by heartbeats-per-candle so the daily
+    # totals are comparable with the live counter's basis (96 candles * 3 = 288).
+    itc = max(1, int(tf_cfg.minutes // 5))
+
     for i, (timestamp, row) in enumerate(df_iter.iterrows()):
         price = row[close_col]
         signal_value = row[signal_col]
         regime = row['regime']
+        today = _day_key(timestamp)
+        _ensure_day(today)
 
         if max_daily_loss_frac is not None or max_drawdown_frac is not None:
-            today = timestamp.date()
-            if riskguard_day != today:
-                riskguard_day = today
+            today_date = timestamp.date()
+            if riskguard_day != today_date:
+                riskguard_day = today_date
                 start_of_day_equity = wallet
                 peak_equity = wallet
                 halted = False
-
-        # Skip trades if zero stake
-        if regime_stake_mult.get(regime, 0.0) == 0.0:
-            wallet_history.append(wallet)
-            pred_hist.append(signal_value)
-            continue
 
         # Adaptive thresholds
         hist_len = tf_cfg.adaptive_history_candles
         hist_for_thresholds = adaptive_source + pred_hist[-hist_len:]
         hist_for_thresholds.append(signal_value)
-
-        if len(hist_for_thresholds) < hist_len:
-            wallet_history.append(wallet)
-            pred_hist.append(signal_value)
-            continue
-
-        adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds), tf_cfg)
+        warmup = len(hist_for_thresholds) < hist_len
+        adaptive_max = adaptive_min = None
+        if not warmup:
+            adaptive_max, adaptive_min = adaptive_thresholding(pd.Series(hist_for_thresholds), tf_cfg)
 
         # Get parameters
         param_row = get_param_row(param_list, i)
-        stake_short = param_row["stake_short_frac"] * regime_stake_mult[regime]
-        stake_long = param_row["stake_long_frac"] * regime_stake_mult[regime]
+        regime_mult = regime_stake_mult.get(regime, 0.0)
+        stake_short = param_row["stake_short_frac"] * regime_mult
+        stake_long = param_row["stake_long_frac"] * regime_mult
         stop_loss = param_row["stop_loss_frac"]
         take_profit = param_row["take_profit_frac"]
         max_hold = param_row["max_hold_hours"]
 
-        # Entry logic
-        if position == 0:
-            enter_long = signal_value > adaptive_max
-            enter_short = signal_value < adaptive_min
-            if enter_long or enter_short:
-                # --- Live-fidelity gates (skip entry; existing position unaffected) ---
-                can_enter = True
-                if halted:
-                    can_enter = False
-                if can_enter and volume_sma20 is not None:
-                    sma20 = volume_sma20.iloc[i]
-                    if sma20 > 0 and row["volume"] < sma20 * volume_filter_threshold:
-                        can_enter = False
-                if can_enter and active_htf_col is not None:
-                    above_ema = row["htf_close"] > row[active_htf_col]
-                    if enter_long and not above_ema:
-                        can_enter = False
-                    elif enter_short and above_ema:
-                        can_enter = False
+        # --- Live-fidelity gate cascade (skip entry only; exits below run
+        #     every candle, mirroring live where an open position stays managed) ---
+        # Live order per heartbeat: riskguard halt -> strategic veto -> chop.
+        entry_allowed = not halted
+        if halted:
+            gate_counters[today]["riskguard"] += itc
+        else:
+            strategic_veto = (
+                param_row["stake_long_frac"] <= 0.0
+                and param_row["stake_short_frac"] <= 0.0
+            )
+            if strategic_veto:
+                gate_counters[today]["veto"] += itc
+                entry_allowed = False
+            elif regime == "chop" and regime_mult == 0.0:
+                gate_counters[today]["chop"] += itc
+                entry_allowed = False
+            elif regime_mult == 0.0:
+                # Custom config zero-stakes a non-chop regime: block entry,
+                # but no live counter maps to it.
+                entry_allowed = False
 
-                if can_enter:
-                    position = 1 if enter_long else -1
-                    cost = TAKER_FEE + SLIPPAGE
-                    entry_price = price * (1 + cost) if position == 1 else price * (1 - cost)
-                    entry_stake = stake_long if position == 1 else stake_short
-                    entry_leverage = param_row.get("recommended_leverage", 1.0)
-                    entry_index = i
-                    entry_time = timestamp
-                    trade_markers.append({
-                        'timestamp': timestamp,
-                        'price': price,
-                        'type': 'entry',
-                        'position': 'long' if position == 1 else 'short',
-                        'regime': regime,
-                        'stake': entry_stake
-                    })
+        # Per-candle tactical gates — live evaluates them on every new candle
+        # regardless of position (the override feeds on_signal either way).
+        enter_long = enter_short = False
+        vol_blocked = htf_blocked = False
+        if not halted:
+            if warmup:
+                # No adaptive history yet (live's model falls back to absolute
+                # thresholds); count the candle as a HOLD for adapt_thr.
+                gate_counters[today]["adapt_thr"] += 1
+            else:
+                enter_long = signal_value > adaptive_max
+                enter_short = signal_value < adaptive_min
+                if not (enter_long or enter_short):
+                    # Live counts every new candle whose prediction sat inside
+                    # the adaptive thresholds (HOLD) in the adapt_thr counter.
+                    gate_counters[today]["adapt_thr"] += 1
+                else:
+                    # Volume filter — live uses a looser 0.5x SMA20 threshold in chop.
+                    if volume_sma20 is not None:
+                        sma20 = volume_sma20.iloc[i]
+                        vol_threshold = 0.5 if regime == "chop" else volume_filter_threshold
+                        if sma20 > 0 and row["volume"] < sma20 * vol_threshold:
+                            vol_blocked = True
+                            gate_counters[today]["vol_flt"] += 1
+                    if not vol_blocked and active_htf_col is not None:
+                        above_ema = row["htf_close"] > row[active_htf_col]
+                        if (enter_long and not above_ema) or (enter_short and above_ema):
+                            htf_blocked = True
+                            gate_counters[today]["htf_trd"] += 1
+
+        # Entry logic
+        if position == 0 and entry_allowed and (enter_long or enter_short) and not (vol_blocked or htf_blocked):
+            # One-side-zero stake (allow_trading=True but the model emitted a
+            # zero frac) blocks that direction without a veto counter —
+            # mirrors live's qty_too_small skip.
+            if not ((enter_long and stake_long <= 0.0) or (enter_short and stake_short <= 0.0)):
+                position = 1 if enter_long else -1
+                cost = TAKER_FEE + SLIPPAGE
+                entry_price = price * (1 + cost) if position == 1 else price * (1 - cost)
+                entry_stake = stake_long if position == 1 else stake_short
+                entry_leverage = param_row.get("recommended_leverage", 1.0)
+                entry_index = i
+                entry_time = timestamp
+                trade_markers.append({
+                    'timestamp': timestamp,
+                    'price': price,
+                    'type': 'entry',
+                    'position': 'long' if position == 1 else 'short',
+                    'regime': regime,
+                    'stake': entry_stake
+                })
 
         # Exit logic
         if position != 0 and entry_index is not None:
@@ -387,6 +444,7 @@ def simulate_trades_core(
     df_result['wallet'] = np.round(wallet_history, 5)
     df_result.attrs['trades'] = trades
     df_result.attrs['trade_markers'] = trade_markers
+    df_result.attrs['gate_counters'] = gate_counters
 
     _, metrics = calculate_metrics(trades, wallet)
 

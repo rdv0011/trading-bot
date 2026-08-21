@@ -79,6 +79,11 @@ def _rolling_tactical_predictions(df_full: pd.DataFrame, tf_cfg) -> pd.DataFrame
         window = max(50, n // 3)
         print(f"[TacticalML] Auto-adjusted window={window} for dataset length={n}")
 
+    # Warmup: pre-populate _pred_history so fit_and_predict has enough
+    # predictions for adaptive thresholds instead of falling back to
+    # the absolute +/-0.003 threshold.
+    tactical.warmup(df_full, features)
+
     all_indices = list(range(window, n))
     n_jobs = min(os.cpu_count() or 4, 8)
     chunks = [arr.tolist() for arr in np.array_split(all_indices, n_jobs)]
@@ -298,7 +303,7 @@ def _write_sim_trades_csv(trades: list, out: Path) -> None:
             )
 
 
-def _write_sim_daily_summary(df_test: pd.DataFrame, trades: list, out: Path) -> None:
+def _write_sim_daily_summary(df_test: pd.DataFrame, trades: list, gate_counters: dict, out: Path) -> None:
     entry_days = {}
     for t in trades:
         day = t["entry_timestamp"].strftime("%Y-%m-%d")
@@ -318,13 +323,14 @@ def _write_sim_daily_summary(df_test: pd.DataFrame, trades: list, out: Path) -> 
                 k: round(counts.get(k, 0.0) * 100.0, 1) for k in REGIME_KEYS
             }
 
-    days = sorted(set(entry_days) | set(regime_days))
+    all_days = sorted(set(entry_days) | set(regime_days) | set(gate_counters))
     with open(out, "w", newline="", encoding="utf-8") as fh:
         writer = csv.DictWriter(fh, fieldnames=SIM_DAILY_HEADER)
         writer.writeheader()
-        for day in days:
+        for day in all_days:
             st = entry_days.get(day, {"entries": 0, "exits": 0, "wins": 0, "pnl": 0.0})
             reg = regime_days.get(day, {k: 0.0 for k in REGIME_KEYS})
+            gc = gate_counters.get(day, {k: 0 for k in GATE_KEYS})
             writer.writerow(
                 {
                     "date": day,
@@ -332,12 +338,12 @@ def _write_sim_daily_summary(df_test: pd.DataFrame, trades: list, out: Path) -> 
                     "exits": st["exits"],
                     "win_rate": (st["wins"] / st["exits"]) if st["exits"] else 0.0,
                     "pnl_total": round(st["pnl"], 6),
-                    "vol_flt": 0,
-                    "htf_trd": 0,
-                    "adapt_thr": 0,
-                    "riskguard": 0,
-                    "chop": 0,
-                    "veto": 0,
+                    "vol_flt": gc.get("vol_flt", 0),
+                    "htf_trd": gc.get("htf_trd", 0),
+                    "adapt_thr": gc.get("adapt_thr", 0),
+                    "riskguard": gc.get("riskguard", 0),
+                    "chop": gc.get("chop", 0),
+                    "veto": gc.get("veto", 0),
                     "regime_trend_pct": reg.get("trend", 0.0),
                     "regime_chop_pct": reg.get("chop", 0.0),
                     "regime_highvol_pct": reg.get("high_vol", 0.0),
@@ -352,13 +358,12 @@ def run_windowed_simulation(
     start_date: str,
     end_date: str,
     model_dir=MODEL_DIR,
-    live_faithful: bool = False,
 ) -> tuple:
     """Simulate only [start_date, end_date] UTC (inclusive of 15m candles).
 
     Warmup history (adaptive thresholds + strategic 1h model) comes from the
     fetch period BEFORE the window, mirroring live's accumulated prediction
-    history.  live_faithful=True applies the Task-1 gates to mirror live:
+    history.  Always applies the Task-1 gates to mirror live:
     chop hard block, volume 0.8xSMA20, HTF-EMA50 trend filter, RiskGuard 5%.
     """
     tf_cfg = TIMEFRAMES[timeframe]
@@ -388,39 +393,31 @@ def run_windowed_simulation(
     strategic = StrategicML(model_dir=model_dir, tf_cfg=strategic_tf_cfg)
     param_list = _build_strategic_param_list(df_test, df_raw, strategic, strategic_tf_cfg)
 
-    sim_kwargs = {
-        "df": df_test,
-        "df_hist": df_hist,
-        "signal_col": SIGNAL_COLUMN,
-        "tf_cfg": tf_cfg,
-        "param_list": param_list,
-        "close_col": "close",
-    }
-    if live_faithful:
-        htf_span = 50
-        df_1h = df_raw.resample("1h").agg(
-            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
-        ).dropna()
-        df_1h[f"htf_ema{htf_span}"] = df_1h["close"].ewm(span=htf_span, adjust=False).mean()
-        df_1h["htf_close"] = df_1h["close"]
-        merge_cols = df_1h[["htf_close", f"htf_ema{htf_span}"]].ffill()
-        df_test = df_test.join(merge_cols, how="left")
+    htf_span = 50
+    df_1h = df_raw.resample("1h").agg(
+        {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"}
+    ).dropna()
+    df_1h[f"htf_ema{htf_span}"] = df_1h["close"].ewm(span=htf_span, adjust=False).mean()
+    df_1h["htf_close"] = df_1h["close"]
+    merge_cols = df_1h[["htf_close", f"htf_ema{htf_span}"]].ffill()
+    df_test = df_test.join(merge_cols, how="left")
 
-        sim_kwargs.update(
-            {
-                "regime_stake_mult": {"trend": 1.0, "high_vol": 0.5, "chop": 0.0},
-                "volume_filter_threshold": 0.8,
-                "htf_ema_span": htf_span,
-                "max_daily_loss_frac": 0.05,
-                "max_drawdown_frac": 0.15,
-            }
-        )
-
-    df_result, metrics = simulate_trades_core(**sim_kwargs)
+    df_result, metrics = simulate_trades_core(
+        df=df_test,
+        df_hist=df_hist,
+        signal_col=SIGNAL_COLUMN,
+        tf_cfg=tf_cfg,
+        param_list=param_list,
+        close_col="close",
+        regime_stake_mult={"trend": 1.0, "high_vol": 0.5, "chop": 0.0},
+        volume_filter_threshold=0.8,
+        htf_ema_span=htf_span,
+        max_daily_loss_frac=0.05,
+        max_drawdown_frac=0.15,
+    )
 
     trades = df_result.attrs.get("trades", [])
-    mode = "live-faithful" if live_faithful else "raw"
-    print(f"Windowed sim [{mode}]: {len(trades)} trades")
+    print(f"Windowed sim: {len(trades)} trades")
 
     out_dir = Path("trades")
     out_dir.mkdir(exist_ok=True)
@@ -428,7 +425,7 @@ def run_windowed_simulation(
     trades_csv = out_dir / f"sim_trades_{tag}.csv"
     daily_csv = out_dir / f"sim_daily_summary_{tag}.csv"
     _write_sim_trades_csv(trades, trades_csv)
-    _write_sim_daily_summary(df_test, trades, daily_csv)
+    _write_sim_daily_summary(df_test, trades, df_result.attrs.get("gate_counters", {}), daily_csv)
     print(f"  wrote: {trades_csv}")
     print(f"  wrote: {daily_csv}")
 
@@ -445,8 +442,6 @@ if __name__ == "__main__":
     parser.add_argument("--model-dir", default=str(MODEL_DIR))
     parser.add_argument("--start-date", default=None, help="window start, YYYY-MM-DD UTC")
     parser.add_argument("--end-date", default=None, help="window end, YYYY-MM-DD UTC")
-    parser.add_argument("--live-faithful", action="store_true",
-                        help="mirror live gates: chop block, volume, HTF EMA, RiskGuard")
     args = parser.parse_args()
 
     if args.start_date and args.end_date:
@@ -457,7 +452,6 @@ if __name__ == "__main__":
             start_date=args.start_date,
             end_date=args.end_date,
             model_dir=args.model_dir,
-            live_faithful=args.live_faithful,
         )
     else:
         run_simulation(
