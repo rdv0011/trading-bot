@@ -193,14 +193,23 @@ class BinanceFuturesBroker(BinanceBaseBroker):
                 quantity=abs(position),
                 reduceOnly=True,
             )
+            executed_qty = order.get("executedQty", "0")
+            cum_quote = order.get("cumQuote", "0")
+            fill_price = None
+            if executed_qty and float(executed_qty) > 0 and cum_quote and float(cum_quote) > 0:
+                fill_price = float(cum_quote) / float(executed_qty)
             self.logger.info(
-                "🔵 close_position result: orderId=%s status=%s executedQty=%s",
+                "🔵 close_position result: orderId=%s status=%s executedQty=%s cumQuote=%s fill=%.2f",
                 order.get("orderId", "?"),
                 order.get("status", "?"),
-                order.get("executedQty", "?"),
+                executed_qty,
+                cum_quote,
+                fill_price if fill_price else 0.0,
             )
+            return fill_price
         except Exception as e:
             self.logger.error(f"❌ Close position failed for {symbol}: {e}")
+            return None
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(

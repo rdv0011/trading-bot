@@ -552,7 +552,8 @@ class BinanceBaseBroker(ABC):
         pass
 
     @abstractmethod
-    def close_position(self, symbol: str, position: float):
+    def close_position(self, symbol: str, position: float) -> Optional[float]:
+        """Close a position and return the fill price, or None on failure."""
         pass
 
     # ── Shared public methods ─────────────────────────────────────────

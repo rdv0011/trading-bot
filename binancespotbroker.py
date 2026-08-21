@@ -244,19 +244,28 @@ class BinanceSpotBroker(BinanceBaseBroker):
                 type=ORDER_TYPE_MARKET,
                 quantity=position
             )
+            fill_price = None
             if result:
+                executed_qty = result.get("executedQty", result.get("executedQtyStr", "0"))
+                cum_quote = result.get("cummulativeQuoteQty", result.get("cumQuote", "0"))
+                if executed_qty and float(executed_qty) > 0 and cum_quote and float(cum_quote) > 0:
+                    fill_price = float(cum_quote) / float(executed_qty)
                 self.logger.info(
-                    "🔵 close_position result: orderId=%s status=%s executedQty=%s",
+                    "🔵 close_position result: orderId=%s status=%s executedQty=%s cumQuote=%s fill=%.2f",
                     result.get("orderId", "?"),
                     result.get("status", "?"),
-                    result.get("executedQty", result.get("cummulativeQuoteQty", "?")),
+                    executed_qty,
+                    cum_quote,
+                    fill_price if fill_price else 0.0,
                 )
-            if result and result.get("status") == ORDER_STATUS_FILLED:
-                self.logger.info(f"✅ Spot position closed for {symbol}, qty: {position}")
-            else:
-                self.logger.error(f"❌ Spot close position failed for {symbol} {result}")
+                if result.get("status") == ORDER_STATUS_FILLED:
+                    self.logger.info(f"✅ Spot position closed for {symbol}, qty: {position}")
+                else:
+                    self.logger.error(f"❌ Spot close position failed for {symbol} {result}")
+            return fill_price
         except Exception as e:
             self.logger.error(f"❌ Close position failed for {symbol}: {e}")
+            return None
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.get_klines(
