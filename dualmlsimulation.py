@@ -79,11 +79,6 @@ def _rolling_tactical_predictions(df_full: pd.DataFrame, tf_cfg) -> pd.DataFrame
         window = max(50, n // 3)
         print(f"[TacticalML] Auto-adjusted window={window} for dataset length={n}")
 
-    # Warmup: pre-populate _pred_history so fit_and_predict has enough
-    # predictions for adaptive thresholds instead of falling back to
-    # the absolute +/-0.003 threshold.
-    tactical.warmup(df_full, features)
-
     all_indices = list(range(window, n))
     n_jobs = min(os.cpu_count() or 4, 8)
     chunks = [arr.tolist() for arr in np.array_split(all_indices, n_jobs)]
