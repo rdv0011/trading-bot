@@ -23,6 +23,12 @@ CONSECUTIVE_SIGNALS_REQUIRED = 1
 MIN_LIQUIDATION_BUFFER_FRAC = 0.008  # 0.8% minimum gap between SL trigger and liquidation
 
 
+def _fill_suffix(fill_price) -> str:
+    if isinstance(fill_price, (int, float)) and not isinstance(fill_price, bool):
+        return f" fill={float(fill_price):.2f}"
+    return ""
+
+
 @dataclass
 class StrategicDecision:
     allow_trading: bool
@@ -151,8 +157,9 @@ class PositionManager:
                 f"qty={abs(live.amount):.4f} for {self._symbol}"
             )
             # Pass signed amount: positive for LONG (sell), negative for SHORT (buy to cover)
-            self._broker.close_position(self._symbol, live.amount)
-            self.log(f"🔴 EMERGENCY CLOSE (live) qty={abs(live.amount)} - position closed")
+            fill_price = self._broker.close_position(self._symbol, live.amount)
+            exit_info = _fill_suffix(fill_price)
+            self.log(f"🔴 EMERGENCY CLOSE (live) qty={abs(live.amount)} - position closed{exit_info}")
         else:
             self.log("✅ No open position on exchange during emergency close")
 
@@ -389,14 +396,15 @@ class PositionManager:
             f"🔵 FULL CLOSE — placing {close_side_label} market order "
             f"qty={abs(signed_qty):.4f} for {self._symbol}"
         )
-        self._broker.close_position(self._symbol, signed_qty)
+        fill_price = self._broker.close_position(self._symbol, signed_qty)
 
         # Verify close succeeded by checking exchange (retry up to 3 times)
         live = None
         for attempt in range(3):
             live = self._broker.get_position(self._symbol)
             if live is None or abs(live.amount) < MIN_TRADEABLE_QUANTITY:
-                self.log(f"🔵 FULL CLOSE reason={reason} — position closed")
+                exit_info = _fill_suffix(fill_price)
+                self.log(f"🔵 FULL CLOSE reason={reason} — position closed{exit_info}")
                 self._state = None
                 return
             if attempt < 2:
@@ -413,7 +421,7 @@ class PositionManager:
                     if live.amount > 0
                     else -abs(live.amount)
                 )
-                self._broker.close_position(self._symbol, signed_qty)
+                fill_price = self._broker.close_position(self._symbol, signed_qty)
                 _time.sleep(0.5 * (2 ** attempt))
                 # Track position for next retry's delta calculation
                 live_before = live
@@ -421,9 +429,10 @@ class PositionManager:
 
         remaining = abs(live.amount) if live else 0.0
         live_side = "LONG" if live and live.amount > 0 else "SHORT" if live else "?"
+        exit_info = _fill_suffix(fill_price)
         self.log(
             f"⚠️ FULL CLOSE reason={reason} — FAILED after 3 attempts, "
-            f"remaining={remaining:.4f} side={live_side}"
+            f"remaining={remaining:.4f} side={live_side}{exit_info}"
         )
 
     def _count_consecutive_tail(self, signal: str) -> int:

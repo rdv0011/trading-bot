@@ -56,8 +56,11 @@ RE_PARTIAL_CLOSE = re.compile(r"PARTIAL CLOSE -([\d.]+) \(remaining=([\d.]+)\)")
 RE_FULL_CLOSE_START = re.compile(
     r"FULL CLOSE \(start\) reason=(\S+) .*?side=(LONG|SHORT) amount=([\d.]+)"
 )
-RE_FULL_CLOSE_DONE = re.compile(r"FULL CLOSE reason=(\S+) .*position closed")
+RE_FULL_CLOSE_DONE = re.compile(
+    r"FULL CLOSE reason=(\S+) .*?position closed(?:\s+fill=([\d.]+))?"
+)
 RE_EMERGENCY = re.compile(r"EMERGENCY CLOSE")
+RE_EMERGENCY_FILL = re.compile(r"EMERGENCY CLOSE \(live\) qty=[\d.]+ - position closed(?:\s+fill=([\d.]+))?")
 RE_TP_SL = re.compile(r"TP=([\d.]+) SL=([\d.]+)")
 
 # --- daily diagnostics lines ---
@@ -212,11 +215,15 @@ def parse_demo_logs(
                 gm = RE_GATE_SUMMARY.search(body)
                 if gm:
                     day = gm.group(1)
-                    result.daily_gates[day] = _parse_gate_pairs(body)
+                    if not start_date or day >= start_date:
+                        if not end_date or day <= end_date:
+                            result.daily_gates[day] = _parse_gate_pairs(body)
                 rm = RE_REGIME_DIST.search(body)
                 if rm:
                     day = rm.group(1)
-                    result.regime_distribution[day] = _parse_regime_pcts(rm.group(2))
+                    if not start_date or day >= start_date:
+                        if not end_date or day <= end_date:
+                            result.regime_distribution[day] = _parse_regime_pcts(rm.group(2))
 
                 # ---- position lifecycle ----
                 if active is None:
@@ -235,17 +242,23 @@ def parse_demo_logs(
                         continue
 
                 if active is not None:
-                    if RE_FULL_CLOSE_DONE.search(body):
-                        active["exit_reason"] = RE_FULL_CLOSE_DONE.search(body).group(1)
+                    fm = RE_FULL_CLOSE_DONE.search(body)
+                    if fm:
+                        active["exit_reason"] = fm.group(1)
                         active["exit_ts"] = ts
+                        if fm.group(2):
+                            active["exit_price"] = float(fm.group(2))
                         result.trades.append(active)
                         active = None
                         continue
 
-                    if RE_EMERGENCY.search(body):
+                    em = RE_EMERGENCY_FILL.search(body)
+                    if em:
                         # Broker-side / abrupt close — no 'FULL CLOSE reason=' line.
                         active["exit_reason"] = "emergency_close"
                         active["exit_ts"] = ts
+                        if em.group(1):
+                            active["exit_price"] = float(em.group(1))
                         result.trades.append(active)
                         active = None
                         continue
