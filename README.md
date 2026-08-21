@@ -25,6 +25,7 @@ Sits between the two models and the broker. Tracks open positions and implements
 - *Consecutive signal scaling*: two consecutive signals in the same direction increase the position size
 - *Gradual close*: each signal in the opposite direction closes a fraction of the position
 - *Veto enforcement*: immediately closes any open position when StrategicML blocks trading
+- *Exit price logging*: market close orders log the broker's average fill price (`fill=…`), which `demo_log_parser.py` uses to reconstruct true exit PnL
 
 **RiskGuard**
 A circuit breaker that enforces hard limits on daily loss, drawdown, and leverage. Configured via `parameters` in the strategy and checked before every trade.
@@ -240,10 +241,12 @@ Once ~10 days of demo logs have accrued, run a windowed simulation over the exac
 ```bash
 # 4. Windowed simulation over the same period as the demo logs
 #    (--days covers the 10-day window + ~25 days of warmup history)
-#    writes trades/sim_trades_2026-07-25_2026-08-03.csv + sim_daily_summary_*.csv
-python dualmlsimulation.py --symbol BTCUSDT --days 35 --start-date 2026-07-25 --end-date 2026-08-03 --live-faithful
+#    live-faithful gates are always applied; writes trades/sim_trades_*.csv
+#    + sim_daily_summary_*.csv (per-day gate counters included)
+python dualmlsimulation.py --symbol BTCUSDT --days 35 --start-date 2026-07-25 --end-date 2026-08-03
 
-# 5. Extract demo trades from the daily logs (writes trades/demo_trades.csv + demo_daily_summary.csv)
+# 5. Extract demo trades from the daily logs (exit price = broker fill when
+#    logged, else TP/SL inference; writes trades/demo_trades.csv + demo_daily_summary.csv)
 python demo_log_parser.py --log logs --start-date 2026-07-25 --end-date 2026-08-03
 
 # 6. Compare demo vs simulation — per-day table, win rate, PnL, gate attribution
@@ -255,7 +258,14 @@ python compare_demo_vs_sim.py \
   --out comparison_report.md
 ```
 
-The comparison report shows, per day: trade counts, win rate, PnL, regime distribution, and which live gates (volume filter, HTF trend, chop block, RiskGuard) suppressed signals that the raw simulation would have taken. The biggest gaps point to the gates most worth tuning. The comparison writes `comparison_report.md`; the `--live-faithful` sim mode mirrors live's gates (chop hard block, 0.8xSMA20 volume, HTF-EMA50 trend, 5% daily-loss / 15% drawdown RiskGuard) so the raw-vs-faithful trade-count delta directly explains the gap.
+The comparison report shows, per day: trade counts, win rate, PnL, regime distribution, and which live gates (volume filter, HTF trend, chop block, RiskGuard) suppressed signals the sim took anyway. The biggest gaps point to the gates most worth tuning.
+
+Both sides now carry **per-day gate counters** on the same basis, so the report can attribute entry-count gaps to specific gates:
+
+- **Sim** (`sim_daily_summary_*.csv`): the windowed sim *always* mirrors live's gates (chop hard block, 0.8xSMA20 volume — 0.5x in chop — HTF-EMA50 trend, 5% daily-loss / 15% drawdown RiskGuard) and writes the counters it hit. `vol_flt`/`htf_trd`/`adapt_thr` count per tactical candle (15m); `riskguard`/`chop`/`veto` are scaled to live's 5m-heartbeat basis (×3 per 15m candle), matching live's `Gate counter summary` line.
+- **Demo** (`demo_daily_summary.csv`): parsed straight from the bot's `Gate counter summary` log lines.
+
+> ⚠️ `exit_price` in `demo_trades.csv` comes from the broker's average fill (the `fill=…` suffix on the `FULL CLOSE`/`EMERGENCY CLOSE` log lines) when available; for logs written before that field existed, the parser falls back to TP/SL inference, so PnL from older logs is approximate.
 
 > ℹ️ Steps 4–6 implement [`plans/demo_vs_sim_comparison.md`](plans/demo_vs_sim_comparison.md) — live-faithful gates in `mltrainingcore.py` (`simulate_trades_core`), `run_windowed_simulation` + CLI in `dualmlsimulation.py`, parser in `demo_log_parser.py`, harness in `compare_demo_vs_sim.py`.
 
@@ -273,8 +283,10 @@ When you want to dig deeper than the report (e.g. scale-ups/partials, exact cand
   📈 SCALE UP LONG +0.006 (total=0.0180, scale#1)
   🔽 PARTIAL CLOSE -0.004 (remaining=0.0080)
   🔵 FULL CLOSE (start) reason=MAX_HOLD_TIME — side=LONG amount=0.0120 entry=64200.0
-  🔵 FULL CLOSE reason=MAX_HOLD_TIME — position closed
+  🔵 FULL CLOSE reason=MAX_HOLD_TIME — position closed fill=64180.25
   ```
+
+  The `fill=` suffix is the broker's average fill price (`cumQuote ÷ executedQty`); `demo_log_parser.py` uses it as the trade's exit price for PnL. Old logs without it still parse (TP/SL inference fallback).
 - Signal-level record — why each decision fired (the sim-comparable keys):
   ```
   DEBUG tactical: signal=BUY prediction=0.712300 min_thr=0.600000 max_thr=0.400000
@@ -428,6 +440,8 @@ positionmanager.py             Position state, scaling, partial close, veto logi
 riskguard.py                   Daily loss / drawdown / leverage circuit breaker
 
 dualmlsimulation.py            Walk-forward backtest of the full two-tier system
+demo_log_parser.py             Parses demo log lines into trades + daily gate counters
+compare_demo_vs_sim.py         Demo-vs-sim comparison report harness
 
 mltrainingcore.py              Shared feature engineering, label generation, simulation
 mltraining.py                  Walk-forward param optimisation (used by strategictraining)
@@ -445,5 +459,5 @@ binancebrokerfactory.py        Broker factory
 
 model/                         Trained strategic model (one file, timestamped)
 labeleddata/                   Cached feature datasets and simulation outputs
-tests/                         Unit test suite (99 tests)
+tests/                         Unit test suite (138 tests)
 ```
