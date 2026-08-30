@@ -255,8 +255,12 @@ class PositionManager:
         self._state.signal_history.append(signal)
         self.log(f"🟢 OPEN {signal.upper()} @ {entry_price} qty={qty}")
 
-        # Warn if liquidation is too close to stop-loss
+        tp_price = res.data.get("tp_price")
         sl_price = res.data.get("sl_price")
+        if tp_price and sl_price:
+            self.log(f"🛡 TP={tp_price:.2f} SL={sl_price:.2f}")
+
+        # Warn if liquidation is too close to stop-loss
         if sl_price:
             self._check_liquidation_buffer(sl_price, entry_price, context=f"entry@{entry_price}")
 

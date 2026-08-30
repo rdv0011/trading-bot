@@ -298,10 +298,16 @@ def _parse_gate_pairs(body: str) -> Dict[str, int]:
 
 
 def _infer_exit_price(trade: dict) -> Optional[float]:
-    """Infer the close price from logged TP/SL when the log doesn't print fills."""
+    # Known exit type: TP price is the actual exit price
     if trade["exit_reason"] == "take_profit" and trade.get("tp"):
         return trade["tp"]
+    # Known exit type: SL price is the actual exit price
     if trade["exit_reason"] == "stop_loss" and trade.get("sl"):
+        return trade["sl"]
+    # Unknown exit reason (e.g. MAX_HOLD_TIME): fall back to stored TP/SL
+    if trade.get("tp"):
+        return trade["tp"]
+    if trade.get("sl"):
         return trade["sl"]
     return None
 

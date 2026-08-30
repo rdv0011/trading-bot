@@ -198,6 +198,10 @@ class BinanceFuturesBroker(BinanceBaseBroker):
             fill_price = None
             if executed_qty and float(executed_qty) > 0 and cum_quote and float(cum_quote) > 0:
                 fill_price = float(cum_quote) / float(executed_qty)
+            if fill_price is None:
+                avg_price = order.get("avgPrice")
+                if avg_price:
+                    fill_price = float(avg_price)
             self.logger.info(
                 "🔵 close_position result: orderId=%s status=%s executedQty=%s cumQuote=%s fill=%.2f",
                 order.get("orderId", "?"),
