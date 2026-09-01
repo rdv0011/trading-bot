@@ -1,7 +1,6 @@
 # mltraining.py
 # Produces trained XGBoost/CatBoost models and a labeled historical price dataset
 
-from dotenv import load_dotenv
 import pandas as pd
 import numpy as np
 import warnings
@@ -16,10 +15,10 @@ from mlio import LABEL_DIR, download_historical_prices, load_featured_df, load_l
 from mlio import load_model, save_model, save_featured_df, save_labels, get_latest_model_paths
 from itertools import product
 import ast
-import os
 from typing import Tuple
 from timeframe_config import TIMEFRAMES, TimeframeConfig
 from binance.client import Client
+from config import BINANCE_TESTNET_API_KEY, BINANCE_TESTNET_API_SECRET
 
 warnings.filterwarnings("ignore")
 
@@ -600,8 +599,6 @@ def prepare_simulation_df_for_day(
 # Main script
 # ==================================================================================
 
-load_dotenv()
-
 if __name__ == "__main__":
 
     tf_cfg = TIMEFRAMES[TF_NAME]
@@ -612,8 +609,8 @@ if __name__ == "__main__":
         df_full = load_featured_df(featured_filename)
 
     if df_full is None:
-        api_key = os.getenv("BINANCE_TESTNET_API_KEY", "")
-        api_secret = os.getenv("BINANCE_TESTNET_API_SECRET", "")
+        api_key = BINANCE_TESTNET_API_KEY
+        api_secret = BINANCE_TESTNET_API_SECRET
         client = Client(api_key, api_secret, testnet=True)
         df_raw = download_historical_prices(
             SYMBOL,

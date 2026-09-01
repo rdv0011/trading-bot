@@ -1,17 +1,10 @@
-import os
 import argparse
-from dotenv import load_dotenv
 
 from binancebasebroker import MARKET_TYPE_FUTURES, MARKET_TYPE_SPOT
 from mlstrategy import MLStrategy
 from dualmlstrategy import DualMLStrategy
 from binancebrokerfactory import create_binance_broker
-load_dotenv()
-
-BINANCE_TESTNET_FUTURES_API_KEY = os.getenv("BINANCE_TESTNET_FUTURES_API_KEY")
-BINANCE_TESTNET_FUTURES_API_SECRET = os.getenv("BINANCE_TESTNET_FUTURES_API_SECRET")
-BINANCE_TESTNET_SPOT_API_KEY = os.getenv("BINANCE_TESTNET_SPOT_API_KEY")
-BINANCE_TESTNET_SPOT_API_SECRET = os.getenv("BINANCE_TESTNET_SPOT_API_SECRET")
+from config import get_broker_config, DEFAULT_SYMBOL
 
 if __name__ == "__main__":
 
@@ -71,28 +64,13 @@ if __name__ == "__main__":
         )
         raise SystemExit(0)
 
-    if args.market_type == "futures":
-        if not BINANCE_TESTNET_FUTURES_API_KEY or not BINANCE_TESTNET_FUTURES_API_SECRET:
-            raise ValueError("BINANCE_TESTNET_FUTURES_API_KEY and BINANCE_TESTNET_FUTURES_API_SECRET must be set")
-        broker_config = {
-            "api_key": BINANCE_TESTNET_FUTURES_API_KEY,
-            "api_secret": BINANCE_TESTNET_FUTURES_API_SECRET,
-            "market_type": MARKET_TYPE_FUTURES,
-            "testnet": True,
-        }
-    else:
-        if not BINANCE_TESTNET_SPOT_API_KEY or not BINANCE_TESTNET_SPOT_API_SECRET:
-            raise ValueError("BINANCE_TESTNET_SPOT_API_KEY and BINANCE_TESTNET_SPOT_API_SECRET must be set")
-        broker_config = {
-            "api_key": BINANCE_TESTNET_SPOT_API_KEY,
-            "api_secret": BINANCE_TESTNET_SPOT_API_SECRET,
-            "market_type": MARKET_TYPE_SPOT,
-            "testnet": True,
-        }
+    # Get broker config from centralized config (loads from .env)
+    testnet = True  # Default to testnet for safety
+    broker_config = get_broker_config(args.market_type, testnet=testnet)
 
     broker = create_binance_broker(broker_config)
 
-    base_symbol = "BTC"
+    base_symbol = DEFAULT_SYMBOL.replace("USDT", "")
     quote_symbol = "USDT"
 
     if args.strategy == "dual":
