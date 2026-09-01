@@ -15,6 +15,9 @@ fanctl.toml
 .DS_Store
 optimized_params.csv
 
+# Generated trade data
+trades/
+
 # Python
 __pycache__/
 *.py[cod]
