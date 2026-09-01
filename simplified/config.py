@@ -6,6 +6,7 @@ KEEPING dual-ML architecture: Tactical (15m) + Strategic (1h).
 # ── Data ───────────────────────────────────────────────────────────────
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "15m"          # Tactical timeframe
+TACTICAL_TF = TIMEFRAME     # Alias for compatibility
 STRATEGIC_TF = "1h"        # Strategic timeframe
 HISTORY_DAYS = 90          # ~8640 candles 15m, ~360 candles 1h
 TRAIN_FRACTION = 0.8       # Chronological split: 80% train, 20% validation
@@ -61,6 +62,7 @@ LOG_DIR = "logs"                         # Daily log files go here
 TRADE_LOG_CSV = "logs/trades_demo.csv"   # Trade details CSV for comparison
 CONSOLE_LOG_LEVEL = "INFO"               # Brief info to console
 FILE_LOG_LEVEL = "DEBUG"                 # Detailed to file
+MODEL_DIR = "models"                     # Model directory
 
 # ── Comparison ─────────────────────────────────────────────────────────
 # These settings control the sim vs demo comparison

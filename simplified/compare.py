@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 
-from logging import log_info, log_debug, log_warning
+from logger import log_info, log_debug, log_warning
 
 
 # ── Demo Log Parser ─────────────────────────────────────────────────────

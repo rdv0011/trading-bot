@@ -5,7 +5,7 @@ Dual-ML Bitcoin Trading Bot - Main Entry Point.
 Modes:
   - train: Train tactical + strategic models on historical data
   - simulate: Run backtest on validation data
-  - live: Run live trading on Binance testnet
+  - live: Run live trading on Binance testnet (reads API keys from .env)
   - compare: Compare simulation vs demo trading logs
 """
 
@@ -14,13 +14,32 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
+# Load root config.py FIRST for broker credentials (reads .env from repo root)
+_parent_path = str(Path(__file__).parent.parent)
+if _parent_path not in sys.path:
+    sys.path.insert(0, _parent_path)
+
+from config import get_broker_config
+
+# Clear cached config module so local import works
+sys.modules.pop("config", None)
+
+# Remove parent path so local modules use simplified/config.py
+if _parent_path in sys.path:
+    sys.path.remove(_parent_path)
+
+# Local config for strategy parameters (from simplified/config.py)
 from config import (
-    SYMBOL, TACTICAL_TF, STRATEGIC_TF, HISTORY_DAYS, TRAIN_FRACTION,
-    TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS, LABEL_HORIZON,
+    SYMBOL, TIMEFRAME, STRATEGIC_TF,
+    HISTORY_DAYS, TRAIN_FRACTION, LABEL_HORIZON,
+    FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
+    TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
+    INITIAL_EQUITY, FEE, SLIPPAGE,
     WALKFORWARD_RETRAIN_EVERY, ABSOLUTE_THRESHOLD,
-    INITIAL_EQUITY, FEE, SLIPPAGE, MODEL_DIR,
 )
-from logging import setup_logging, log_info, log_error
+
+# Local logger module (renamed from logging.py to avoid stdlib conflict)
+from logger import setup_logging, log_info, log_error
 from data import run_full_pipeline, load_featured_df
 from model import (
     CatBoostModel, rolling_tactical_predict,
@@ -28,6 +47,8 @@ from model import (
 )
 from simulate import run_simulation
 from compare import run_comparison
+
+MODEL_DIR = "models"
 
 
 def train_mode(args):
@@ -37,11 +58,11 @@ def train_mode(args):
     log_info("=" * 60)
 
     # Run data pipeline for both timeframes
-    log_info(f"\n--- Training Tactical Model ({TACTICAL_TF}) ---")
+    log_info(f"\n--- Training Tactical Model ({TIMEFRAME}) ---")
     df_train_tactical, df_val_tactical = run_full_pipeline(
         symbol=SYMBOL,
         whole_days=HISTORY_DAYS,
-        timeframe=TACTICAL_TF,
+        timeframe=TIMEFRAME,
         train_frac=TRAIN_FRACTION,
         label_horizon=LABEL_HORIZON,
     )
@@ -109,7 +130,7 @@ def simulate_mode(args):
 
     # Load validation data
     log_info("Loading validation data...")
-    df_val = load_featured_df(f"df_{SYMBOL}_{TACTICAL_TF}_val.csv")
+    df_val = load_featured_df(f"df_{SYMBOL}_{TIMEFRAME}_val.csv")
 
     if df_val is None or df_val.empty:
         log_error("No validation data found. Run 'train' mode first.")
@@ -124,7 +145,7 @@ def simulate_mode(args):
     # Run tactical walk-forward predictions
     log_info("\n--- Running Tactical Walk-Forward Predictions ---")
     from timeframe_config import TIMEFRAMES
-    tactical_tf_cfg = TIMEFRAMES[TACTICAL_TF]
+    tactical_tf_cfg = TIMEFRAMES[TIMEFRAME]
 
     tactical_preds = rolling_tactical_predict(
         df_val,
@@ -164,7 +185,7 @@ def simulate_mode(args):
 
 
 def live_mode(args):
-    """Run live trading on Binance testnet."""
+    """Run live trading on Binance testnet (reads API keys from .env)."""
     log_info("=" * 60)
     log_info("LIVE TRADING MODE (Testnet)")
     log_info("=" * 60)
@@ -177,18 +198,19 @@ def live_mode(args):
     strategic_model = CatBoostModel(model_type="strategic")
     strategic_model.load(model_dir=args.model_dir)
 
-    # Create broker
+    # Create broker (loads credentials from .env via config module)
     from broker import BinanceBroker
+    broker_config = get_broker_config("futures", testnet=True)
     broker = BinanceBroker(
-        api_key=args.api_key,
-        api_secret=args.api_secret,
+        api_key=broker_config["api_key"],
+        api_secret=broker_config["api_secret"],
         testnet=True,
         symbol=SYMBOL,
     )
 
     # Get feature columns
     from data import get_feature_cols
-    df_sample = broker.get_historical_prices(SYMBOL, TACTICAL_TF, 7)
+    df_sample = broker.get_historical_prices(SYMBOL, TIMEFRAME, 7)
     feature_cols = get_feature_cols(df_sample)
 
     # Create strategy
@@ -238,7 +260,7 @@ def main():
 Examples:
   python main.py train
   python main.py simulate
-  python main.py live --api-key YOUR_KEY --api-secret YOUR_SECRET
+  python main.py live --sleep 60
   python main.py compare --output logs/report.html
         """
     )
@@ -253,16 +275,14 @@ Examples:
 
     # ── Simulate Mode ───────────────────────────────────────────────────
     sim_parser = subparsers.add_parser("simulate", help="Run backtest simulation")
-    sim_parser.add_argument("--model-dir", default=MODEL_DIR, help="Model directory")
+    sim_parser.add_argument("--model-dir", default="models", help="Model directory")
     sim_parser.add_argument("--output", default=None, help="Output trades CSV path")
 
     # ── Live Mode ───────────────────────────────────────────────────────
-    live_parser = subparsers.add_parser("live", help="Run live trading (testnet)")
-    live_parser.add_argument("--api-key", required=True, help="Binance API key")
-    live_parser.add_argument("--api-secret", required=True, help="Binance API secret")
+    live_parser = subparsers.add_parser("live", help="Run live trading (testnet, reads from .env)")
     live_parser.add_argument("--sleep", type=int, default=60, help="Seconds between iterations")
     live_parser.add_argument("--max-iterations", type=int, default=None, help="Max iterations (None=infinite)")
-    live_parser.add_argument("--model-dir", default=MODEL_DIR, help="Model directory")
+    live_parser.add_argument("--model-dir", default="models", help="Model directory")
 
     # ── Compare Mode ────────────────────────────────────────────────────
     compare_parser = subparsers.add_parser("compare", help="Compare sim vs demo logs")

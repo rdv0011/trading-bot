@@ -17,7 +17,7 @@ from config import (
     STOP_LOSS_FRAC_DEFAULT, TAKE_PROFIT_FRAC_DEFAULT,
     MAX_HOLD_HOURS_DEFAULT, LEVERAGE_DEFAULT,
 )
-from logging import log_trade_entry, log_trade_exit, log_equity, log_info, log_debug
+from logger import log_trade_entry, log_trade_exit, log_equity, log_info, log_debug
 
 
 # ── MockBroker ──────────────────────────────────────────────────────────

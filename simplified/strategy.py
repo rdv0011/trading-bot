@@ -16,7 +16,7 @@ from config import (
     STOP_LOSS_FRAC_DEFAULT, TAKE_PROFIT_FRAC_DEFAULT,
     MAX_HOLD_HOURS_DEFAULT, LEVERAGE_DEFAULT,
 )
-from logging import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity
+from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
 
 
