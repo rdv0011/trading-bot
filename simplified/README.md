@@ -53,9 +53,9 @@ Minimal dual-ML trading system for BTCUSDT futures with simulation vs demo compa
 # 1. Install dependencies
 pip install catboost pandas numpy scikit-learn python-dotenv
 
-# 2. Set environment variables (for live trading)
-export BINANCE_TESTNET_FUTURES_API_KEY="your_key"
-export BINANCE_TESTNET_FUTURES_API_SECRET="your_secret"
+# 2. Create .env file from template
+cp .env.example .env
+# Edit .env and add your Binance testnet API credentials
 
 # 3. Train both models
 python main.py train
@@ -66,6 +66,28 @@ python main.py simulate
 # 5. Compare simulation vs demo logs
 python main.py compare
 ```
+
+## Environment Variables (.env)
+
+The bot reads all configuration from a `.env` file in the repo root. Copy `.env.example` to `.env` and fill in your credentials:
+
+```bash
+# Required for live/testnet trading
+BINANCE_TESTNET_FUTURES_API_KEY=your_testnet_futures_api_key
+BINANCE_TESTNET_FUTURES_API_SECRET=your_testnet_futures_api_secret
+
+# Optional: for spot trading
+# BINANCE_TESTNET_SPOT_API_KEY=
+# BINANCE_TESTNET_SPOT_API_SECRET=
+
+# Optional: override defaults
+# SYMBOL=BTCUSDT
+# MARKET_TYPE=futures
+# TESTNET=true
+# SLEEPTIME=5m
+```
+
+Get testnet API keys from: https://testnet.binance.vision/
 
 ## Modes
 
@@ -129,12 +151,10 @@ logs/
 
 ### Live Mode
 
-Runs live trading on Binance testnet:
+Runs live trading on Binance testnet (reads API keys from .env):
 
 ```bash
 python main.py live \
-  --api-key $BINANCE_TESTNET_FUTURES_API_KEY \
-  --api-secret $BINANCE_TESTNET_FUTURES_API_SECRET \
   --sleep 60 \
   --model-dir models/
 ```
@@ -174,14 +194,16 @@ python main.py compare \
 
 ## Configuration
 
-All parameters in `config.py`:
+All parameters in `config.py` with `.env` overrides:
+
+Configuration is loaded from `config.py` which reads `.env` file at startup. All values below can be overridden via environment variables:
 
 ```python
-# Data
-SYMBOL = "BTCUSDT"
-TACTICAL_TF = "15m"
-STRATEGIC_TF = "1h"
-HISTORY_DAYS = 90
+# Data (overridable via .env)
+SYMBOL = "BTCUSDT"                    # SYMBOL
+TACTICAL_TF = "15m"                   # TACTICAL_TIMEFRAME
+STRATEGIC_TF = "1h"                   # STRATEGIC_TIMEFRAME
+HISTORY_DAYS = 90                     # STRATEGIC_DAYS
 TRAIN_FRACTION = 0.8
 
 # Features
@@ -192,7 +214,7 @@ LABEL_HORIZON = 4  # 4 candles = 1 hour ahead
 
 # Tactical Model
 TACTICAL_MODEL_PARAMS = {
-    "iterations": 100,
+    "iterations": 100,                # TACTICAL_ITERATIONS
     "depth": 6,
     "learning_rate": 0.05,
     "loss_function": "RMSE",
@@ -200,7 +222,7 @@ TACTICAL_MODEL_PARAMS = {
 
 # Strategic Model
 STRATEGIC_MODEL_PARAMS = {
-    "iterations": 300,
+    "iterations": 300,                # STRATEGIC_ITERATIONS
     "depth": 8,
     "learning_rate": 0.03,
     "loss_function": "RMSE",
@@ -212,17 +234,42 @@ STAKE_SHORT_FRAC_DEFAULT = 0.05
 STOP_LOSS_FRAC_DEFAULT = 0.02
 TAKE_PROFIT_FRAC_DEFAULT = 0.04
 MAX_HOLD_HOURS_DEFAULT = 4.0
-LEVERAGE_DEFAULT = 1.0
+LEVERAGE_DEFAULT = 1.0                # LEVERAGE
 
 # Signal Threshold
 ABSOLUTE_THRESHOLD = 0.003
 
 # Simulation
 INITIAL_EQUITY = 1.0
-FEE = 0.0004
-SLIPPAGE = 0.0003
+FEE = 0.0004                          # SIMULATION_FEE
+SLIPPAGE = 0.0003                     # SIMULATION_SLIPPAGE
 WALKFORWARD_RETRAIN_EVERY = 100
+
+# API Credentials (from .env only, NOT hardcoded)
+# BINANCE_TESTNET_FUTURES_API_KEY
+# BINANCE_TESTNET_FUTURES_API_SECRET
+# BINANCE_TESTNET_SPOT_API_KEY
+# BINANCE_TESTNET_SPOT_API_SECRET
 ```
+
+**Environment variable overrides** (set in `.env`):
+- `SYMBOL` - Trading pair (default: BTCUSDT)
+- `MARKET_TYPE` - futures or spot (default: futures)
+- `TESTNET` - true/false (default: true)
+- `TACTICAL_TIMEFRAME` - Tactical timeframe (default: 5m)
+- `STRATEGIC_TIMEFRAME` - Strategic timeframe (default: 1h)
+- `STRATEGIC_DAYS` - Strategic training days (default: 365)
+- `TACTICAL_DAYS` - Tactical training days (default: 45)
+- `TACTICAL_ITERATIONS` - Tactical model iterations (default: 300)
+- `STRATEGIC_ITERATIONS` - Strategic model iterations (default: 300)
+- `LEVERAGE` - Default leverage (default: 1.0)
+- `SIMULATION_FEE` - Fee per side (default: 0.0004)
+- `SIMULATION_SLIPPAGE` - Fixed slippage (default: 0.0003)
+- `WALKFORWARD_RETRAIN_EVERY` - Retrain interval (default: 100)
+
+**Required for live trading** (in `.env`):
+- `BINANCE_TESTNET_FUTURES_API_KEY` / `BINANCE_TESTNET_FUTURES_API_SECRET`
+- `BINANCE_TESTNET_SPOT_API_KEY` / `BINANCE_TESTNET_SPOT_API_SECRET` (for spot)
 
 ## Features
 
@@ -286,8 +333,11 @@ Ensure `models/` directory exists with trained models.
 Normal behavior. Wait for cooldown period (exponential backoff up to 5min).
 
 ### API connection failed
-Check API keys are set correctly:
+Check API keys are set in `.env`:
 ```bash
-echo $BINANCE_TESTNET_FUTURES_API_KEY
-echo $BINANCE_TESTNET_FUTURES_API_SECRET
+cat .env | grep BINANCE
+```
+Or verify the config module loads them:
+```bash
+python -c "from config import validate_credentials; validate_credentials('futures', True)"
 ```
