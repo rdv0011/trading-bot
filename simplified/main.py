@@ -31,7 +31,7 @@ if _parent_path in sys.path:
 # Local config for strategy parameters (from simplified/config.py)
 from config import (
     SYMBOL, TIMEFRAME, STRATEGIC_TF,
-    HISTORY_DAYS, TRAIN_FRACTION, LABEL_HORIZON,
+    HISTORY_DAYS, TRAIN_FRACTION,
     FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
     TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
     INITIAL_EQUITY, FEE, SLIPPAGE,
@@ -64,7 +64,6 @@ def train_mode(args):
         whole_days=HISTORY_DAYS,
         timeframe=TIMEFRAME,
         train_frac=TRAIN_FRACTION,
-        label_horizon=LABEL_HORIZON,
     )
 
     log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
@@ -73,7 +72,6 @@ def train_mode(args):
         whole_days=HISTORY_DAYS,
         timeframe=STRATEGIC_TF,
         train_frac=TRAIN_FRACTION,
-        label_horizon=LABEL_HORIZON,
     )
 
     # Get feature columns
