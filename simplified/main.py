@@ -60,16 +60,16 @@ def train_mode(args):
     # Run data pipeline for both timeframes
     log_info(f"\n--- Training Tactical Model ({TIMEFRAME}) ---")
     df_train_tactical, df_val_tactical = run_full_pipeline(
-        symbol=SYMBOL,
-        whole_days=HISTORY_DAYS,
+        symbol=args.symbol,
+        whole_days=args.days,
         timeframe=TIMEFRAME,
         train_frac=TRAIN_FRACTION,
     )
 
     log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
     df_train_strategic, df_val_strategic = run_full_pipeline(
-        symbol=SYMBOL,
-        whole_days=HISTORY_DAYS,
+        symbol=args.symbol,
+        whole_days=args.days,
         timeframe=STRATEGIC_TF,
         train_frac=TRAIN_FRACTION,
     )

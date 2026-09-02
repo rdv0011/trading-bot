@@ -1513,3 +1513,28 @@ class TestSimulateFlowIntegration:
 
         assert model2.metadata["feature_cols"] == ["ret1", "atr14", "ema_20"]
         assert model2.metadata["n_features"] == 3
+
+
+class TestTrainModeArgs:
+    """Test that train_mode honors --symbol and --days CLI args."""
+
+    def test_ss114_train_mode_uses_args_days_and_symbol(self):
+        """train_mode passes args.symbol and args.days to run_full_pipeline."""
+        from simplified import main as main_mod
+        from simplified import data as data_mod
+
+        args = MagicMock()
+        args.symbol = "ETHUSDT"
+        args.days = 90
+
+        with patch.object(main_mod, "run_full_pipeline", return_value=(
+            _make_featured_df(100), _make_featured_df(100)
+        )) as mock_pipeline:
+            with patch.object(data_mod, "get_feature_cols", return_value=["ret1"]):
+                with patch.object(main_mod.CatBoostModel, "train", return_value=None):
+                    main_mod.train_mode(args)
+
+        assert mock_pipeline.call_count == 2
+        for call in mock_pipeline.call_args_list:
+            assert call.kwargs["symbol"] == "ETHUSDT"
+            assert call.kwargs["whole_days"] == 90
