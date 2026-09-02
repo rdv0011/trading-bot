@@ -2,6 +2,7 @@
 Shared utilities for Dual-ML Bitcoin Trading Bot.
 """
 
+import re
 import pandas as pd
 import numpy as np
 from pathlib import Path

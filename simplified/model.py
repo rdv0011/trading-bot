@@ -105,7 +105,16 @@ class CatBoostModel:
         if hasattr(self.model, 'best_score_'):
             bs = self.model.best_score_
             if isinstance(bs, dict):
-                best_score_val = bs.get('test') or bs.get('validation')
+                # CatBoost best_score_ is nested: {'test': {'min': x, 'best': x}, ...}
+                # Try to get the 'test' or 'validation' dataset, then extract 'best' or 'min'
+                for dataset_key in ('test', 'validation', 'learn'):
+                    if dataset_key in bs:
+                        dataset_val = bs[dataset_key]
+                        if isinstance(dataset_val, dict):
+                            best_score_val = dataset_val.get('best') or dataset_val.get('min')
+                        else:
+                            best_score_val = dataset_val
+                        break
             else:
                 best_score_val = bs
             if best_score_val is not None:
