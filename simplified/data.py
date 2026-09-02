@@ -52,18 +52,27 @@ def download_historical(
     symbol: str = SYMBOL,
     days: int = HISTORY_DAYS,
     timeframe: str = TACTICAL_TF,
-    testnet: bool = True,
+    testnet: bool = False,
 ) -> pd.DataFrame:
     """
     Download historical prices from Binance.
     Returns DataFrame with raw OHLCV data.
+
+    Defaults to the LIVE Binance API (public klines, no auth needed) because
+    Binance TESTNET only retains ~28 days of history regardless of request.
+    Pass testnet=True only when deep history is not required (live trading).
     """
     tf_cfg = TIMEFRAME_CONFIG[timeframe]
     interval = tf_cfg["binance_interval"]
 
     target_candles = days * tf_cfg["candles_per_day"]
-    print(f"Downloading {days} days of {timeframe} data for {symbol}...")
-    client = Client(testnet=testnet)
+    print(f"Downloading {days} days of {timeframe} data for {symbol} ...")
+    if testnet:
+        client = Client(testnet=True)
+    else:
+        # Public live Binance client: public klines need no API keys and
+        # expose far deeper history than testnet (~90+ days vs ~28 days).
+        client = Client("", "")
 
     interval_ms = {
         Client.KLINE_INTERVAL_1MINUTE: 60_000,

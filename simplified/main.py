@@ -143,11 +143,16 @@ def simulate_mode(args):
     # Run tactical walk-forward predictions
     log_info("\n--- Running Tactical Walk-Forward Predictions ---")
 
+    # Walk-forward window must fit within available validation data so the
+    # simulation covers most of the period, not just the tail.
+    wf_window = min(500, max(50, len(df_val) // 4))
+    log_info(f"Walk-forward window: {wf_window} candles (data: {len(df_val)})")
     tactical_preds = rolling_tactical_predict(
         df_val,
         tactical_model,
         feature_cols,
         retrain_every=WALKFORWARD_RETRAIN_EVERY,
+        window=wf_window,
     )
 
     # Run strategic batch predictions for meta-params

@@ -8,7 +8,7 @@ SYMBOL = "BTCUSDT"
 TIMEFRAME = "15m"          # Tactical timeframe
 TACTICAL_TF = TIMEFRAME     # Alias for compatibility
 STRATEGIC_TF = "1h"        # Strategic timeframe
-HISTORY_DAYS = 45          # ~4320 candles 15m, ~180 candles 1h
+HISTORY_DAYS = 50          # ~4800 candles 15m, ~1200 candles 1h (live Binance 90d+)
 TRAIN_FRACTION = 0.8       # Chronological split: 80% train, 20% validation
 
 # ── Feature Engineering ────────────────────────────────────────────────
