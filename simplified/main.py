@@ -89,7 +89,7 @@ def train_mode(args):
         df_train_tactical,
         feature_cols,
         target_col="future_ret",
-        save_model=True,
+        save=True,
     )
 
     # Train strategic model
@@ -102,7 +102,7 @@ def train_mode(args):
         df_train_strategic,
         feature_cols,
         target_col="future_ret",
-        save_model=True,
+        save=True,
     )
 
     log_info("\n" + "=" * 60)
