@@ -142,8 +142,8 @@ def simulate_mode(args):
 
     # Run tactical walk-forward predictions
     log_info("\n--- Running Tactical Walk-Forward Predictions ---")
-    from timeframe_config import TIMEFRAMES
-    tactical_tf_cfg = TIMEFRAMES[TIMEFRAME]
+    from data import TIMEFRAME_CONFIG
+    tactical_tf_cfg = TIMEFRAME_CONFIG[TIMEFRAME]
 
     tactical_preds = rolling_tactical_predict(
         df_val,
