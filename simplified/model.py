@@ -101,6 +101,16 @@ class CatBoostModel:
         )
 
         # Compute metadata
+        best_score_val = None
+        if hasattr(self.model, 'best_score_'):
+            bs = self.model.best_score_
+            if isinstance(bs, dict):
+                best_score_val = bs.get('test') or bs.get('validation')
+            else:
+                best_score_val = bs
+            if best_score_val is not None:
+                best_score_val = float(best_score_val)
+
         self.metadata = {
             "feature_cols": feature_cols,
             "n_features": len(feature_cols),
@@ -108,7 +118,7 @@ class CatBoostModel:
             "n_val_rows": n - n_train,
             "model_type": self.model_type,
             "params": self.params,
-            "best_score": float(self.model.best_score_) if hasattr(self.model, 'best_score_') else None,
+            "best_score": best_score_val,
         }
 
         # Save if requested
