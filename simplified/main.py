@@ -120,11 +120,11 @@ def simulate_mode(args):
 
     # Load models
     log_info("Loading models...")
-    tactical_model = CatBoostModel(model_type="tactical")
-    tactical_model.load(model_dir=args.model_dir)
+    tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
+    tactical_model.load()
 
-    strategic_model = CatBoostModel(model_type="strategic")
-    strategic_model.load(model_dir=args.model_dir)
+    strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
+    strategic_model.load()
 
     # Load validation data
     log_info("Loading validation data...")
@@ -190,11 +190,11 @@ def live_mode(args):
 
     # Load models
     log_info("Loading models...")
-    tactical_model = CatBoostModel(model_type="tactical")
-    tactical_model.load(model_dir=args.model_dir)
+    tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
+    tactical_model.load()
 
-    strategic_model = CatBoostModel(model_type="strategic")
-    strategic_model.load(model_dir=args.model_dir)
+    strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
+    strategic_model.load()
 
     # Create broker (loads credentials from .env via config module)
     from broker import BinanceBroker
