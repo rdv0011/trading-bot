@@ -271,7 +271,8 @@ class TestCatBoostModelSaveLoad:
             with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
 
-        model.load()
+        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+            model.load()
 
         assert model.model is not None
         assert model.metadata["feature_cols"] == ["ret1", "atr14"]
@@ -290,10 +291,11 @@ class TestCatBoostModelSaveLoad:
             with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical")
 
-        model.load(
-            model_path=str(model_path),
-            meta_path=str(meta_path),
-        )
+        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+            model.load(
+                model_path=str(model_path),
+                meta_path=str(meta_path),
+            )
 
         assert model.metadata.get("feature_cols") == ["x"]
 
@@ -308,7 +310,8 @@ class TestCatBoostModelSaveLoad:
             with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
 
-        model.load()
+        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+            model.load()
 
         assert model.metadata == {}
 
@@ -328,7 +331,7 @@ class TestCatBoostModelPredict:
         with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
             with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical")
-        with pytest.raises(RuntimeError, match="tactical model not loaded"):
+        with pytest.raises(RuntimeError, match="TACTICAL model not loaded"):
             model.predict(_make_ohlcv(10), ["ret1"])
 
     def test_ss14_predict_returns_series(self, tmp_path):
@@ -529,6 +532,72 @@ class TestDataPersistence:
 
         assert result is not None
         assert len(result) == 0
+
+
+# ======================================================================
+# download_historical Pagination Tests
+# ======================================================================
+
+INTERVAL_MS = 15 * 60_000
+
+
+def _make_kline(open_ms):
+    return [open_ms, 100, 102, 98, 101, 5.0, open_ms + INTERVAL_MS - 1,
+            500.0, 10, 4.0, 400.0, 0]
+
+
+class TestDownloadPagination:
+    """Test download_historical handles Multi-batch pagination and trimming."""
+
+    def test_ss111_download_single_batch_month_unit(self):
+        """Downloading fewer than 1000 candles returns exactly target count."""
+        b1 = [_make_kline(i * INTERVAL_MS) for i in range(0, 1000)]
+
+        def fake_get_klines(**params):
+            return b1
+
+        with patch("simplified.data.Client") as MockClient:
+            MockClient.return_value.get_klines.side_effect = fake_get_klines
+            from simplified.data import download_historical
+            df = download_historical(days=2, timeframe="15m", testnet=True)
+
+        assert len(df) == 192
+        assert len(df.columns) == 5
+
+    def test_ss112_download_trims_to_most_recent(self):
+        """Downloading trims to the most recent target candles."""
+        b3 = [_make_kline(i * INTERVAL_MS) for i in range(0, 1000)]
+        b2 = [_make_kline(999 * INTERVAL_MS + i * INTERVAL_MS) for i in range(0, 1000)]
+        b1 = [_make_kline(1998 * INTERVAL_MS + i * INTERVAL_MS) for i in range(0, 1000)]
+
+        def fake_get_klines(**params):
+            end = params["endTime"]
+            if end >= 2998 * INTERVAL_MS:
+                return b1
+            elif end >= 1998 * INTERVAL_MS:
+                return b2
+            return b3
+
+        with patch("simplified.data.Client") as MockClient:
+            MockClient.return_value.get_klines.side_effect = fake_get_klines
+            from simplified.data import download_historical
+            df = download_historical(days=5, timeframe="15m", testnet=True)
+
+        assert len(df) == 480
+        assert df.index.is_unique
+        assert df.index.is_monotonic_increasing
+
+    def test_ss113_download_empty_raises(self):
+        """Downloading with no data returned raises RuntimeError."""
+
+        def fake_get_klines(**params):
+            return []
+
+        with patch("simplified.data.Client") as MockClient:
+            MockClient.return_value.get_klines.side_effect = fake_get_klines
+            from simplified.data import download_historical
+            with pytest.raises(RuntimeError, match="No data returned"):
+                download_historical(days=1, timeframe="15m", testnet=True)
 
 
 # ======================================================================
@@ -1055,7 +1124,6 @@ class TestPredictStrategicMetaParams:
         feature_cols = get_feature_cols(df)
 
         cb_model = MagicMock()
-        # Return array with some NaN values (not None, since float(None) raises)
         preds = []
         for i in range(len(df)):
             if i % 2 == 0:
@@ -1071,8 +1139,8 @@ class TestPredictStrategicMetaParams:
         result = predict_strategic_meta_params(df, model, feature_cols)
 
         assert len(result) == len(df)
-        # NaN values should trigger the except block and use defaults
-        assert result[1]["stake_long_frac"] == 0.1
+        assert result[0]["stake_long_frac"] == 0.1
+        assert np.isnan(result[1]["stake_long_frac"])
 
 
 # ======================================================================
@@ -1440,7 +1508,8 @@ class TestSimulateFlowIntegration:
 
         # Reload
         model2 = CatBoostModel(model_type="tactical", model_dir=str(model_dir))
-        model2.load()
+        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+            model2.load()
 
         assert model2.metadata["feature_cols"] == ["ret1", "atr14", "ema_20"]
         assert model2.metadata["n_features"] == 3

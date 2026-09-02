@@ -61,29 +61,60 @@ def download_historical(
     tf_cfg = TIMEFRAME_CONFIG[timeframe]
     interval = tf_cfg["binance_interval"]
 
-    # Calculate limit (max 1000 per request)
-    limit = min(days * tf_cfg["candles_per_day"], 1000)
-
+    target_candles = days * tf_cfg["candles_per_day"]
     print(f"Downloading {days} days of {timeframe} data for {symbol}...")
     client = Client(testnet=testnet)
 
-    klines = client.get_klines(
-        symbol=symbol,
-        interval=interval,
-        limit=limit,
-    )
+    interval_ms = {
+        Client.KLINE_INTERVAL_1MINUTE: 60_000,
+        Client.KLINE_INTERVAL_15MINUTE: 15 * 60_000,
+        Client.KLINE_INTERVAL_1HOUR: 3600_000,
+        Client.KLINE_INTERVAL_4HOUR: 4 * 3600_000,
+        Client.KLINE_INTERVAL_1DAY: 86_400_000,
+    }.get(interval, 60_000)
 
-    df = pd.DataFrame(klines, columns=[
+    # Paginate backwards from now in batches of up to 1000 candles
+    # (Binance single-request limit). Each batch ends at `end_ms`, then we
+    # step back to the candle before this batch's first open and repeat.
+    batch_limit = 1000
+    end_ms = int(datetime.now().timestamp() * 1000)
+    all_rows = []
+    fetched = 0
+
+    while fetched < target_candles and end_ms > 0:
+        klines = client.get_klines(
+            symbol=symbol,
+            interval=interval,
+            limit=batch_limit,
+            endTime=end_ms,
+        )
+        if not klines:
+            break
+        all_rows.extend(klines)
+        fetched += len(klines)
+        end_ms = int(klines[0][0]) - interval_ms
+        if len(klines) < batch_limit:
+            break
+
+    df = pd.DataFrame(all_rows, columns=[
         'timestamp', 'open', 'high', 'low', 'close', 'volume',
         'close_time', 'quote_volume', 'trades',
         'taker_buy_base', 'taker_buy_quote', 'ignore'
     ])
+
+    if df.empty:
+        raise RuntimeError(f"No data returned for {symbol} {timeframe}")
 
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
 
     # Keep only OHLCV
     df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+
+    # Deduplicate overlapping batch boundaries, sort chronologically,
+    # then trim to the most recent `target_candles`.
+    df = df[~df.index.duplicated(keep='first')].sort_index()
+    df = df.tail(target_candles)
 
     print(f"  Downloaded {len(df)} candles: {df.index[0].date()} to {df.index[-1].date()}")
     return df
