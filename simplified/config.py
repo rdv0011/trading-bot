@@ -27,14 +27,36 @@ TACTICAL_MODEL_PARAMS = {
     "verbose": False,
 }
 
-# Strategic ML (1h, persisted model)
+# Strategic ML (1h, persisted model) - multi-output trade-parameter model
 STRATEGIC_MODEL_PARAMS = {
-    "iterations": 300,      # More thorough training
+    "iterations": 500,      # More thorough training
     "depth": 8,
-    "learning_rate": 0.03,
+    "learning_rate": 0.05,
     "loss_function": "RMSE",
     "verbose": False,
 }
+
+# Strategic targets predicted by the multi-output strategic model
+STRATEGIC_TARGET_COLS = [
+    "recommended_leverage",
+    "max_exposure_frac",
+    "stake_long_frac",
+    "stake_short_frac",
+    "stop_loss_frac",
+    "take_profit_frac",
+    "max_hold_hours",
+]
+
+# Heuristic map from regime -> recommended leverage (matches legacy)
+REGIME_LEVERAGE = {"trend": 5.0, "high_vol": 2.0, "chop": 1.0}
+# Stake fractions by regime
+REGIME_STAKE_LONG = {"trend": 0.2, "high_vol": 0.1, "chop": 0.1}
+REGIME_STAKE_SHORT = {"trend": 0.1, "high_vol": 0.05, "chop": 0.05}
+# Stop loss / take profit by regime
+REGIME_STOP_LOSS = {"trend": 0.015, "high_vol": 0.03, "chop": 0.02}
+TAKE_PROFIT_MULT = 2.0
+# Max hold hours by regime
+REGIME_MAX_HOLD = {"trend": 8.0, "high_vol": 2.0, "chop": 4.0}
 
 # ── Trading Parameters ─────────────────────────────────────────────────
 # These are predicted by strategic ML, but defaults for simulation/defaults:

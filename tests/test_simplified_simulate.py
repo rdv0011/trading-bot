@@ -64,6 +64,7 @@ from simplified.model import (
     strategic_batch_predict,
     TARGET_COLUMN,
 )
+from simplified.config import STRATEGIC_TARGET_COLS
 from simplified.simulate import (
     MockBroker,
     run_simulation,
@@ -1052,9 +1053,11 @@ class TestPredictStrategicMetaParams:
         feature_cols = get_feature_cols(df)
 
         cb_model = MagicMock()
+        # order follows STRATEGIC_TARGET_COLS:
+        # [leverage, max_exposure, stake_long, stake_short, stop_loss, take_profit, max_hold]
         cb_model.predict = MagicMock(
             return_value=np.array([
-                [0.1, 0.05, 0.02, 0.04, 4.0, 1.0]
+                [2.0, 0.6, 0.1, 0.05, 0.02, 0.04, 4.0]
                 for _ in range(len(df))
             ])
         )
@@ -1062,6 +1065,7 @@ class TestPredictStrategicMetaParams:
 
         model = MagicMock(spec=CatBoostModel)
         model.model = cb_model
+        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
 
         result = predict_strategic_meta_params(df, model, feature_cols)
 
@@ -1069,22 +1073,26 @@ class TestPredictStrategicMetaParams:
         assert len(result) == len(df)
         assert result[0]["stake_long_frac"] == 0.1
         assert result[0]["stop_loss_frac"] == 0.02
+        assert result[0]["max_exposure_frac"] == 0.6
 
     def test_ss71_predict_meta_params_scalar_output(self, tmp_path):
         df = _make_featured_df(100)
         feature_cols = get_feature_cols(df)
 
         cb_model = MagicMock()
+        # Scalar (single-output) model is a return regressor, not a
+        # trade-parameter model -> all params fall back to safe defaults.
         cb_model.predict = MagicMock(return_value=np.array([0.5] * len(df)))
         cb_model.model = cb_model
 
         model = MagicMock(spec=CatBoostModel)
         model.model = cb_model
+        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
 
         result = predict_strategic_meta_params(df, model, feature_cols)
 
         assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.5
+        assert result[0]["stake_long_frac"] == 0.1
         assert result[0]["stake_short_frac"] == 0.05  # default
 
     def test_ss72_predict_meta_params_no_model_raises(self):
@@ -1100,16 +1108,18 @@ class TestPredictStrategicMetaParams:
         feature_cols = get_feature_cols(df)
 
         cb_model = MagicMock()
+        # A 1-column array cannot supply all targets -> missing ones default.
         cb_model.predict = MagicMock(return_value=np.array([[0.1]] * len(df)))
         cb_model.model = cb_model
 
         model = MagicMock(spec=CatBoostModel)
         model.model = cb_model
+        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
 
         result = predict_strategic_meta_params(df, model, feature_cols)
 
         assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.1
+        assert result[0]["stake_long_frac"] == 0.1  # default
         assert result[0]["stake_short_frac"] == 0.05  # default
 
     def test_ss74_predict_meta_params_empty_list_raises(self):
@@ -1124,23 +1134,23 @@ class TestPredictStrategicMetaParams:
         feature_cols = get_feature_cols(df)
 
         cb_model = MagicMock()
+        good = [0.6, 0.1, 0.05, 0.02, 0.04, 4.0, 1.0]
         preds = []
         for i in range(len(df)):
-            if i % 2 == 0:
-                preds.append([0.1, 0.05, 0.02, 0.04, 4.0, 1.0])
-            else:
-                preds.append([np.nan, np.nan, np.nan, np.nan, np.nan, np.nan])
+            preds.append(good if i % 2 == 0 else [np.nan] * 7)
         cb_model.predict = MagicMock(return_value=np.array(preds))
         cb_model.model = cb_model
 
         model = MagicMock(spec=CatBoostModel)
         model.model = cb_model
+        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
 
         result = predict_strategic_meta_params(df, model, feature_cols)
 
         assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.1
-        assert np.isnan(result[1]["stake_long_frac"])
+        assert result[0]["stake_long_frac"] == 0.05
+        # NaN predictions fall back to the safe default, never a NaN stake.
+        assert result[1]["stake_long_frac"] == 0.1
 
 
 # ======================================================================
@@ -1462,11 +1472,13 @@ class TestSimulateFlowIntegration:
         df = _make_featured_df(100)
         feature_cols = get_feature_cols(df)
 
-        # Test with 6-element arrays (full output)
+        # 7-element arrays (full multi-output contract)
         cb_model = MagicMock()
+        # order follows STRATEGIC_TARGET_COLS:
+        # [leverage, max_exposure, stake_long, stake_short, stop_loss, take_profit, max_hold]
         cb_model.predict = MagicMock(
             return_value=np.array([
-                [0.15, 0.08, 0.015, 0.03, 6.0, 2.0]
+                [2.0, 0.6, 0.08, 0.04, 0.015, 0.03, 6.0]
                 for _ in range(len(df))
             ])
         )
@@ -1474,11 +1486,12 @@ class TestSimulateFlowIntegration:
 
         model = MagicMock(spec=CatBoostModel)
         model.model = cb_model
+        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
 
         result = predict_strategic_meta_params(df, model, feature_cols)
 
         assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.15
+        assert result[0]["stake_long_frac"] == 0.08
         assert result[0]["recommended_leverage"] == 2.0
         assert result[0]["max_hold_hours"] == 6.0
 

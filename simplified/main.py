@@ -11,6 +11,8 @@ Modes:
 
 import argparse
 import sys
+import time
+import pandas as pd
 from pathlib import Path
 from datetime import datetime
 
@@ -92,6 +94,19 @@ def train_mode(args):
         save=True,
     )
 
+    log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
+    from data import add_strategic_features_df, make_strategic_labels_df, get_feature_cols
+    from config import STRATEGIC_TARGET_COLS
+
+    # The strategic model learns trade params from strategic (1h) features
+    df_strat_feat = add_strategic_features_df(df_train_strategic, timeframe=STRATEGIC_TF)
+    df_strat_labeled = make_strategic_labels_df(df_strat_feat, timeframe=STRATEGIC_TF)
+    strategic_feature_cols = [
+        c for c in get_feature_cols(df_strat_labeled)
+        if c not in STRATEGIC_TARGET_COLS
+    ]
+    log_info(f"Strategic feature columns: {len(strategic_feature_cols)} features")
+
     # Train strategic model
     log_info("\n--- Training Strategic Model ---")
     strategic_model = CatBoostModel(
@@ -99,9 +114,9 @@ def train_mode(args):
         model_params=STRATEGIC_MODEL_PARAMS
     )
     strategic_model.train(
-        df_train_strategic,
-        feature_cols,
-        target_col="future_ret",
+        df_strat_labeled,
+        strategic_feature_cols,
+        target_cols=list(STRATEGIC_TARGET_COLS),
         save=True,
     )
 
@@ -157,18 +172,58 @@ def simulate_mode(args):
 
     # Run strategic batch predictions for meta-params
     log_info("\n--- Running Strategic Predictions ---")
+    from data import add_strategic_features_df
+    from config import STRATEGIC_TARGET_COLS
+
+    # Strategic model operates on its own timeframe's features; load that
+    # validation split, add the strategic features, and predict meta-params.
+    df_val_strat_raw = load_featured_df(f"df_{SYMBOL}_{STRATEGIC_TF}_val.csv")
+    if df_val_strat_raw is None or df_val_strat_raw.empty:
+        log_error("No strategic validation data found. Run 'train' mode first.")
+        sys.exit(1)
+    df_val_strat = add_strategic_features_df(df_val_strat_raw, timeframe=STRATEGIC_TF)
+
+    strat_feature_cols = [
+        c for c in get_feature_cols(df_val_strat)
+        if c not in STRATEGIC_TARGET_COLS
+    ]
     strategic_meta_params = predict_strategic_meta_params(
-        df_val,
+        df_val_strat,
         strategic_model,
-        feature_cols,
+        strat_feature_cols,
     )
+
+    # Align (forward-fill) the strategic (1h) params onto the tactical (15m)
+    # rows so every simulation row has a meta-param dict. Warmup rows before
+    # the first strategic timestamp get NaN from ffill; coalesce to defaults.
+    strat_index = df_val_strat.index
+    strat_params_df = pd.DataFrame(
+        strategic_meta_params, index=strat_index
+    )
+    strat_params_reindexed = strat_params_df.reindex(
+        df_val.index, method="ffill"
+    )
+    param_defaults = {
+        "stake_long_frac": 0.1,
+        "stake_short_frac": 0.05,
+        "stop_loss_frac": 0.02,
+        "take_profit_frac": 0.04,
+        "max_hold_hours": 4.0,
+        "recommended_leverage": 1.0,
+        "max_exposure_frac": 1.0,
+        "regime": "trend",
+    }
+    aligned_meta_params = [
+        row.to_dict()
+        for _, row in strat_params_reindexed.fillna(param_defaults).iterrows()
+    ]
 
     # Run simulation
     log_info("\n--- Running Simulation ---")
     trades_df, metrics, equity_curve = run_simulation(
         df_val,
         tactical_preds,
-        strategic_meta_params,
+        aligned_meta_params,
     )
 
     # Save results
@@ -208,10 +263,27 @@ def live_mode(args):
         symbol=SYMBOL,
     )
 
-    # Get feature columns
-    from data import get_feature_cols
-    df_sample = broker.get_historical_prices(SYMBOL, TIMEFRAME, 7)
-    feature_cols = get_feature_cols(df_sample)
+    # Feature columns must match the trained tactical model. Derive them from
+    # the model's own metadata (authoritative) rather than a raw OHLCV sample.
+    feature_cols = list(tactical_model.metadata.get("feature_cols", []))
+    if not feature_cols:
+        log_error("Tactical model metadata has no feature_cols; aborting live startup")
+        sys.exit(1)
+
+    # Probe connectivity; the initial fetch may transiently fail (e.g. rate
+    # limit / network), so retry with backoff before giving up on startup.
+    df_sample = None
+    for _attempt in range(5):
+        df_sample = broker.get_historical_prices(SYMBOL, 7, TIMEFRAME)
+        if df_sample is not None and len(df_sample) > 0:
+            break
+        log_error(
+            f"Initial historical fetch returned no data (attempt {_attempt + 1}), retrying..."
+        )
+        time.sleep(5 * (2 ** _attempt))
+    if df_sample is None or len(df_sample) == 0:
+        log_error("Could not fetch initial market data; aborting live startup")
+        sys.exit(1)
 
     # Create strategy
     from strategy import DualMLStrategy

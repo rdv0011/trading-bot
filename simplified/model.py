@@ -17,7 +17,7 @@ from catboost import CatBoostRegressor
 
 from config import (
     MODEL_DIR, TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
-    WALKFORWARD_RETRAIN_EVERY, TACTICAL_TF,
+    WALKFORWARD_RETRAIN_EVERY, TACTICAL_TF, STRATEGIC_TARGET_COLS,
 )
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -68,10 +68,14 @@ class CatBoostModel:
         df: pd.DataFrame,
         feature_cols: List[str],
         target_col: str = TARGET_COLUMN,
+        target_cols: List[str] = None,
         save: bool = True,
     ) -> "CatBoostModel":
         """
         Train CatBoost model on provided data.
+
+        If target_cols is given, trains a multi-output regressor on those
+        target columns (used by the strategic model for trade parameters).
         """
         print(f"\n{'='*60}")
         print(f"TRAINING {self.model_type.upper()} MODEL")
@@ -81,7 +85,12 @@ class CatBoostModel:
 
         # Prepare data
         X = df[feature_cols].fillna(0)
-        y = df[target_col].fillna(0)
+        if target_cols:
+            y = df[target_cols].fillna(0)
+            multi = True
+        else:
+            y = df[target_col].fillna(0)
+            multi = False
 
         # Internal train/validation split (80/20) for early stopping
         n = len(X)
@@ -90,35 +99,39 @@ class CatBoostModel:
         y_train, y_val = y.iloc[:n_train], y.iloc[n_train:]
 
         # Create and train model
-        self.model = CatBoostRegressor(**self.params)
+        base = CatBoostRegressor(**self.params)
 
         print(f"\n  Training with {n_train} train, {n - n_train} val samples...")
-        self.model.fit(
-            X_train, y_train,
-            eval_set=(X_val, y_val),
-            early_stopping_rounds=50,
-            verbose=100,
-        )
-
-        # Compute metadata
-        best_score_val = None
-        if hasattr(self.model, 'best_score_'):
-            bs = self.model.best_score_
-            if isinstance(bs, dict):
-                # CatBoost best_score_ is nested: {'test': {'min': x, 'best': x}, ...}
-                # Try to get the 'test' or 'validation' dataset, then extract 'best' or 'min'
-                for dataset_key in ('test', 'validation', 'learn'):
-                    if dataset_key in bs:
-                        dataset_val = bs[dataset_key]
-                        if isinstance(dataset_val, dict):
-                            best_score_val = dataset_val.get('best') or dataset_val.get('min')
-                        else:
-                            best_score_val = dataset_val
-                        break
-            else:
-                best_score_val = bs
-            if best_score_val is not None:
-                best_score_val = float(best_score_val)
+        if multi:
+            from sklearn.multioutput import MultiOutputRegressor
+            self.model = MultiOutputRegressor(base)
+            self.model.fit(X_train, y_train)
+            best_score_val = None
+        else:
+            self.model = base
+            self.model.fit(
+                X_train, y_train,
+                eval_set=(X_val, y_val),
+                early_stopping_rounds=50,
+                verbose=100,
+            )
+            best_score_val = None
+            if hasattr(self.model, 'best_score_'):
+                bs = self.model.best_score_
+                if isinstance(bs, dict):
+                    for dataset_key in ('test', 'validation', 'learn'):
+                        if dataset_key in bs:
+                            dataset_val = bs[dataset_key]
+                            best_score_val = (
+                                dataset_val.get('best') or dataset_val.get('min')
+                                if isinstance(dataset_val, dict)
+                                else dataset_val
+                            )
+                            break
+                else:
+                    best_score_val = bs
+                if best_score_val is not None:
+                    best_score_val = float(best_score_val)
 
         self.metadata = {
             "feature_cols": feature_cols,
@@ -128,7 +141,10 @@ class CatBoostModel:
             "model_type": self.model_type,
             "params": self.params,
             "best_score": best_score_val,
+            "multi_output": multi,
         }
+        if multi:
+            self.metadata["target_cols"] = target_cols
 
         # Save if requested
         if save:
@@ -136,7 +152,7 @@ class CatBoostModel:
 
         print(f"\n{'='*60}")
         print(f"TRAINING COMPLETE")
-        print(f"  Best val score: {self.model.best_score_}")
+        print(f"  Best val score: {best_score_val}")
         print(f"{'='*60}")
 
         return self
@@ -149,7 +165,13 @@ class CatBoostModel:
         model_path, meta_path = self._get_path(prefix)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
-        self.model.save_model(str(model_path))
+        if self.metadata.get("multi_output"):
+            import joblib
+            model_path = self.model_dir / f"{prefix}_{self.model_type}.joblib"
+            joblib.dump(self.model, str(model_path))
+            self.meta_path = meta_path
+        else:
+            self.model.save_model(str(model_path))
 
         self.metadata["saved_at"] = pd.Timestamp.now().isoformat()
         with open(meta_path, 'w') as f:
@@ -175,17 +197,21 @@ class CatBoostModel:
         self.model_path = Path(model_path)
         self.meta_path = Path(meta_path) if meta_path else None
 
-        # Load model
-        self.model = CatBoostRegressor(**self.params)
-        self.model.load_model(str(self.model_path))
-
-        # Load metadata if exists
+        # Load metadata first to know how to deserialize
+        loaded_meta = {}
         if self.meta_path and self.meta_path.exists():
             with open(self.meta_path, 'r') as f:
-                self.metadata = json.load(f)
-            print(f"  Meta:  {self.meta_path}")
-            print(f"  Features: {len(self.metadata.get('feature_cols', []))} columns")
+                loaded_meta = json.load(f)
+            self.metadata = loaded_meta
+
+        if loaded_meta.get("multi_output"):
+            import joblib
+            self.model = joblib.load(str(self.model_path))
         else:
+            self.model = CatBoostRegressor(**self.params)
+            self.model.load_model(str(self.model_path))
+
+        if not self.metadata:
             self.metadata = {}
 
         print(f"  Model loaded successfully")
@@ -197,8 +223,11 @@ class CatBoostModel:
 
         pattern = f"model_{self.model_type}.cbm"
         model_path = self.model_dir / pattern
+        joblib_pattern = self.model_dir / f"model_{self.model_type}.joblib"
 
-        if not model_path.exists():
+        if joblib_pattern.exists():
+            model_path = joblib_pattern
+        elif not model_path.exists():
             raise FileNotFoundError(
                 f"No model found at {model_path}. Run 'train' mode first."
             )
@@ -218,11 +247,13 @@ class CatBoostModel:
         X = df[feature_cols].fillna(0)
         preds = self.model.predict(X)
 
-        result = pd.Series(
+        if self.metadata and self.metadata.get("multi_output"):
+            cols = self.metadata.get("target_cols", [f"y{i}" for i in range(np.asarray(preds).shape[1])])
+            return pd.DataFrame(preds, index=df.index, columns=cols)
+
+        return pd.Series(
             preds, index=df.index, name=f"{self.model_type}_prediction"
         )
-
-        return result
 
     def get_feature_importance(self) -> Dict[str, float]:
         """Get feature importance from trained model."""
@@ -304,8 +335,12 @@ def predict_strategic_meta_params(
     feature_cols: List[str],
 ) -> List[Dict[str, Any]]:
     """
-    Predict strategic meta-parameters (stake, SL, TP, max_hold, leverage, regime).
+    Predict strategic meta-parameters (stake, SL, TP, max_hold, leverage).
     Returns list of param dicts, one per row in df.
+
+    The strategic model is a multi-output regressor over STRATEGIC_TARGET_COLS.
+    Each predicted value is clamped to a sane range; if a target is absent
+    (older single-output model), it falls back to the safe default.
     """
     if model.model is None:
         raise RuntimeError("Strategic model not loaded")
@@ -313,43 +348,64 @@ def predict_strategic_meta_params(
     X = df[feature_cols].fillna(0)
     raw_preds = model.model.predict(X)
 
+    target_cols = (
+        list(model.metadata.get("target_cols", []))
+        if model.metadata
+        else list(STRATEGIC_TARGET_COLS)
+    )
+
+    bounds = {
+        "recommended_leverage": (1.0, 10.0, 1.0),
+        "max_exposure_frac": (0.0, 1.0, 0.5),
+        "stake_long_frac": (0.01, 0.3, 0.1),
+        "stake_short_frac": (0.01, 0.2, 0.05),
+        "stop_loss_frac": (0.005, 0.1, 0.02),
+        "take_profit_frac": (0.005, 0.2, 0.04),
+        "max_hold_hours": (0.5, 48.0, 4.0),
+    }
+
+    # Column order in the prediction matrix follows target_cols if the model
+    # is multi-output; default to ordered bounds otherwise.
+    pred_arrs = np.asarray(raw_preds)
+    is_multi_col = pred_arrs.ndim > 1 and pred_arrs.shape[1] > 1
     param_list = []
+
     for i in range(len(df)):
-        pred = raw_preds[i]
-
-        # Handle array output
-        if isinstance(pred, (list, tuple)):
-            pred_arr = np.asarray(pred).flatten()
+        row = {}
+        if target_cols and is_multi_col:
+            for j, key in enumerate(target_cols):
+                default = bounds.get(key, (0.0, 1.0, 0.0))[2]
+                if j < pred_arrs.shape[1]:
+                    row[key] = _clamp_float(pred_arrs, (i, j), *bounds.get(key, (0.0, 1.0, default)))
+                else:
+                    row[key] = default
         else:
-            pred_arr = np.asarray([pred]).flatten()
-
-        # Extract values with defaults
-        try:
-            stakes_long = float(pred_arr[0]) if len(pred_arr) > 0 else 0.1
-            stakes_short = float(pred_arr[1]) if len(pred_arr) > 1 else 0.05
-            stop_loss = float(pred_arr[2]) if len(pred_arr) > 2 else 0.02
-            take_profit = float(pred_arr[3]) if len(pred_arr) > 3 else 0.04
-            max_hold = float(pred_arr[4]) if len(pred_arr) > 4 else 4.0
-            leverage = float(pred_arr[5]) if len(pred_arr) > 5 else 1.0
-        except (IndexError, ValueError):
-            stakes_long = 0.1
-            stakes_short = 0.05
-            stop_loss = 0.02
-            take_profit = 0.04
-            max_hold = 4.0
-            leverage = 1.0
+            for key in STRATEGIC_TARGET_COLS:
+                row[key] = bounds[key][2]
 
         param_list.append({
-            "stake_long_frac": stakes_long,
-            "stake_short_frac": stakes_short,
-            "stop_loss_frac": stop_loss,
-            "take_profit_frac": take_profit,
-            "max_hold_hours": max_hold,
-            "recommended_leverage": leverage,
+            "stake_long_frac": row.get("stake_long_frac", 0.1),
+            "stake_short_frac": row.get("stake_short_frac", 0.05),
+            "stop_loss_frac": row.get("stop_loss_frac", 0.02),
+            "take_profit_frac": row.get("take_profit_frac", 0.04),
+            "max_hold_hours": row.get("max_hold_hours", 4.0),
+            "max_exposure_frac": row.get("max_exposure_frac", 0.5),
+            "recommended_leverage": row.get("recommended_leverage", 1.0),
             "regime": "trend",
         })
 
     return param_list
+
+
+def _clamp_float(pred_arr, idx, lo, hi, default):
+    value = default
+    try:
+        raw = float(pred_arr[idx])
+        if np.isfinite(raw):
+            value = raw
+    except (IndexError, ValueError, TypeError):
+        pass
+    return float(max(lo, min(hi, value)))
 
 
 # ── Convenience Functions ──────────────────────────────────────────────
@@ -369,9 +425,9 @@ def train_strategic_model(
     feature_cols: List[str],
     model_params: dict = None,
 ) -> CatBoostModel:
-    """Train strategic (1h) model."""
+    """Train strategic (1h) multi-output trade-parameter model."""
     model = CatBoostModel(model_type="strategic", model_params=model_params)
-    model.train(df, feature_cols, target_col=TARGET_COLUMN, save=True)
+    model.train(df, feature_cols, target_cols=list(STRATEGIC_TARGET_COLS), save=True)
     return model
 
 

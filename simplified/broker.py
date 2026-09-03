@@ -652,6 +652,54 @@ class BinanceBroker(BaseBroker):
         except Exception as e:
             return BracketResult(success=False, error=str(e))
 
+    def open_position(
+        self,
+        side: str,
+        stake_frac: float,
+        leverage: int,
+        stop_loss_frac: float,
+        take_profit_frac: float,
+    ) -> BracketResult:
+        """
+        Strategy-friendly entry. Computes quantity from equity/stake/leverage,
+        quantizes to the symbol step size, sets leverage, and delegates to
+        open_position_with_bracket for the market entry + TP/SL bracket.
+        """
+        symbol = self.symbol
+        price = self.get_last_price(symbol)
+        if price <= 0:
+            self.logger.error(f"Cannot enter: price fetch returned {price}")
+            return BracketResult(success=False, error="price fetch failed")
+
+        equity = self.get_cash()
+        if equity <= 0:
+            self.logger.error(f"Cannot enter: equity={equity}")
+            return BracketResult(success=False, error="no equity")
+
+        stake = equity * stake_frac * leverage
+        qty = self._quantize_qty(stake / price)
+        if qty < MIN_TRADEABLE_QUANTITY:
+            self.logger.warning(
+                f"Quantized qty {qty:.6f} below minimum {MIN_TRADEABLE_QUANTITY}"
+            )
+            return BracketResult(success=False, error="qty below minimum")
+
+        self.set_leverage(symbol, leverage, margin_type="ISOLATED")
+
+        signal = SIGNAL_LONG if side == "long" else SIGNAL_SHORT
+        return self.open_position_with_bracket(
+            symbol=symbol,
+            signal=signal,
+            quantity=qty,
+            tp_frac=take_profit_frac,
+            sl_frac=stop_loss_frac,
+        )
+
+    def _quantize_qty(self, qty: float) -> float:
+        """Floor-quantize quantity to the symbol's step size."""
+        step = 10 ** (-TRADEABLE_QUANTITY_PRECISION)
+        return (qty // step) * step
+
     def cancel_open_orders(self, symbol: str = None, max_retries: int = 3, base_delay: float = 0.5):
         sym = symbol or self.symbol
         last_error = None
@@ -716,10 +764,14 @@ class BinanceBroker(BaseBroker):
 
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         sym = symbol or self.symbol
+        # Binance requires integer leverage; strategic model emits floats (e.g. 3.33).
+        leverage = int(round(leverage)) if leverage is not None else leverage
         try:
             positions = self.client.futures_position_information(symbol=sym)
             current_margin = positions[0].get("marginType", "").upper() if positions else ""
-            if current_margin != margin_type.upper():
+            # No open position => cannot read current margin type; a change attempt
+            # is a no-op and just logs a misleading -4046 ERROR. Skip it.
+            if positions and current_margin != margin_type.upper():
                 for _attempt in range(2):
                     try:
                         self.client.futures_change_margin_type(symbol=sym, marginType=margin_type)

@@ -410,6 +410,11 @@ def run_simulation(
         else:
             signal = "hold"
 
+        # Regime gate: skip entries in choppy markets (only trend/high_vol)
+        row_regime = df_val.iloc[i].get("regime", "trend")
+        if signal in ("long", "short") and row_regime == "chop":
+            signal = "hold"
+
         # Get strategic meta-params
         meta = strategic_meta_params[i] if i < len(strategic_meta_params) else {}
 

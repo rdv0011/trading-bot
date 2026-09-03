@@ -15,9 +15,11 @@ from config import (
     STAKE_LONG_FRAC_DEFAULT, STAKE_SHORT_FRAC_DEFAULT,
     STOP_LOSS_FRAC_DEFAULT, TAKE_PROFIT_FRAC_DEFAULT,
     MAX_HOLD_HOURS_DEFAULT, LEVERAGE_DEFAULT,
+    SYMBOL, TACTICAL_TF, STRATEGIC_TF,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
+from data import make_features_df, add_strategic_features_df
 
 
 # ── Signal Conversion ───────────────────────────────────────────────────
@@ -139,6 +141,10 @@ class DualMLStrategy:
         log_info(f"  Sleep: {sleep_seconds}s")
         log_info("=" * 60)
 
+        self._sleep_seconds = sleep_seconds
+        self._tactical_window = getattr(self, "_tactical_window", 200)
+        self._strategic_window = getattr(self, "_strategic_window", 500)
+
         iteration = 0
         while max_iterations is None or iteration < max_iterations:
             try:
@@ -154,38 +160,72 @@ class DualMLStrategy:
             time.sleep(sleep_seconds)
 
     def _live_iteration(self) -> None:
-        """Single live trading iteration."""
-        # 1. Fetch latest data for both timeframes
-        # This would call broker.get_historical_prices() for tactical and strategic
-        # For now, this is a placeholder - requires BinanceBroker implementation
+        """Fetch data, predict, and act on the latest candle."""
+        now = datetime.now()
+        iteration = getattr(self, "_iteration", 0)
+        self._iteration = iteration + 1
 
-        # 2. Build features for latest candle
-        # df_tactical = self._build_tactical_features()
-        # df_strategic = self._build_strategic_features()
+        # Tactical (15m) data + prediction
+        df_tactical = self.broker.get_historical_prices(
+            self.broker.symbol, self._tactical_window, TACTICAL_TF
+        )
+        if df_tactical is None or len(df_tactical) < self._tactical_window:
+            log_warning("Insufficient tactical data, skipping iteration")
+            return
 
-        # 3. Get tactical prediction (walk-forward)
-        # pred = self.tactical_model.predict(df_tactical, self.feature_cols).iloc[-1]
+        df_feat = make_features_df(df_tactical, timeframe=TACTICAL_TF)
+        if len(df_feat) == 0 or not self.feature_cols:
+            log_warning("Tactical features incomplete, skipping iteration")
+            return
 
-        # 4. Get strategic meta-params (batch, less frequent)
-        # if iteration % (60 * 60 // sleep_seconds) == 0:  # Every hour
-        #     meta_list = predict_strategic_meta_params(
-        #         df_strategic, self.strategic_model, self.feature_cols
-        #     )
-        #     self.current_meta = meta_list[-1]  # Latest
+        row = df_feat.iloc[[-1]][[c for c in self.feature_cols if c in df_feat.columns]].fillna(0)
+        pred = float(self.tactical_model.predict(row, list(row.columns)).iloc[0])
+        signal = prediction_to_signal(pred, self.threshold)
 
-        # 5. Convert to signal
-        # signal = prediction_to_signal(pred, self.threshold)
+        # Strategic meta-params refresh roughly hourly
+        strat_every = max(1, int(3600 / max(self._sleep_seconds, 1)))
+        if (iteration % strat_every) == 0 or self.current_meta.get("_init") is None:
+            df_strat = self.broker.get_historical_prices(
+                self.broker.symbol, self._strategic_window, STRATEGIC_TF
+            )
+            if df_strat is not None and len(df_strat) > 50:
+                df_strat_feat = add_strategic_features_df(
+                    make_features_df(df_strat, timeframe=STRATEGIC_TF),
+                    timeframe=STRATEGIC_TF,
+                )
+                strat_feats = list(
+                    (self.strategic_model.metadata or {}).get("feature_cols", [])
+                )
+                strat_feats = [c for c in strat_feats if c in df_strat_feat.columns]
+                try:
+                    meta_list = predict_strategic_meta_params(
+                        df_strat_feat, self.strategic_model, strat_feats,
+                    )
+                    meta = meta_list[-1]
+                    meta["_init"] = True
+                    self.current_meta = meta
+                except Exception as e:
+                    log_warning(f"Strategic prediction failed, using defaults: {e}")
+                    self.current_meta = DEFAULT_META.copy()
+            else:
+                self.current_meta = DEFAULT_META.copy()
 
-        # 6. Check exits
-        # self._check_exits()
+        if self.current_meta.get("regime") == "chop" or signal == "hold":
+            log_debug(f"Regime={self.current_meta.get('regime')} signal={signal} - skip")
+            return
 
-        # 7. Execute entry/exit
-        # self._execute_signal(signal)
+        current_price = self.broker.get_last_price()
+        if current_price <= 0:
+            log_warning("Price fetch failed, skipping iteration")
+            return
 
-        # 8. Log equity
-        # log_equity(datetime.now(), self.broker.get_equity(), self.position, ...)
+        exit_reason = self._check_exits(current_price, now)
+        if exit_reason is not None and self.position != 0:
+            self._exit_position(exit_reason, current_price, now)
+            return
 
-        log_debug(f"Live iteration {iteration} - placeholder (needs BinanceBroker)")
+        if self.position == 0 and signal in ("long", "short"):
+            self._enter_position(signal, current_price, now)
 
     # ── Position Management ─────────────────────────────────────────────
     def _check_exits(self, current_price: float, current_time: datetime) -> Optional[str]:
@@ -240,40 +280,43 @@ class DualMLStrategy:
         )
         leverage = self.current_meta["recommended_leverage"]
 
-        # Delegate to broker
-        if hasattr(self.broker, 'open_position'):
-            self.broker.open_position(
-                side=side,
-                stake_frac=stake_frac,
-                leverage=leverage,
-                stop_loss_frac=self.current_meta["stop_loss_frac"],
-                take_profit_frac=self.current_meta["take_profit_frac"],
-            )
+        result = self.broker.open_position(
+            side=side,
+            stake_frac=stake_frac,
+            leverage=leverage,
+            stop_loss_frac=self.current_meta["stop_loss_frac"],
+            take_profit_frac=self.current_meta["take_profit_frac"],
+        )
+        if result is None or not getattr(result, "success", False):
+            log_warning(f"Entry {side.upper()} FAILED: {getattr(result, 'error', 'no result')}")
+            return
 
-        # Update local state
-        self.position = 1.0 if side == "long" else -1.0  # Direction only
-        self.entry_price = price
+        # Reconcile from broker's actual fill (source of truth)
+        actual_pos = self.broker.get_position()
+        self.position = 1.0 if side == "long" else -1.0
+        self.entry_price = (actual_pos.entry_price if actual_pos else None) or price
         self.entry_time = timestamp
+        qty = abs(actual_pos.amount) if actual_pos else 0.0
 
         # Create trade record
         self.current_trade = log_trade_entry(
             timestamp=timestamp,
             symbol="BTCUSDT",
             side=side,
-            entry_price=price,
-            qty=0.0,  # Filled by broker
+            entry_price=self.entry_price,
+            qty=qty,
             stake_frac=stake_frac,
             leverage=leverage,
             stop_loss=self.current_meta["stop_loss_frac"],
             take_profit=self.current_meta["take_profit_frac"],
             max_hold_hours=self.current_meta["max_hold_hours"],
             regime=self.current_meta["regime"],
-            tactical_pred=0.0,  # Updated by caller
+            tactical_pred=0.0,
             strategic_params=self.current_meta.copy(),
-            equity_before=0.0,  # Filled by broker
+            equity_before=self.broker.get_equity(),
         )
 
-        log_info(f"LIVE ENTRY {side.upper()} @ {price:.2f} | Meta: {json.dumps(self.current_meta, default=str)}")
+        log_info(f"LIVE ENTRY {side.upper()} @ {self.entry_price:.2f} | Meta: {json.dumps(self.current_meta, default=str)}")
 
     def _exit_position(self, reason: str, price: float, timestamp: datetime) -> None:
         """Close current position."""
@@ -282,26 +325,32 @@ class DualMLStrategy:
 
         side = "long" if self.position > 0 else "short"
 
-        # Delegate to broker
-        if hasattr(self.broker, 'close_position'):
-            self.broker.close_position()
+        # Delegate to broker; broker.close_position() uses its own symbol/position
+        fill_price = self.broker.close_position()
+        actual_fill = fill_price or price
 
-        # Log exit
         if self.current_trade:
+            entry_price = self.entry_price or actual_fill
+            notional = abs(self.current_trade.get("qty", 0.0)) or 1.0
+            raw_pnl = (
+                (actual_fill - entry_price) * notional
+                if self.position > 0
+                else (entry_price - actual_fill) * notional
+            )
+            equity_before = self.current_trade.get("equity_before") or 1.0
             log_trade_exit(
                 trade=self.current_trade,
-                exit_price=price,
+                exit_price=actual_fill,
                 exit_reason=reason,
-                pnl=0.0,  # Filled by broker
-                pnl_pct=0.0,
-                equity_after=0.0,
+                pnl=raw_pnl,
+                pnl_pct=raw_pnl / equity_before if equity_before else 0.0,
+                equity_after=self.broker.get_equity(),
                 fee_paid=0.0,
                 slippage_paid=0.0,
             )
 
-        log_info(f"LIVE EXIT {reason.upper()} @ {price:.2f}")
+        log_info(f"LIVE EXIT {reason.upper()} @ {actual_fill:.2f}")
 
-        # Reset
         self.position = 0.0
         self.entry_price = 0.0
         self.entry_time = None
