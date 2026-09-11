@@ -157,6 +157,12 @@ REVERSAL_FULL_CLOSE_STREAK = 2        # reversal signals before full close
 TRADE_COOLDOWN_ENABLED = _get_bool("TRADE_COOLDOWN_ENABLED", True)
 TRADE_COOLDOWN_MINUTES = 30           # minimum gap between new entries
 
+# ── Startup Position Adoption ──────────────────────────────────────────
+# Adopt an exchange position left open by a previous process (crash / killed
+# session) so exits manage it instead of trading blindly beside it. When
+# False, startup is refused if an open position exists.
+ADOPT_EXISTING_POSITION = _get_bool("ADOPT_EXISTING_POSITION", True)
+
 # ── Signal Thresholds ──────────────────────────────────────────────────
 # Tactical signal threshold (absolute; used when ADAPTIVE_THRESHOLD_ENABLED=False)
 ABSOLUTE_THRESHOLD = 0.006      # Minimum prediction to trigger LONG/SHORT

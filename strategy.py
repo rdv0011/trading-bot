@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 import json
 import time
+import signal
 
 import config as _config
 from config import (
@@ -219,6 +220,95 @@ class DualMLStrategy:
         return n_trees < 2
 
     # ── Live Trading Mode ──────────────────────────────────────────────
+    def sync_exchange_position(self, symbol: Optional[str] = None) -> bool:
+        """Adopt any open position already on the exchange at startup.
+
+        Called once before ``run_live_loop`` begins. If a previous process
+        left a position open (killed session, crash), the live bot would
+        otherwise start flat and trade blindly beside it — opening a new
+        (possibly opposite) position while the orphan is unmanaged. This
+        mirrors the exchange position into strategy state so SL/TP,
+        trailing, liquidity and manual-shutdown exits manage it instead.
+
+        Fail-open: any query/parse error is treated as "no position" so a
+        transient API hiccup never blocks startup.
+
+        Returns:
+            True  -> caller may proceed (position adopted, or account flat).
+            False -> an open position exists but adoption is disabled
+                     (``ADOPT_EXISTING_POSITION=False``); refuse to start.
+        """
+        symbol = symbol or getattr(self.broker, "symbol", "BTCUSDT")
+
+        try:
+            pos = self.broker.get_position(symbol)
+        except Exception as e:
+            log_warning(f"Position sync: query failed ({e}); starting flat")
+            self.position = 0.0
+            return True
+
+        # Defensive parse: broker mocks / odd payloads must never crash startup.
+        try:
+            amount = float(getattr(pos, "amount", 0.0) or 0.0)
+            entry_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            amount, entry_price = 0.0, 0.0
+
+        if abs(amount) < 1e-9:
+            log_info("Position sync: no open position on exchange, starting flat")
+            self.position = 0.0
+            return True
+
+        if not _cfg_flag("ADOPT_EXISTING_POSITION", True, self.config):
+            log_error(
+                f"Position sync: exchange holds {amount:+.6f} {symbol} "
+                f"@ {entry_price:.2f} but ADOPT_EXISTING_POSITION=False; "
+                "refusing to start (close it manually or enable adoption)"
+            )
+            return False
+
+        side = "long" if amount > 0 else "short"
+        self.position = 1.0 if amount > 0 else -1.0
+        self.entry_price = entry_price
+        # Conservative: max_hold counts from adoption, not true fill time.
+        self.entry_time = datetime.now()
+        self._initial_qty = abs(amount)
+        self.trail_extreme = entry_price
+        self.last_entry_time = self.entry_time
+        self.scale_count = 0
+        self.same_dir_streak = 0
+        self.reversal_streak = 0
+
+        # Rebuild a trade record so exit accounting/PnL logging works normally.
+        meta = self.current_meta or DEFAULT_META.copy()
+        stake_frac = meta.get(
+            "stake_long_frac" if side == "long" else "stake_short_frac",
+            STAKE_LONG_FRAC_DEFAULT if side == "long" else STAKE_SHORT_FRAC_DEFAULT,
+        )
+        self.current_trade = log_trade_entry(
+            timestamp=self.entry_time,
+            symbol=symbol,
+            side=side,
+            entry_price=self.entry_price,
+            qty=abs(amount),
+            stake_frac=stake_frac,
+            leverage=meta.get("recommended_leverage", LEVERAGE_DEFAULT),
+            stop_loss=meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT),
+            take_profit=meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT),
+            max_hold_hours=meta.get("max_hold_hours", MAX_HOLD_HOURS_DEFAULT),
+            regime=meta.get("regime", "trend"),
+            tactical_pred=self._last_tactical_pred,
+            strategic_params=meta.copy(),
+            equity_before=self.broker.get_equity(),
+        )
+
+        log_info(
+            f"ADOPTED existing {side.upper()} qty={abs(amount):.6f} "
+            f"entry={self.entry_price:.2f} | managing exchange position "
+            f"(max_hold counts from adoption; existing SL/TP brackets reused)"
+        )
+        return True
+
     def run_live_loop(
         self,
         sleep_seconds: int = 60,
@@ -236,6 +326,8 @@ class DualMLStrategy:
         self._sleep_seconds = sleep_seconds
         self._tactical_window = getattr(self, "_tactical_window", 200)
         self._strategic_window = getattr(self, "_strategic_window", 500)
+
+        self._install_shutdown_signal_handlers()
 
         model_refresh_every = self.model_refresh_every
         iteration = 0
@@ -304,6 +396,29 @@ class DualMLStrategy:
                 if new_feats:
                     self.feature_cols = new_feats
                     self.candles_since_retrain = self.retrain_every
+
+    def _install_shutdown_signal_handlers(self) -> None:
+        """Close positions on SIGTERM/SIGHUP so the exchange is never left orphaned.
+
+        ``tmux kill-session`` delivers SIGHUP and systemd stop delivers SIGTERM;
+        without a handler the process dies mid-loop and leaves an open position
+        that the next boot must re-adopt. Routing both signals through the same
+        graceful close path as Ctrl+C keeps that invariant.
+        """
+        def _shutdown_handler(signum, _frame):
+            log_info(f"Received signal {signum}, closing all positions")
+            try:
+                self._close_all_positions("manual_shutdown")
+            except Exception as e:
+                log_error(f"Signal shutdown close failed: {e}")
+            finally:
+                raise SystemExit(0)
+
+        try:
+            signal.signal(signal.SIGTERM, _shutdown_handler)
+            signal.signal(signal.SIGHUP, _shutdown_handler)
+        except (ValueError, OSError) as e:
+            log_warning(f"Could not install shutdown signal handlers: {e}")
 
     def _close_all_positions(self, reason: str = "manual_shutdown") -> None:
         """Force-close any open position and cancel open orders on shutdown."""

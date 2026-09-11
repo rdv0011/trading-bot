@@ -295,6 +295,12 @@ def live_mode(args):
         liquidity_monitor=liquidity_monitor,
     )
 
+    # Adopt any position left open by a previous process so exits manage it
+    # instead of trading blindly beside it (refuse to start if disabled).
+    if not strategy.sync_exchange_position():
+        log_error("Refusing to start: open exchange position exists and ADOPT_EXISTING_POSITION=False")
+        sys.exit(1)
+
     log_info(f"Starting live loop (sleep: {args.sleep}s, max: {args.max_iterations})")
     log_info("Press Ctrl+C to stop")
 
