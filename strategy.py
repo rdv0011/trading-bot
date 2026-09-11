@@ -248,11 +248,20 @@ class DualMLStrategy:
             return True
 
         # Defensive parse: broker mocks / odd payloads must never crash startup.
-        try:
-            amount = float(getattr(pos, "amount", 0.0) or 0.0)
-            entry_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
-        except (TypeError, ValueError):
-            amount, entry_price = 0.0, 0.0
+        if pos is None:
+            log_info("Position sync: no open position on exchange, starting flat")
+            self.position = 0.0
+            return True
+
+        amount_raw = getattr(pos, "amount", None)
+        entry_raw = getattr(pos, "entry_price", None)
+        if not isinstance(amount_raw, (int, float)) or not isinstance(entry_raw, (int, float)):
+            log_warning("Position sync: unparseable position payload, starting flat")
+            self.position = 0.0
+            return True
+
+        amount = float(amount_raw)
+        entry_price = float(entry_raw)
 
         if abs(amount) < 1e-9:
             log_info("Position sync: no open position on exchange, starting flat")
