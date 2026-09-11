@@ -1,106 +1,392 @@
+#!/usr/bin/env python3
+"""
+Dual-ML Bitcoin Trading Bot - Main Entry Point.
+
+Modes:
+  - train: Train tactical + strategic models on historical data
+  - simulate: Run backtest on validation data
+  - live: Run live trading on Binance testnet (reads API keys from .env)
+  - compare: Compare simulation vs demo trading logs
+"""
+
 import argparse
+import sys
+import time
+import pandas as pd
+from datetime import datetime
 
-from binancebasebroker import MARKET_TYPE_FUTURES, MARKET_TYPE_SPOT
-from mlstrategy import MLStrategy
-from dualmlstrategy import DualMLStrategy
-from binancebrokerfactory import create_binance_broker
-from config import get_broker_config, DEFAULT_SYMBOL
+from config import (
+    get_broker_config, is_testnet_env,
+    SYMBOL, TIMEFRAME, STRATEGIC_TF,
+    HISTORY_DAYS, TRAIN_FRACTION,
+    FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
+    TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
+    INITIAL_EQUITY, FEE, SLIPPAGE,
+    WALKFORWARD_RETRAIN_EVERY, ABSOLUTE_THRESHOLD,
+    LIQUIDITY_RECORDER_ENABLED,
+)
 
-if __name__ == "__main__":
+from logger import setup_logging, log_info, log_error
+from data import run_full_pipeline, load_featured_df
+from model import (
+    CatBoostModel, rolling_tactical_predict,
+    predict_strategic_meta_params
+)
+from simulate import run_simulation
+from compare import run_comparison
 
-    parser = argparse.ArgumentParser(description="Run trading bot strategy.")
+MODEL_DIR = "models"
 
-    parser.add_argument(
-        "--market-type",
-        choices=["spot", "futures"],
-        default="futures",
+
+def train_mode(args):
+    """Train tactical and strategic models on historical data."""
+    log_info("=" * 60)
+    log_info("TRAINING MODE")
+    log_info("=" * 60)
+
+    # Run data pipeline for both timeframes
+    log_info(f"\n--- Training Tactical Model ({TIMEFRAME}) ---")
+    df_train_tactical, df_val_tactical = run_full_pipeline(
+        symbol=args.symbol,
+        whole_days=args.days,
+        timeframe=TIMEFRAME,
+        train_frac=TRAIN_FRACTION,
     )
-    parser.add_argument(
-        "--strategy",
-        choices=["legacy", "dual"],
-        default="dual",
-        help="'legacy' = original single-ML, 'dual' = new two-tier ML system",
+
+    log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
+    df_train_strategic, df_val_strategic = run_full_pipeline(
+        symbol=args.symbol,
+        whole_days=args.days,
+        timeframe=STRATEGIC_TF,
+        train_frac=TRAIN_FRACTION,
     )
-    parser.add_argument(
-        "--train-strategic",
-        action="store_true",
-        help="Run strategic model training then exit (no live trading).",
+
+    # Get feature columns
+    from data import get_feature_cols
+    feature_cols = get_feature_cols(df_train_tactical)
+    log_info(f"Feature columns: {len(feature_cols)} features")
+
+    # Train tactical model
+    log_info("\n--- Training Tactical Model ---")
+    tactical_model = CatBoostModel(
+        model_type="tactical",
+        model_params=TACTICAL_MODEL_PARAMS
     )
-    parser.add_argument("--strategic-days", type=int, default=365)
-    parser.add_argument("--strategic-timeframe", default="1h")
-    parser.add_argument(
-        "--tactical-days",
-        type=int,
-        default=45,
-        help="Days of 5m data used for walk-forward param optimisation (requires --train-strategic).",
+    tactical_model.train(
+        df_train_tactical,
+        feature_cols,
+        target_col="future_ret",
+        save=True,
     )
-    parser.add_argument(
-        "--optimize-params",
-        action="store_true",
-        help="Use simulation-driven param optimisation when training the strategic model.",
+
+    log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
+    from data import add_strategic_features_df, make_strategic_labels_df, get_feature_cols
+    from config import STRATEGIC_TARGET_COLS
+
+    # The strategic model learns trade params from strategic (1h) features
+    df_strat_feat = add_strategic_features_df(df_train_strategic, timeframe=STRATEGIC_TF)
+    df_strat_labeled = make_strategic_labels_df(df_strat_feat, timeframe=STRATEGIC_TF)
+    strategic_feature_cols = [
+        c for c in get_feature_cols(df_strat_labeled)
+        if c not in STRATEGIC_TARGET_COLS
+    ]
+    log_info(f"Strategic feature columns: {len(strategic_feature_cols)} features")
+
+    # Train strategic model
+    log_info("\n--- Training Strategic Model ---")
+    strategic_model = CatBoostModel(
+        model_type="strategic",
+        model_params=STRATEGIC_MODEL_PARAMS
     )
+    strategic_model.train(
+        df_strat_labeled,
+        strategic_feature_cols,
+        target_cols=list(STRATEGIC_TARGET_COLS),
+        save=True,
+    )
+
+    log_info("\n" + "=" * 60)
+    log_info("TRAINING COMPLETE")
+    log_info(f"Tactical model: models/tactical_model.cbm")
+    log_info(f"Strategic model: models/strategic_model.cbm")
+    log_info("=" * 60)
+
+
+def simulate_mode(args):
+    """Run simulation on validation data."""
+    log_info("=" * 60)
+    log_info("SIMULATION MODE")
+    log_info("=" * 60)
+
+    # Load models
+    log_info("Loading models...")
+    tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
+    tactical_model.load()
+
+    strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
+    strategic_model.load()
+
+    # Load validation data
+    log_info("Loading validation data...")
+    df_val = load_featured_df(f"df_{SYMBOL}_{TIMEFRAME}_val.csv")
+
+    if df_val is None or df_val.empty:
+        log_error("No validation data found. Run 'train' mode first.")
+        sys.exit(1)
+
+    # Get feature columns
+    from data import get_feature_cols
+    feature_cols = get_feature_cols(df_val)
+    log_info(f"Validation data: {len(df_val)} candles")
+    log_info(f"Features: {len(feature_cols)} columns")
+
+    # Run tactical walk-forward predictions
+    log_info("\n--- Running Tactical Walk-Forward Predictions ---")
+
+    # Walk-forward window must fit within available validation data so the
+    # simulation covers most of the period, not just the tail.
+    wf_window = min(500, max(50, len(df_val) // 4))
+    log_info(f"Walk-forward window: {wf_window} candles (data: {len(df_val)})")
+    tactical_preds = rolling_tactical_predict(
+        df_val,
+        tactical_model,
+        feature_cols,
+        retrain_every=WALKFORWARD_RETRAIN_EVERY,
+        window=wf_window,
+    )
+
+    # Run strategic batch predictions for meta-params
+    log_info("\n--- Running Strategic Predictions ---")
+    from data import add_strategic_features_df
+    from config import STRATEGIC_TARGET_COLS
+
+    # Strategic model operates on its own timeframe's features; load that
+    # validation split, add the strategic features, and predict meta-params.
+    df_val_strat_raw = load_featured_df(f"df_{SYMBOL}_{STRATEGIC_TF}_val.csv")
+    if df_val_strat_raw is None or df_val_strat_raw.empty:
+        log_error("No strategic validation data found. Run 'train' mode first.")
+        sys.exit(1)
+    df_val_strat = add_strategic_features_df(df_val_strat_raw, timeframe=STRATEGIC_TF)
+
+    strat_feature_cols = [
+        c for c in get_feature_cols(df_val_strat)
+        if c not in STRATEGIC_TARGET_COLS
+    ]
+    strategic_meta_params = predict_strategic_meta_params(
+        df_val_strat,
+        strategic_model,
+        strat_feature_cols,
+    )
+
+    # Align (forward-fill) the strategic (1h) params onto the tactical (15m)
+    # rows so every simulation row has a meta-param dict. Warmup rows before
+    # the first strategic timestamp get NaN from ffill; coalesce to defaults.
+    strat_index = df_val_strat.index
+    strat_params_df = pd.DataFrame(
+        strategic_meta_params, index=strat_index
+    )
+    strat_params_reindexed = strat_params_df.reindex(
+        df_val.index, method="ffill"
+    )
+    param_defaults = {
+        "stake_long_frac": 0.1,
+        "stake_short_frac": 0.05,
+        "stop_loss_frac": 0.02,
+        "take_profit_frac": 0.04,
+        "max_hold_hours": 4.0,
+        "recommended_leverage": 1.0,
+        "max_exposure_frac": 1.0,
+        "regime": "trend",
+    }
+    aligned_meta_params = [
+        row.to_dict()
+        for _, row in strat_params_reindexed.fillna(param_defaults).iterrows()
+    ]
+
+    # Run simulation
+    log_info("\n--- Running Simulation ---")
+    trades_df, metrics, equity_curve = run_simulation(
+        df_val,
+        tactical_preds,
+        aligned_meta_params,
+    )
+
+    # Save results
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    trades_path = f"logs/trades_sim_{timestamp}.csv"
+    equity_path = f"logs/equity_sim_{timestamp}.csv"
+
+    from utils import save_trades_csv
+    save_trades_csv(trades_df, trades_path)
+    equity_curve.to_csv(equity_path, index=False)
+
+    log_info(f"\nTrades saved: {trades_path}")
+    log_info(f"Equity curve saved: {equity_path}")
+
+
+def live_mode(args):
+    """Run live trading (testnet=debug by default, mainnet when TRADING_ENV=mainnet)."""
+    trading_env = "TESTNET" if is_testnet_env() else "MAINNET"
+    log_info("=" * 60)
+    log_info(f"LIVE TRADING MODE ({trading_env})")
+    log_info("=" * 60)
+
+    # Load models
+    log_info("Loading models...")
+    tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
+    tactical_model.load()
+
+    strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
+    strategic_model.load()
+
+    # Create broker (loads credentials from .env via config module).
+    # TRADING_ENV controls testnet (debug) vs mainnet (production); a mainnet
+    # incident can be debugged by flipping TRADING_ENV=testnet (same code path,
+    # no real money at risk).
+    from broker import BinanceBroker
+    use_testnet = is_testnet_env()
+    broker_config = get_broker_config("futures", testnet=use_testnet)
+    broker = BinanceBroker(
+        api_key=broker_config["api_key"],
+        api_secret=broker_config["api_secret"],
+        testnet=use_testnet,
+        symbol=SYMBOL,
+    )
+
+    # Feature columns must match the trained tactical model. Derive them from
+    # the model's own metadata (authoritative) rather than a raw OHLCV sample.
+    feature_cols = list(tactical_model.metadata.get("feature_cols", []))
+    if not feature_cols:
+        log_error("Tactical model metadata has no feature_cols; aborting live startup")
+        sys.exit(1)
+
+    # Probe connectivity; the initial fetch may transiently fail (e.g. rate
+    # limit / network), so retry with backoff before giving up on startup.
+    df_sample = None
+    for _attempt in range(5):
+        df_sample = broker.get_historical_prices(SYMBOL, 7, TIMEFRAME)
+        if df_sample is not None and len(df_sample) > 0:
+            break
+        log_error(
+            f"Initial historical fetch returned no data (attempt {_attempt + 1}), retrying..."
+        )
+        time.sleep(5 * (2 ** _attempt))
+    if df_sample is None or len(df_sample) == 0:
+        log_error("Could not fetch initial market data; aborting live startup")
+        sys.exit(1)
+
+    # Phase 1-2: optional mainnet WS orderbook recorder feeding liquidity
+    # gates. Fail-open: if it dies, strategy gates log and proceed (no halt).
+    liquidity_monitor = None
+    if LIQUIDITY_RECORDER_ENABLED:
+        from orderbook import OrderBookRecorder
+        liquidity_monitor = OrderBookRecorder(symbol=SYMBOL)
+        liquidity_monitor.start()
+        log_info("Liquidity recorder started (mainnet WS orderbook)")
+
+    # Create strategy
+    from strategy import DualMLStrategy
+    strategy = DualMLStrategy(
+        broker=broker,
+        tactical_model=tactical_model,
+        strategic_model=strategic_model,
+        feature_cols=feature_cols,
+        model_dir=args.model_dir,
+        liquidity_monitor=liquidity_monitor,
+    )
+
+    log_info(f"Starting live loop (sleep: {args.sleep}s, max: {args.max_iterations})")
+    log_info("Press Ctrl+C to stop")
+
+    try:
+        strategy.run_live_loop(
+            sleep_seconds=args.sleep,
+            max_iterations=args.max_iterations,
+        )
+    finally:
+        if liquidity_monitor is not None:
+            liquidity_monitor.stop()
+            log_info("Liquidity recorder stopped")
+
+
+def compare_mode(args):
+    """Compare simulation vs demo trading logs."""
+    log_info("=" * 60)
+    log_info("COMPARISON MODE: Sim vs Demo")
+    log_info("=" * 60)
+
+    metrics = run_comparison(
+        log_dir=args.log_dir,
+        demo_pattern=args.demo_pattern,
+        sim_pattern=args.sim_pattern,
+        output_html=args.output,
+    )
+
+    if not metrics:
+        log_error("No trades found for comparison")
+        sys.exit(1)
+
+    log_info("\nComparison complete!")
+    log_info(f"Report: {args.output}")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Dual-ML Bitcoin Trading Bot",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py train
+  python main.py simulate
+  python main.py live --sleep 60
+  python main.py compare --output logs/report.html
+        """
+    )
+
+    subparsers = parser.add_subparsers(dest="mode", help="Operating mode")
+    subparsers.required = True
+
+    # ── Train Mode ──────────────────────────────────────────────────────
+    train_parser = subparsers.add_parser("train", help="Train models on historical data")
+    train_parser.add_argument("--symbol", default=SYMBOL, help="Trading symbol")
+    train_parser.add_argument("--days", type=int, default=HISTORY_DAYS, help="Historical days")
+
+    # ── Simulate Mode ───────────────────────────────────────────────────
+    sim_parser = subparsers.add_parser("simulate", help="Run backtest simulation")
+    sim_parser.add_argument("--model-dir", default="models", help="Model directory")
+    sim_parser.add_argument("--output", default=None, help="Output trades CSV path")
+
+    # ── Live Mode ───────────────────────────────────────────────────────
+    live_parser = subparsers.add_parser("live", help="Run live trading (TRADING_ENV: testnet=debug | mainnet=production)")
+    live_parser.add_argument("--sleep", type=int, default=60, help="Seconds between iterations")
+    live_parser.add_argument("--max-iterations", type=int, default=None, help="Max iterations (None=infinite)")
+    live_parser.add_argument("--model-dir", default="models", help="Model directory")
+
+    # ── Compare Mode ────────────────────────────────────────────────────
+    compare_parser = subparsers.add_parser("compare", help="Compare sim vs demo logs")
+    compare_parser.add_argument("--log-dir", default="logs", help="Log directory")
+    compare_parser.add_argument("--demo-pattern", default="trading_*.log", help="Demo log pattern")
+    compare_parser.add_argument("--sim-pattern", default="trades_sim_*.csv", help="Sim trade CSV pattern")
+    compare_parser.add_argument("--output", default="logs/comparison_report.html", help="Report output path")
+
     args = parser.parse_args()
 
-    if args.train_strategic:
-        from strategic.strategictraining import run_training
-        from mlio import MODEL_DIR
+    # Setup logging
+    setup_logging()
 
-        df_5m_predictions = None
-        if args.optimize_params:
-            from dualmlsimulation import run_predictions_only
-            print(f"Running walk-forward tactical predictions ({args.tactical_days}d 5m)...")
-            df_5m_predictions, _ = run_predictions_only(
-                symbol="BTCUSDT",
-                days=args.tactical_days,
-                timeframe="5m",
-            )
-
-        run_training(
-            symbol="BTCUSDT",
-            days=args.strategic_days,
-            timeframe=args.strategic_timeframe,
-            model_dir=MODEL_DIR,
-            df_5m_predictions=df_5m_predictions,
-        )
-        raise SystemExit(0)
-
-    # Get broker config from centralized config (loads from .env)
-    testnet = True  # Default to testnet for safety
-    broker_config = get_broker_config(args.market_type, testnet=testnet)
-
-    broker = create_binance_broker(broker_config)
-
-    base_symbol = DEFAULT_SYMBOL.replace("USDT", "")
-    quote_symbol = "USDT"
-
-    if args.strategy == "dual":
-        parameters = {
-            "asset_symbol": base_symbol,
-            "model_type": "cat",
-            "market_type": args.market_type,
-            "tactical_timeframe": "5m",
-            "strategic_timeframe": "1h",
-            "model_params": {"iterations": 300, "verbose": False},
-            "sleeptime": "5m",
-        }
-        strategy = DualMLStrategy(
-            broker=broker,
-            quote_symbol=quote_symbol,
-            parameters=parameters,
-        )
+    # Dispatch
+    if args.mode == "train":
+        train_mode(args)
+    elif args.mode == "simulate":
+        simulate_mode(args)
+    elif args.mode == "live":
+        live_mode(args)
+    elif args.mode == "compare":
+        compare_mode(args)
     else:
-        parameters = {
-            "asset_symbol": base_symbol,
-            "historical_prices_unit": "5m",
-            "model_type": "cat",
-            "auto_reload": True,
-            "sleeptime": "5m",
-            "market_type": args.market_type,
-        }
-        strategy = MLStrategy(
-            broker=broker,
-            quote_symbol=quote_symbol,
-            parameters=parameters,
-        )
+        parser.print_help()
+        sys.exit(1)
 
-    strategy.run()
+
+if __name__ == "__main__":
+    main()

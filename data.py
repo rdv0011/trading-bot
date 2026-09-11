@@ -57,8 +57,9 @@ def download_historical(
     testnet: bool = False,
 ) -> pd.DataFrame:
     """
-    Download historical prices from Binance.
-    Returns DataFrame with raw OHLCV data.
+    Download historical FUTURES prices from Binance (the bot trades BTCUSDT
+    perpetuals; spot prices/volume diverge from futures, especially on
+    testnet). Uses the public futures klines endpoint via a no-auth client.
 
     Defaults to the LIVE Binance API (public klines, no auth needed) because
     Binance TESTNET only retains ~28 days of history regardless of request.
@@ -93,7 +94,11 @@ def download_historical(
     fetched = 0
 
     while fetched < target_candles and end_ms > 0:
-        klines = client.get_klines(
+        # Use the FUTURES klines endpoint (not spot get_klines): the bot
+        # trades BTCUSDT perpetual futures, and spot prices/volume diverge
+        # from futures (especially on testnet where volume is synthetic).
+        # Replays must see the same series the live broker sees.
+        klines = client.futures_klines(
             symbol=symbol,
             interval=interval,
             limit=batch_limit,
@@ -192,6 +197,54 @@ def _detect_regime(row) -> str:
     if vol_ratio > 1.4:
         return "high_vol"
     return "trend"
+
+
+# ── Adaptive Threshold & Vol-State Helpers (Phase 2) ────────────────────
+def adaptive_threshold(
+    preds: pd.Series,
+    lookback: int = 200,
+    quantile: float = 0.95,
+    min_threshold: float = 0.002,
+    max_threshold: float = 0.02,
+    fallback: float = 0.006,
+) -> float:
+    """
+    Compute an adaptive signal threshold from recent prediction magnitudes.
+
+    Takes the last `lookback` |predictions|, drops NaN, and uses the
+    `quantile`-th percentile of their absolute values as the threshold,
+    clamped into [min_threshold, max_threshold]. Mirrors the legacy
+    adaptive_thresholding(): threshold adapts to recent signal strength
+    instead of using a fixed ABSOLUTE_THRESHOLD.
+
+    Falls back to `fallback` when fewer than 20 valid predictions are
+    available (warmup period).
+
+    Returns:
+        float: threshold value rounded to 6 decimals.
+    """
+    if preds is None or len(preds) == 0:
+        return round(float(fallback), 6)
+
+    recent = pd.Series(preds).tail(lookback).dropna().abs()
+    if len(recent) < 20:
+        return round(float(fallback), 6)
+
+    thr = float(np.percentile(recent.values, quantile * 100.0))
+    thr = float(np.clip(thr, min_threshold, max_threshold))
+    return round(thr, 6)
+
+
+def classify_vol_state(vol_ratio: float, extreme_ratio: float = 1.8) -> str:
+    """
+    Classify the short/long volatility ratio into a vol state.
+
+    Returns "extreme" when vol_ratio >= extreme_ratio (used by the regime
+    gate to block entries during extreme volatility), else "normal".
+    """
+    if not np.isfinite(vol_ratio):
+        return "extreme" if extreme_ratio <= 0 else "normal"
+    return "extreme" if vol_ratio >= extreme_ratio else "normal"
 
 
 # ── Strategic Feature & Label Engineering (1h) ─────────────────────────

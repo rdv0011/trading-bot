@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Optional, Tuple, Dict, Any, List
 import logging
 
-from catboost import CatBoostRegressor
+from catboost import CatBoostRegressor, Pool
 
 from config import (
     MODEL_DIR, TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
@@ -158,28 +158,47 @@ class CatBoostModel:
         return self
 
     def save(self, prefix: str = "model") -> Tuple[Path, Path]:
-        """Save current model and metadata to disk."""
+        """Save current model and metadata to disk atomically."""
+        import tempfile
         if self.model is None:
             raise RuntimeError("No model to save")
 
         model_path, meta_path = self._get_path(prefix)
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
+        friendly_path = model_path
         if self.metadata.get("multi_output"):
             import joblib
-            model_path = self.model_dir / f"{prefix}_{self.model_type}.joblib"
-            joblib.dump(self.model, str(model_path))
+            friendly_path = self.model_dir / f"{prefix}_{self.model_type}.joblib"
             self.meta_path = meta_path
-        else:
-            self.model.save_model(str(model_path))
-
         self.metadata["saved_at"] = pd.Timestamp.now().isoformat()
-        with open(meta_path, 'w') as f:
-            json.dump(self.metadata, f, indent=2)
 
-        print(f"  Model saved: {model_path}")
+        # Atomic write (temp + os.replace) so a parallel live process never
+        # reads a partial model; meta is written last and its saved_at marks a
+        # fully-persisted model for hot-swap detection.
+        tmp_fd, tmp_model = tempfile.mkstemp(
+            dir=str(self.model_dir), suffix=".tmp"
+        )
+        os.close(tmp_fd)
+        try:
+            if self.metadata.get("multi_output"):
+                import joblib
+                joblib.dump(self.model, tmp_model)
+            else:
+                self.model.save_model(tmp_model)
+            os.replace(tmp_model, str(friendly_path))
+        finally:
+            if os.path.exists(tmp_model):
+                os.unlink(tmp_model)
+
+        tmp_meta = str(meta_path) + ".tmp"
+        with open(tmp_meta, 'w') as f:
+            json.dump(self.metadata, f, indent=2)
+        os.replace(tmp_meta, str(meta_path))
+
+        print(f"  Model saved: {friendly_path}")
         print(f"  Meta saved:  {meta_path}")
-        return model_path, meta_path
+        return friendly_path, meta_path
 
     def load(
         self,
@@ -443,3 +462,77 @@ def load_strategic_model(model_dir: str = MODEL_DIR) -> CatBoostModel:
     model = CatBoostModel(model_type="strategic", model_dir=model_dir)
     model.load()
     return model
+
+
+# ── Phase 1: Fast Fit + Tactical Persistence ───────────────────────────
+def fit_tactical_regressor(
+    df: pd.DataFrame,
+    feature_cols: List[str],
+    params: dict = None,
+) -> CatBoostRegressor:
+    """
+    Fit a raw CatBoostRegressor using a catboost Pool for faster training.
+
+    Used by walk-forward retraining (live + backtest). Intersects
+    `feature_cols` with the columns actually present in df, fills NaN with 0,
+    and fits verbose=False.
+
+    Raises:
+        ValueError: If df is empty or no usable feature columns remain.
+    """
+    if df is None or len(df) == 0:
+        raise ValueError("fit_tactical_regressor: empty training DataFrame")
+
+    feats = [c for c in feature_cols if c in df.columns]
+    if not feats:
+        raise ValueError("fit_tactical_regressor: no usable feature columns")
+
+    fit_params = dict(params or TACTICAL_MODEL_PARAMS)
+    fit_params["verbose"] = False
+    pool = Pool(df[feats].fillna(0), df[TARGET_COLUMN].fillna(0))
+    model = CatBoostRegressor(**fit_params)
+    model.fit(pool)
+    return model
+
+
+def save_tactical_model(
+    model: CatBoostRegressor,
+    model_dir: str,
+    feature_cols: List[str],
+) -> Tuple[Path, Path]:
+    """
+    Atomically persist a raw tactical CatBoostRegressor + meta JSON.
+
+    Writes `model_tactical.cbm` and `model_tactical_meta.json` in the same
+    format CatBoostModel.save() uses, so a restarted live loop hot-swaps the
+    persisted model via strategy._refresh_models() and skips the warmup.
+
+    Returns:
+        (model_path, meta_path)
+    """
+    import tempfile
+    model_dir_path = Path(model_dir)
+    model_dir_path.mkdir(parents=True, exist_ok=True)
+    model_path = model_dir_path / "model_tactical.cbm"
+    meta_path = model_dir_path / "model_tactical_meta.json"
+
+    tmp_fd, tmp_model = tempfile.mkstemp(dir=str(model_dir_path), suffix=".tmp")
+    os.close(tmp_fd)
+    try:
+        model.save_model(tmp_model)
+        os.replace(tmp_model, str(model_path))
+    finally:
+        if os.path.exists(tmp_model):
+            os.unlink(tmp_model)
+
+    meta = {
+        "model_type": "tactical",
+        "feature_cols": list(feature_cols),
+        "saved_at": pd.Timestamp.now().isoformat(),
+    }
+    tmp_meta = str(meta_path) + ".tmp"
+    with open(tmp_meta, "w") as f:
+        json.dump(meta, f, indent=2)
+    os.replace(tmp_meta, str(meta_path))
+
+    return model_path, meta_path

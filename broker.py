@@ -20,9 +20,11 @@ from binance.client import Client
 from binance.enums import *
 from binance.exceptions import BinanceAPIException
 
+import config
 from config import (
     SYMBOL, TACTICAL_TF, STRATEGIC_TF,
     INITIAL_EQUITY, FEE, SLIPPAGE,
+    is_testnet_env,
 )
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -303,7 +305,8 @@ class BaseBroker(ABC):
 
     def _klines_cache_ttl(self, timeframe: str) -> float:
         minutes = self._parse_timeframe_to_minutes(timeframe)
-        return max(30.0, minutes * 0.8 * 60.0)
+        base_ttl = max(30.0, minutes * 0.8 * 60.0)
+        return min(base_ttl, getattr(config, "KLINE_CACHE_TTL_LIVE", 60))
 
     def get_historical_prices(
         self,
@@ -360,6 +363,36 @@ class BaseBroker(ABC):
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         raise NotImplementedError
 
+    def get_historical_prices_multi(
+        self,
+        symbol: str,
+        requests: List[Tuple[int, str]],
+    ) -> Dict[str, pd.DataFrame]:
+        """
+        Fetch multiple (length, timeframe) klines requests in parallel.
+
+        Each worker calls the existing get_historical_prices, so the klines
+        cache and the rate limiter are shared and respected. Workers serialize
+        on the rate limiter; independent requests overlap their network time.
+
+        Returns:
+            Dict mapping timeframe -> df for successful fetches (None skipped).
+        """
+        from concurrent.futures import ThreadPoolExecutor
+
+        workers = getattr(config, "PARALLEL_FETCH_WORKERS", 3) or 1
+
+        def _fetch(req: Tuple[int, str]) -> Tuple[str, Optional[pd.DataFrame]]:
+            length, timeframe = req
+            return timeframe, self.get_historical_prices(symbol, length, timeframe)
+
+        results: Dict[str, pd.DataFrame] = {}
+        with ThreadPoolExecutor(max_workers=workers) as executor:
+            for timeframe, df in executor.map(_fetch, requests):
+                if df is not None:
+                    results[timeframe] = df
+        return results
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # Binance Futures Broker (from original binancefuturesbroker.py)
@@ -368,21 +401,23 @@ class BaseBroker(ABC):
 class BinanceBroker(BaseBroker):
     """
     Binance Futures broker with rate limiter, caching, and bracket orders.
-    Uses testnet by default.
+    Environment selected via TRADING_ENV (config): testnet=debug, mainnet=production.
     """
 
     def __init__(
         self,
         api_key: str = "",
         api_secret: str = "",
-        testnet: bool = True,
+        testnet: Optional[bool] = None,
         symbol: str = SYMBOL,
     ):
         super().__init__()
         self.symbol = symbol
         self.api_key = api_key
         self.api_secret = api_secret
-        self.testnet = testnet
+        # None → inherit from TRADING_ENV so callers who omit the flag follow
+        # the configured environment (testnet by default, mainnet in production).
+        self.testnet = is_testnet_env() if testnet is None else testnet
         self.client = None
         self.setup_client()
 
@@ -696,9 +731,14 @@ class BinanceBroker(BaseBroker):
         )
 
     def _quantize_qty(self, qty: float) -> float:
-        """Floor-quantize quantity to the symbol's step size."""
+        """Floor-quantize quantity to the symbol's step size.
+
+        Rounds the floored result to the precision so float artifacts like
+        (0.009405 // 0.001) * 0.001 == 0.009000000000000001 never reach the
+        exchange (Binance rejects >step-size decimals with error -1111).
+        """
         step = 10 ** (-TRADEABLE_QUANTITY_PRECISION)
-        return (qty // step) * step
+        return round((qty // step) * step, TRADEABLE_QUANTITY_PRECISION)
 
     def cancel_open_orders(self, symbol: str = None, max_retries: int = 3, base_delay: float = 0.5):
         sym = symbol or self.symbol
@@ -758,6 +798,119 @@ class BinanceBroker(BaseBroker):
         except Exception as e:
             self.logger.error(f"Close position failed for {sym}: {e}")
             return None
+
+    def scale_in(self, symbol: str, side: str, quantity: float) -> Optional[PositionResult]:
+        """
+        Add to an existing position with an additional market order (position scaling).
+
+        Returns:
+            Updated PositionResult (exchange's weighted-average entry_price) or
+            None if the order failed or no position is held.
+        """
+        sym = symbol or self.symbol
+        qty = self._quantize_qty(quantity)
+        if qty < MIN_TRADEABLE_QUANTITY:
+            self.logger.warning(
+                f"Scale-in qty {qty:.6f} below minimum {MIN_TRADEABLE_QUANTITY}"
+            )
+            return None
+        result = self._create_market_order(sym, side, qty)
+        if result is None:
+            self.logger.error(f"Scale-in order failed for {sym}")
+            return None
+        return self.get_position(sym)
+
+    def close_position_fraction(self, symbol: str = None, fraction: float = None) -> Optional[float]:
+        """
+        Close a fraction of the open position (partial exit).
+
+        Args:
+            fraction: fraction in [0.0, 1.0] of the position to close.
+                      fraction >= 1.0 delegates to close_position (full close).
+
+        Returns:
+            Fill price, or None if no position / order failed.
+        """
+        sym = symbol or self.symbol
+        if fraction is None:
+            return None
+        clamped = float(np.clip(fraction, 0.0, 1.0))
+        if clamped <= 0.0:
+            return None
+        if clamped >= 1.0:
+            return self.close_position(sym)
+
+        pos = self.get_position(sym)
+        if pos is None or not pos.amount:
+            return None
+        close_qty = self._quantize_qty(abs(pos.amount) * clamped)
+        if close_qty < MIN_TRADEABLE_QUANTITY:
+            self.logger.warning(
+                f"Partial-close qty {close_qty:.6f} below minimum {MIN_TRADEABLE_QUANTITY}; skipping"
+            )
+            return None
+        side = SIDE_SELL if pos.amount > 0 else SIDE_BUY
+        try:
+            order = self.client.futures_create_order(
+                symbol=sym,
+                side=side,
+                type=ORDER_TYPE_MARKET,
+                quantity=close_qty,
+                reduceOnly=True,
+            )
+            executed_qty = order.get("executedQty", "0")
+            cum_quote = order.get("cumQuote", "0")
+            fill_price = None
+            if executed_qty and float(executed_qty) > 0 and cum_quote and float(cum_quote) > 0:
+                fill_price = float(cum_quote) / float(executed_qty)
+            if fill_price is None:
+                avg_price = order.get("avgPrice")
+                if avg_price:
+                    fill_price = float(avg_price)
+            self.logger.info(
+                f"Partial close: {sym} qty={close_qty:.4f} ({clamped:.0%}) "
+                f"fill={fill_price if fill_price else 0:.2f}"
+            )
+            return fill_price
+        except Exception as e:
+            self.logger.error(f"Partial close failed for {sym}: {e}")
+            return None
+
+    def replace_bracket_order(
+        self,
+        symbol: str,
+        amount: float,
+        side: str,
+        tp_frac: float = 0.02,
+        sl_frac: float = 0.01,
+    ) -> Optional[BracketOrderResult]:
+        """
+        Cancel existing conditional orders and re-place the TP/SL bracket on an
+        (enlarged) position, using the current entry price as the reference.
+
+        Used after a scale-in so the stop/take levels follow the weighted-
+        average entry of the scaled position (plan Phase 3).
+
+        Returns:
+            New BracketOrderResult, or None if position/entry unavailable or placement failed.
+        """
+        sym = symbol or self.symbol
+        pos = self.get_position(sym)
+        if pos is None or not pos.entry_price or pos.entry_price <= 0:
+            self.logger.warning(f"Replace bracket: no entry price for {sym}")
+            return None
+
+        self.cancel_open_orders(sym)
+
+        entry_price = pos.entry_price
+        if side == SIDE_BUY:
+            tp_price = round(entry_price * (1 + tp_frac), 2)
+            sl_price = round(entry_price * (1 - sl_frac), 2)
+        else:
+            tp_price = round(entry_price * (1 - tp_frac), 2)
+            sl_price = round(entry_price * (1 + sl_frac), 2)
+
+        return self._create_bracket_order(sym, amount, side, tp_price, sl_price)
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
@@ -839,7 +992,7 @@ def create_broker(
         return BinanceBroker(
             api_key=kwargs.get('api_key', ''),
             api_secret=kwargs.get('api_secret', ''),
-            testnet=kwargs.get('testnet', True),
+            testnet=kwargs.get('testnet'),  # None → TRADING_ENV default
             symbol=kwargs.get('symbol', SYMBOL),
         )
     else:

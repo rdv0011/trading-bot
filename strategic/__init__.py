@@ -1,2 +1,0 @@
-from strategic.strategicml import StrategicML
-from positionmanager import StrategicDecision

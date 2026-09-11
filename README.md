@@ -1,221 +1,331 @@
-# Trading Bot
+# Dual-ML Bitcoin Trading Bot (Simplified)
 
-A modular crypto trading bot powered by **CatBoost** and **pandas**, built around a two-tier machine learning system for live futures and spot trading on Binance.
+Minimal dual-ML trading system for BTCUSDT futures with simulation vs demo comparison.
 
-Inspired by:
-* [Real-time head-to-head adaptive modeling](https://emergentmethods.medium.com/real-time-head-to-head-adaptive-modeling-of-financial-market-data-using-xgboost-and-catboost-995a115a7495)
-* [FreqAI: from price to prediction](https://emergentmethods.medium.com/freqai-from-price-to-prediction-6fadac18b665)
+## Architecture
 
----
-
-## How it works
-
-The bot runs two ML models simultaneously:
-
-**Tier 1 — TacticalML (5m, ephemeral)**
-Retrained from scratch on every candle using a rolling window of recent 5m data. Never saved to disk. Produces `LONG`, `SHORT`, or `HOLD` signals using adaptive min/max thresholds computed from prediction history.
-
-**Tier 2 — StrategicML (1h, persisted)**
-Trained offline on historical data and saved to `model/`. Loaded at startup and hot-swapped at runtime when a new model file appears. Controls leverage, position sizing, stop-loss, take-profit, and max hold time. Acts as a gatekeeper: if it detects extreme volatility or a choppy regime, no trades are opened regardless of what TacticalML signals.
-
-By default the strategic model is trained using rule-based labels derived from market regime and volatility. With `--optimize-params` it instead uses **simulation-driven labels**: a walk-forward search evaluates a grid of trading parameters against the actual tactical signal and labels each window with the combination that maximised the objective score. This makes StrategicML learn parameters that performed best historically rather than parameters that replicate hand-coded rules.
-
-**PositionManager**
-Sits between the two models and the broker. Tracks open positions and implements:
-- *Consecutive signal scaling*: two consecutive signals in the same direction increase the position size
-- *Gradual close*: each signal in the opposite direction closes a fraction of the position
-- *Veto enforcement*: immediately closes any open position when StrategicML blocks trading
-
-**RiskGuard**
-A circuit breaker that enforces hard limits on daily loss, drawdown, and leverage. Configured via `parameters` in the strategy and checked before every trade.
-
----
-
-## Installation
-
-```bash
-gh repo clone rdv0011/trading-bot
-cd trading-bot
-conda env create -f environment.yml
-conda activate tradingbot
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      Dual-ML Architecture                   │
+├─────────────────────────────────────────────────────────────┤
+│                                                             │
+│  ┌─────────────────┐      ┌─────────────────┐              │
+│  │ Tactical ML     │      │ Strategic ML    │              │
+│  │ (15m)           │      │ (1h)            │              │
+│  │                 │      │                 │              │
+│  │ - Walk-forward  │      │ - Batch predict │              │
+│  │ - Retrain every │──────│ - Meta-params:  │              │
+│  │   N candles     │      │   stake, SL, TP,│              │
+│  │ - Predicts:     │      │   leverage,     │              │
+│  │   future_ret    │      │   regime        │              │
+│  └────────┬────────┘      └────────┬────────┘              │
+│           │                        │                        │
+│           ▼                        ▼                        │
+│  ┌─────────────────┐      ┌─────────────────┐              │
+│  │ Signal Logic    │      │ Position Mgmt   │              │
+│  │ pred > thr →    │      │ stake × equity  │              │
+│  │   LONG          │      │ SL/TP brackets  │              │
+│  │ pred < -thr →   │      │ Max hold time   │              │
+│  │   SHORT         │      │                 │              │
+│  └─────────────────┘      └─────────────────┘              │
+│                                                             │
+└─────────────────────────────────────────────────────────────┘
 ```
 
----
+## Files
 
-## Usage
+| File | Purpose |
+|------|---------|
+| `main.py` | CLI entry point: train, simulate, live, compare |
+| `config.py` | All hyperparameters in one place |
+| `data.py` | Download, features, labels, train/val split |
+| `model.py` | CatBoost models (tactical + strategic) |
+| `simulate.py` | MockBroker + validation backtest |
+| `broker.py` | BinanceBroker (live) + MockBroker (sim) |
+| `strategy.py` | Dual-ML strategy logic |
+| `logger.py` | Console + file + trade CSV logging |
+| `compare.py` | Sim vs Demo comparison + HTML report |
+| `utils.py` | Shared utilities |
+| `fancontrol/` | GPIO PWM fan controller (systemd + libgpiod v2) — runs independently of the bot |
+| `keepawake/` | macOS LaunchAgent to keep the host awake 24/7 |
 
-### Run the bot
-
-```bash
-python main.py
-```
-
-Runs the dual-ML strategy on Binance Futures testnet by default.
-
-```bash
-python main.py --market-type futures --strategy dual
-```
-
-Available flags:
-
-| Flag | Values | Default | Description |
-|------|--------|---------|-------------|
-| `--market-type` | `futures`, `spot` | `futures` | Binance market |
-| `--strategy` | `dual`, `legacy` | `dual` | `dual` = two-tier ML, `legacy` = original single-ML |
-
----
-
-### Train the strategic model
-
-The strategic model must be trained before the first run. Training fetches historical data from Binance (public endpoint — no API credentials required) and saves the model to `model/`.
-
-#### Rule-based training (fast, default)
-
-Labels are derived from market regime and volatility heuristics.
+## Quick Start
 
 ```bash
-python main.py --train-strategic --strategic-days 25
+# 1. Install dependencies
+pip install catboost pandas numpy scikit-learn python-dotenv
+
+# 2. Create .env file from template
+cp .env.example .env
+# Edit .env and add your Binance testnet API credentials
+
+# 3. Train both models
+python main.py train
+
+# 4. Run simulation on validation data
+python main.py simulate
+
+# 5. Compare simulation vs demo logs
+python main.py compare
 ```
 
-Or directly via the training script:
+## Environment Variables (.env)
+
+The bot reads all configuration from a `.env` file in the repo root. Copy `.env.example` to `.env` and fill in your credentials:
 
 ```bash
-python strategic/strategictraining.py --symbol BTCUSDT --days 25 --timeframe 1h
+# Required for live/testnet trading
+BINANCE_TESTNET_FUTURES_API_KEY=your_testnet_futures_api_key
+BINANCE_TESTNET_FUTURES_API_SECRET=your_testnet_futures_api_secret
+
+# Optional: for spot trading
+# BINANCE_TESTNET_SPOT_API_KEY=
+# BINANCE_TESTNET_SPOT_API_SECRET=
+
+# Optional: override defaults
+# SYMBOL=BTCUSDT
+# MARKET_TYPE=futures
+# TESTNET=true
+# SLEEPTIME=5m
 ```
 
-#### Simulation-driven training (recommended)
+Get testnet API keys from: https://testnet.binance.vision/
 
-Labels are produced by a walk-forward parameter search: for each 24h window the parameter combination that maximised the trading objective score against the tactical signal is selected as the training target. Requires generating 5m tactical predictions first (controlled by `--tactical-days`).
+## Modes
+
+### Train Mode
+
+Downloads historical data, engineers features, and trains both models:
 
 ```bash
-python main.py --train-strategic --optimize-params --strategic-days 25 --tactical-days 25
+python main.py train --symbol BTCUSDT --days 90
 ```
 
-Available flags for `--train-strategic`:
+**What it does:**
+1. Downloads 90 days of 15m + 1h candles from Binance testnet
+2. Engineers features: returns, EMAs, ATR, volatility, time encoding, regime
+3. Generates labels: future_ret (4 candles ahead for 15m)
+4. Splits chronologically: 80% train, 20% validation
+5. Trains tactical model (CatBoost, iterations=100)
+6. Trains strategic model (CatBoost, iterations=300)
+7. Saves to `models/` directory
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--strategic-days` | `365` | Days of 1h historical data for strategic model training |
-| `--strategic-timeframe` | `1h` | Candle interval for strategic features |
-| `--optimize-params` | off | Use simulation-driven parameter optimisation |
-| `--tactical-days` | `45` | Days of 5m data for walk-forward param search (requires `--optimize-params`) |
+**Output:**
+```
+models/
+├── model_tactical.cbm      # Tactical CatBoost model
+├── model_tactical_meta.json # Tactical metadata
+├── model_strategic.cbm      # Strategic CatBoost model
+└── model_strategic_meta.json # Strategic metadata
+```
 
-##### Choosing these values
+### Simulate Mode
 
-`--strategic-days` controls the **feature context window** (1h data). It should cover several market regime cycles so EMAs, volatility ratios, and regime detection are stable. 180d (~6 months) is a solid middle ground. Compute cost is negligible (cached after first run).
-
-`--tactical-days` controls the **label window** (5m data). It determines how much data feeds the walk-forward param search — the expensive part (~12,960 CatBoost fits for 45d). It also sets how much 1h training data survives after the inner join (only the overlap between both windows is labeled). 25–45d is the sweet spot: enough for stable walk-forward selection, short enough to reflect recent market microstructure.
-
-The two windows stack — features in the overlap benefit from the full strategic-days lookback. A typical combo: `--strategic-days 180 --tactical-days 45` → 6 months of feature history supports a focused 45-day label window (~1,080 1h training rows, ~449 walk-forward windows).
-
-The trained model is saved with a UTC timestamp (e.g. `strategic_meta_model_20260101T020000Z.pkl`). The running bot detects the new file and hot-swaps it automatically — no restart needed.
-
----
-
-### Run a backtest
-
-`dualmlsimulation.py` runs a full walk-forward backtest of the two-tier system over historical data without touching the live broker.
+Runs backtest on validation data with MockBroker:
 
 ```bash
-python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 5m
+python main.py simulate --model-dir models/
 ```
 
-Available flags:
+**What it does:**
+1. Loads validation data
+2. Loads both models
+3. Runs walk-forward tactical predictions (retrains every 100 candles)
+4. Gets strategic meta-parameters (batch prediction)
+5. Simulates trades with MockBroker (fees, slippage, brackets)
+6. Calculates metrics (return, Sharpe, drawdown, win rate)
+7. Saves trades CSV + equity curve
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `--symbol` | `BTCUSDT` | Trading pair |
-| `--days` | `45` | Days of historical data to simulate |
-| `--timeframe` | `5m` | Candle interval for tactical predictions |
-| `--model-dir` | `model/` | Directory containing the trained strategic model |
+**Output:**
+```
+logs/
+├── trades_sim_20260831_223000.csv  # All simulated trades
+└── equity_sim_20260831_223000.csv  # Equity curve
+```
 
-The script produces three files in `labeleddata/`:
+**Metrics:**
+- Total return %
+- Sharpe ratio
+- Max drawdown %
+- Win rate
+- Profit factor
+- Average trade PnL
 
-| File | Contents |
-|------|----------|
-| `dual_*_featured.csv` | 5m OHLCV with tactical features and labels |
-| `dual_*_predictions.csv` | Walk-forward tactical predictions over the full window |
-| `dual_*_final_test_sim.csv` | Simulated trades with wallet, PnL, entry/exit prices, and fees |
+### Live Mode
 
-Set `USE_SAVED_FEATURED = True` or `USE_SAVED_PREDICTIONS = True` at the top of the script to skip re-computation on repeated runs.
-
-#### Data breakdown
-
-For `--days 180 --timeframe 5m` the 180-day window is used as follows:
-
-| Phase | Rows | Calendar time |
-|---|---|---|
-| Raw fetch from Binance | ~51,840 | 180 days |
-| Feature engineering warmup (dropped) | ~68 | ~6 hours |
-| TacticalML training window (first predictions skipped) | 600 | 50 hours |
-| Walk-forward training — 80% of predictions, not traded | ~40,938 | ~142 days |
-| **Simulation / backtest — 20% of predictions, traded** | **~10,234** | **~36 days** |
-
-The backtest trades only the last ~36 days. The preceding ~144 days exist so TacticalML has enough history to produce well-calibrated predictions before the test period begins — the model never sees the test period during training.
-
-To read the results from the terminal:
+Runs live trading on Binance testnet (reads API keys from .env):
 
 ```bash
-python -c "
-import pandas as pd
-df = pd.read_csv('labeleddata/dual_BTCUSDT_5m_25d_final_test_sim.csv', index_col=0)
-trades = (df['wallet'].diff().abs() > 0).sum()
-start, end = df['wallet'].iloc[0], df['wallet'].iloc[-1]
-print(f'Trades: {trades}   Wallet: {start:.5f} → {end:.5f}   PnL: {(end-1)*100:+.3f}%')
-"
+python main.py live \
+  --sleep 60 \
+  --model-dir models/
 ```
 
----
+**Features:**
+- Rate limiter (1000 weight/min)
+- Circuit breaker on -1003 errors
+- Position caching (2s TTL)
+- Bracket orders (TP/SL)
+- Daily trade logging
 
-### Recommended workflow for 25 days
+### Compare Mode
 
-Run these three commands in order. Each step caches its output so re-runs are fast.
+Compares simulation vs demo trading logs:
 
 ```bash
-# 1. Train the strategic model with simulation-driven parameter optimisation
-python main.py --train-strategic --optimize-params --strategic-days 25 --tactical-days 25
-
-# 2. Run the full dual-ML backtest
-python dualmlsimulation.py --symbol BTCUSDT --days 25 --timeframe 5m
-
-# 3. Start the live bot (uses the model trained in step 1)
-python main.py
+python main.py compare \
+  --log-dir logs/ \
+  --demo-pattern "trading_*.log" \
+  --sim-pattern "trades_sim_*.csv" \
+  --output logs/comparison_report.html
 ```
 
-Note: step 1 (`--train-strategic`) does **not** report theoretical profit — it prints dataset sizes, validation RMSE, and saves the model. Profit output comes from step 2 (`dualmlsimulation.py`), which prints final wallet, win rate, and mean return to the console and saves the per-candle wallet history to `labeleddata/dual_*_final_test_sim.csv`.
+**What it does:**
+1. Parses demo log files (extracts trades)
+2. Loads simulation trade CSVs
+3. Aligns trades by timestamp
+4. Calculates aggregate metrics comparison
+5. Generates HTML report with charts
 
----
+**Report includes:**
+- Summary metrics table
+- Win rate comparison
+- PnL by regime (trend, chop, high_vol)
+- Trade-by-trade comparison
+- Entry/exit price differences
 
-### Schedule periodic retraining with cron
+## Configuration
 
-The strategic model should be retrained daily to stay current with market conditions. To set this up:
+All parameters in `config.py` with `.env` overrides:
 
-1. Find your conda environment path:
-```bash
-conda env list
+Configuration is loaded from `config.py` which reads `.env` file at startup. All values below can be overridden via environment variables:
+
+```python
+# Data (overridable via .env)
+SYMBOL = "BTCUSDT"                    # SYMBOL
+TACTICAL_TF = "15m"                   # TACTICAL_TIMEFRAME
+STRATEGIC_TF = "1h"                   # STRATEGIC_TIMEFRAME
+HISTORY_DAYS = 90                     # STRATEGIC_DAYS
+TRAIN_FRACTION = 0.8
+
+# Features
+FEATURE_LAGS = [1, 2, 3, 5, 10, 20, 50]
+EMA_SPANS = [5, 10, 20, 50, 100]
+ATR_PERIOD = 14
+LABEL_HORIZON = 4  # 4 candles = 1 hour ahead
+
+# Tactical Model
+TACTICAL_MODEL_PARAMS = {
+    "iterations": 100,                # TACTICAL_ITERATIONS
+    "depth": 6,
+    "learning_rate": 0.05,
+    "loss_function": "RMSE",
+}
+
+# Strategic Model
+STRATEGIC_MODEL_PARAMS = {
+    "iterations": 300,                # STRATEGIC_ITERATIONS
+    "depth": 8,
+    "learning_rate": 0.03,
+    "loss_function": "RMSE",
+}
+
+# Trading Defaults
+STAKE_LONG_FRAC_DEFAULT = 0.10
+STAKE_SHORT_FRAC_DEFAULT = 0.05
+STOP_LOSS_FRAC_DEFAULT = 0.02
+TAKE_PROFIT_FRAC_DEFAULT = 0.04
+MAX_HOLD_HOURS_DEFAULT = 4.0
+LEVERAGE_DEFAULT = 1.0                # LEVERAGE
+
+# Signal Threshold
+ABSOLUTE_THRESHOLD = 0.003
+
+# Simulation
+INITIAL_EQUITY = 1.0
+FEE = 0.0004                          # SIMULATION_FEE
+SLIPPAGE = 0.0003                     # SIMULATION_SLIPPAGE
+WALKFORWARD_RETRAIN_EVERY = 100
+
+# API Credentials (from .env only, NOT hardcoded)
+# BINANCE_TESTNET_FUTURES_API_KEY
+# BINANCE_TESTNET_FUTURES_API_SECRET
+# BINANCE_TESTNET_SPOT_API_KEY
+# BINANCE_TESTNET_SPOT_API_SECRET
 ```
 
-2. Open crontab:
-```bash
-crontab -e
+**Environment variable overrides** (set in `.env`):
+- `SYMBOL` - Trading pair (default: BTCUSDT)
+- `MARKET_TYPE` - futures or spot (default: futures)
+- `TESTNET` - true/false (default: true)
+- `TACTICAL_TIMEFRAME` - Tactical timeframe (default: 5m)
+- `STRATEGIC_TIMEFRAME` - Strategic timeframe (default: 1h)
+- `STRATEGIC_DAYS` - Strategic training days (default: 365)
+- `TACTICAL_DAYS` - Tactical training days (default: 45)
+- `TACTICAL_ITERATIONS` - Tactical model iterations (default: 300)
+- `STRATEGIC_ITERATIONS` - Strategic model iterations (default: 300)
+- `LEVERAGE` - Default leverage (default: 1.0)
+- `SIMULATION_FEE` - Fee per side (default: 0.0004)
+- `SIMULATION_SLIPPAGE` - Fixed slippage (default: 0.0003)
+- `WALKFORWARD_RETRAIN_EVERY` - Retrain interval (default: 100)
+
+**Required for live trading** (in `.env`):
+- `BINANCE_TESTNET_FUTURES_API_KEY` / `BINANCE_TESTNET_FUTURES_API_SECRET`
+- `BINANCE_TESTNET_SPOT_API_KEY` / `BINANCE_TESTNET_SPOT_API_SECRET` (for spot)
+
+## Features
+
+| Feature | Description |
+|---------|-------------|
+| Walk-forward | Tactical model retrains every 100 candles |
+| Regime detection | trend / chop / high_vol classification |
+| Bracket orders | Automatic TP/SL on entry |
+| Rate limiting | 1000 weight/min with circuit breaker |
+| Position caching | 2s TTL to reduce API calls |
+| Daily logging | Rotating log files with 10-day retention |
+| Trade CSV | Detailed trade log for analysis |
+
+## Logs
+
+### Daily Log File
 ```
-
-3. Add this line (replace `<user>` and `<repo_path>`):
-```bash
-0 2 * * * /bin/bash -i -c "source /Users/<user>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<repo_path>/main.py --train-strategic >> /Users/<repo_path>/training.log 2>&1"
+logs/trading_2026-08-31.log
 ```
+Contains all DEBUG/INFO/WARNING messages with timestamps.
 
-This runs rule-based training at 2:00 AM daily. The bot picks up the new model automatically on the next prediction cycle. To use simulation-driven training in cron instead, add `--optimize-params`:
-
-```bash
-0 2 * * * /bin/bash -i -c "source /Users/<user>/miniconda3/etc/profile.d/conda.sh && conda activate tradingbot && python /Users/<repo_path>/main.py --train-strategic --optimize-params >> /Users/<repo_path>/training.log 2>&1"
+### Trade CSV
 ```
+logs/trades_2026-08-31.csv
+```
+One row per completed trade with:
+- Timestamp, symbol, side, entry/exit prices
+- PnL, regime, exit reason
+- Tactical prediction, strategic parameters
 
----
+### Equity Curve
+```
+logs/equity_2026-08-31.csv
+```
+Timestamped equity values for plotting.
 
-## Running 24/7 on Mac Mini
+## Regime Logic
 
-To prevent the machine from sleeping:
+| Regime | Condition | Stake Multiplier |
+|--------|-----------|------------------|
+| trend | trend_strength > 0.4, vol_ratio ≤ 1.4 | 1.0 |
+| high_vol | vol_ratio > 1.4 | 0.5 |
+| chop | trend_strength < 0.4 | 0.3 |
+
+## Exit Conditions
+
+1. **Stop Loss**: PnL ≤ -stop_loss_frac (default 2%)
+2. **Take Profit**: PnL ≥ take_profit_frac (default 4%)
+3. **Max Hold**: Time in position ≥ max_hold_hours (default 4h)
+4. **Signal Reversal**: Opposite signal while in position
+
+## Running 24/7 on a Mac
+
+To prevent the machine from sleeping while the bot runs:
 
 ```bash
 keepawake/keepawake.sh
@@ -227,13 +337,18 @@ To cancel:
 keepawake/cancelkeepawake.sh
 ```
 
+The `keepawake/` folder installs a macOS LaunchAgent
+(`com.keepawake.caffeinate.plist`) that runs `/usr/bin/caffeinate -dimsu`.
+This is host-level maintenance — it runs independently of the bot code.
+
 ---
 
 ## Fan Control (CPU Cooling)
 
-During heavy training the CPU runs at 100% for extended periods.  The
+During heavy training the CPU runs at 100% for extended periods. The
 `fancontrol/` folder contains a libgpiod v2 PWM fan controller that
-ramps fan speed based on CPU temperature, managed as a systemd service.
+ramps fan speed based on CPU temperature, managed as a **separate
+systemd service** — it runs on its own and never interacts with the bot code.
 
 ### Quick Start (Radxa Zero 3W)
 
@@ -266,52 +381,28 @@ sudo python3 /usr/local/bin/fan_pwm.py
 
 ### Full Documentation
 
-See **[`plans/update_fan_control.md`](plans/update_fan_control.md)** for:
-
-- Hardware verification and setup
-- Temperature curve tuning
-- Stress testing with `stress-ng`
-- Service management commands
-- Logs via `journalctl`
+- **[`fancontrol/README.md`](fancontrol/README.md)** — hardware wiring, circuit diagram, prerequisites
+- **[`fancontrol/UPDATE_FAN_CONTROL.md`](fancontrol/UPDATE_FAN_CONTROL.md)** — full setup guide: hardware verification, temperature curve tuning, stress testing with `stress-ng`, service management, logs via `journalctl`
 
 ---
 
-## Project structure
+## Troubleshooting
 
+### "No validation data found"
+Run `python main.py train` first to create train/val splits.
+
+### "Model not loaded"
+Ensure `models/` directory exists with trained models.
+
+### "Rate-limit cooldown"
+Normal behavior. Wait for cooldown period (exponential backoff up to 5min).
+
+### API connection failed
+Check API keys are set in `.env`:
+```bash
+cat .env | grep BINANCE
 ```
-main.py                        Entry point and CLI
-basestrategy.py                Abstract strategy loop (initialize / on_trading_iteration)
-dualmlstrategy.py              Two-tier ML strategy (default)
-mlstrategy.py                  Legacy single-ML strategy
-
-tactical/
-  tacticalml.py                Ephemeral 5m predictor, retrained every candle
-
-strategic/
-  strategicml.py               Persisted strategic model with hot-swap
-  strategicfeatures.py         Multi-timeframe feature engineering for strategic model
-  strategictraining.py         CLI training script (rule-based labels)
-
-positionmanager.py             Position state, scaling, partial close, veto logic
-riskguard.py                   Daily loss / drawdown / leverage circuit breaker
-
-dualmlsimulation.py            Walk-forward backtest of the full two-tier system
-
-mltrainingcore.py              Shared feature engineering, label generation, simulation
-mltraining.py                  Walk-forward param optimisation (used by strategictraining)
-mlio.py                        Model and data I/O utilities
-timeframe_config.py            Timeframe presets (5m / 15m / 1h / 4h)
-
-fancontrol/                    GPIO PWM fan controller (systemd + libgpiod v2)
-  fan_pwm.py                   CPU-temperature-based PWM controller script
-  fan-pwm.service              systemd unit for automatic startup
-
-binancebasebroker.py           Abstract broker interface
-binancefuturesbroker.py        Binance Futures implementation
-binancespotbroker.py           Binance Spot implementation
-binancebrokerfactory.py        Broker factory
-
-model/                         Trained strategic model (one file, timestamped)
-labeleddata/                   Cached feature datasets and simulation outputs
-tests/                         Unit test suite (99 tests)
+Or verify the config module loads them:
+```bash
+python -c "from config import validate_credentials; validate_credentials('futures', True)"
 ```

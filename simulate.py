@@ -10,14 +10,31 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 import json
 
+import config as _config
 from config import (
     INITIAL_EQUITY, FEE, SLIPPAGE,
     ABSOLUTE_THRESHOLD,
     STAKE_LONG_FRAC_DEFAULT, STAKE_SHORT_FRAC_DEFAULT,
     STOP_LOSS_FRAC_DEFAULT, TAKE_PROFIT_FRAC_DEFAULT,
     MAX_HOLD_HOURS_DEFAULT, LEVERAGE_DEFAULT,
+    ADAPTIVE_THRESHOLD_ENABLED, ADAPTIVE_LOOKBACK, ADAPTIVE_QUANTILE,
+    ADAPTIVE_MIN_THRESHOLD, ADAPTIVE_MAX_THRESHOLD,
+    TRAILING_STOP_ENABLED, TRAILING_ATR_MULT, TRAILING_BREAKEVEN_MULT,
+    GATE_EXTREME_VOL, EXTREME_VOL_RATIO,
+    SCALING_ENABLED, MAX_SCALE_COUNT, SCALE_CONFIRM_BARS, SCALE_STAKE_FRAC,
+    PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION, REVERSAL_FULL_CLOSE_STREAK,
+    TRADE_COOLDOWN_ENABLED, TRADE_COOLDOWN_MINUTES,
 )
+from data import adaptive_threshold, classify_vol_state
 from logger import log_trade_entry, log_trade_exit, log_equity, log_info, log_debug
+
+
+def _cfg_flag(name: str, default: Any, cfg: Any = None) -> Any:
+    """Read a runtime flag from an optional config object (falls back to the
+    real/mocked module-level config). Tests pass plain configs lacking the new
+    Phase 1-3 flags; module-level defaults keep legacy behavior."""
+    src = cfg if cfg is not None else _config
+    return getattr(src, name, default)
 
 
 # ── MockBroker ──────────────────────────────────────────────────────────
@@ -46,6 +63,13 @@ class MockBroker:
         self.entry_price = 0.0
         self.entry_time: Optional[datetime] = None
         self.entry_equity = initial_equity
+
+        # Phase 2/3 state (mirrored in live strategy)
+        self.trail_extreme = 0.0
+        self.scale_count = 0
+        self.same_dir_streak = 0
+        self.reversal_streak = 0
+        self.last_entry_time: Optional[datetime] = None
 
         # Trade tracking
         self.current_trade: Optional[Dict] = None
@@ -109,6 +133,37 @@ class MockBroker:
             if current_price <= tp_price:
                 return "tp"
 
+        # Trailing stop (Phase 2): raise SL to breakeven, then trail at ATR multiple
+        if _cfg_flag("TRAILING_STOP_ENABLED", True) and self.position != 0:
+            cols = self.df.columns
+            atr14 = float(self.df.iloc[idx].get("atr14", 0.0)) if "atr14" in cols else 0.0
+            if atr14 and atr14 > 0:
+                sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+                atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.5))
+                be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0))
+                if self.trail_extreme <= 0:
+                    self.trail_extreme = self.entry_price
+                if self.position > 0:
+                    high = self.df.iloc[idx].get("high", current_price) if "high" in cols else current_price
+                    self.trail_extreme = max(self.trail_extreme, high)
+                    breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
+                    if self.trail_extreme >= breakeven_price:
+                        base_sl = self.entry_price * (1 - sl_frac)
+                        trail_sl = self.trail_extreme - atr_mult * atr14
+                        eff_sl = max(base_sl, trail_sl)
+                        if current_price <= eff_sl and eff_sl > base_sl:
+                            return "trailing_sl"
+                else:
+                    low = self.df.iloc[idx].get("low", current_price) if "low" in cols else current_price
+                    self.trail_extreme = min(self.trail_extreme, low)
+                    breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
+                    if self.trail_extreme <= breakeven_price:
+                        base_sl = self.entry_price * (1 + sl_frac)
+                        trail_sl = self.trail_extreme + atr_mult * atr14
+                        eff_sl = min(base_sl, trail_sl)
+                        if current_price >= eff_sl and eff_sl < base_sl:
+                            return "trailing_sl"
+
         return None
 
     def update_meta(self, meta_params: Dict) -> None:
@@ -149,17 +204,52 @@ class MockBroker:
         if exit_reason and self.position != 0:
             self._execute_exit(idx, exit_reason, close_price)
 
-        # Execute entry if signal and no position
+        # Phase 3 cooldown: block NEW flat-position entries within N minutes of the
+        # previous entry (does NOT block exits, scaling, or partial-exits).
+        if (
+            self.position == 0
+            and signal in ("long", "short")
+            and _cfg_flag("TRADE_COOLDOWN_ENABLED", True)
+            and self.last_entry_time is not None
+        ):
+            elapsed_min = (timestamp - self.last_entry_time).total_seconds() / 60.0
+            if elapsed_min < float(_cfg_flag("TRADE_COOLDOWN_MINUTES", 30)):
+                signal = "hold"
+                log_debug(f"COOLDOWN {elapsed_min:.1f}min < {_cfg_flag('TRADE_COOLDOWN_MINUTES', 30)}min | skip flat entry")
+
+        # Flat entry
         if signal in ("long", "short") and self.position == 0:
             self._execute_entry(idx, signal, close_price)
+            self.same_dir_streak = 0
+            self.reversal_streak = 0
 
-        # Signal reversal: close and flip
+        # Same-direction signal while in position -> scaling (Phase 3)
+        elif (
+            signal in ("long", "short")
+            and self.position != 0
+            and (
+                (signal == "long" and self.position > 0)
+                or (signal == "short" and self.position < 0)
+            )
+        ):
+            self.same_dir_streak += 1
+            self.reversal_streak = 0
+            if (
+                _cfg_flag("SCALING_ENABLED", True)
+                and self.same_dir_streak >= int(_cfg_flag("SCALE_CONFIRM_BARS", 2))
+                and self.scale_count < int(_cfg_flag("MAX_SCALE_COUNT", 2))
+            ):
+                self._scale_in(idx, signal, close_price)
+                self.same_dir_streak = 0
+
+        # Opposite-direction signal while in position -> partial exit / full close+flip (Phase 3)
         elif signal == "long" and self.position < 0:
-            self._execute_exit(idx, "reversal", close_price)
-            self._execute_entry(idx, "long", close_price)
+            self._handle_reversal(idx, "long", close_price)
         elif signal == "short" and self.position > 0:
-            self._execute_exit(idx, "reversal", close_price)
-            self._execute_entry(idx, "short", close_price)
+            self._handle_reversal(idx, "short", close_price)
+        else:
+            self.same_dir_streak = 0
+            self.reversal_streak = 0
 
         return {
             "timestamp": timestamp,
@@ -193,6 +283,13 @@ class MockBroker:
         self.entry_price = exec_price
         self.entry_time = self.df.index[idx]
         self.entry_equity = self.equity
+
+        # Phase 3 state
+        self.last_entry_time = self.df.index[idx]
+        self.trail_extreme = 0.0
+        self.scale_count = 0
+        self.same_dir_streak = 0
+        self.reversal_streak = 0
 
         # Create trade record
         self.current_trade = log_trade_entry(
@@ -261,7 +358,104 @@ class MockBroker:
         self.entry_price = 0.0
         self.entry_time = None
 
+        # Phase 3: reset streaks/trail but KEEP last_entry_time (cooldown basis persists)
+        self.trail_extreme = 0.0
+        self.scale_count = 0
+        self.same_dir_streak = 0
+        self.reversal_streak = 0
+
         log_debug(f"EXIT {reason.upper()} @ {exec_price:.2f} | PnL: {net_pnl:.6f} ({pnl_pct:.2%}) | Equity: {self.equity:.6f}")
+
+    def _handle_reversal(self, idx: int, side: str, close_price: float) -> None:
+        """Opposite-direction signal while in position.
+
+        Legacy (PARTIAL_EXIT_ENABLED=False): immediate full close + flip.
+        Phase 3 (enabled): close PARTIAL_EXIT_FRACTION on first reversal;
+        full close + flip on REVERSAL_FULL_CLOSE_STREAK-th consecutive reversal.
+        """
+        if not _cfg_flag("PARTIAL_EXIT_ENABLED", True):
+            # Legacy behavior: close and flip (test_ss37 depends on exact flow)
+            self.reversal_streak = 0
+            self.same_dir_streak = 0
+            self._execute_exit(idx, "reversal", close_price)
+            self._execute_entry(idx, side, close_price)
+            return
+
+        self.same_dir_streak = 0
+        self.reversal_streak += 1
+        if self.reversal_streak >= int(_cfg_flag("REVERSAL_FULL_CLOSE_STREAK", 2)):
+            # Full close + flip on persistent reversal
+            self.reversal_streak = 0
+            self._execute_exit(idx, "reversal", close_price)
+            if self.position == 0:
+                self._execute_entry(idx, side, close_price)
+        else:
+            self._partial_close(idx, side, close_price)
+
+    def _scale_in(self, idx: int, side: str, close_price: float) -> None:
+        """Phase 3: add SCALE_STAKE_FRAC of original quantity to an open position."""
+        if self.position == 0 or self.current_trade is None:
+            return
+
+        exec_price = self._get_price(idx, side)
+        base_qty = abs(self.position)
+        add_qty = base_qty * float(_cfg_flag("SCALE_STAKE_FRAC", 0.5))
+        if add_qty <= 0:
+            return
+
+        # Fee on added quantity
+        fee_paid = exec_price * add_qty * self.fee
+        self.equity -= fee_paid
+
+        # Weighted-average entry price
+        old_qty = abs(self.position)
+        new_qty = old_qty + add_qty
+        if old_qty > 0:
+            self.entry_price = (
+                self.entry_price * old_qty + exec_price * add_qty
+            ) / new_qty
+
+        # Grow position keeping sign
+        sign = 1 if self.position > 0 else -1
+        self.position = sign * new_qty
+        self.current_trade["qty"] = new_qty
+        self.scale_count += 1
+
+        log_debug(
+            f"SCALE-IN {side.upper()} @ {exec_price:.2f} | +{add_qty:.6f} -> {new_qty:.6f} | entry {self.entry_price:.2f}"
+        )
+
+    def _partial_close(self, idx: int, side: str, close_price: float) -> None:
+        """Phase 3: close PARTIAL_EXIT_FRACTION of open position, keep the rest."""
+        if self.position == 0 or self.current_trade is None:
+            return
+
+        exec_price = self._get_price(idx, side)
+        fraction = float(_cfg_flag("PARTIAL_EXIT_FRACTION", 0.33))
+        fraction = min(max(fraction, 0.0), 0.99)
+
+        qty = abs(self.position)
+        close_qty = qty * fraction
+        if close_qty <= 0:
+            return
+
+        # Fee + PnL on the closed portion
+        fee_paid = exec_price * close_qty * self.fee
+        if side == "long":
+            gross_pnl = (exec_price - self.entry_price) * close_qty
+        else:
+            gross_pnl = (self.entry_price - exec_price) * close_qty
+        net_pnl = gross_pnl - fee_paid
+        self.equity += net_pnl
+
+        # Reduce position keeping sign
+        sign = 1 if self.position > 0 else -1
+        self.position = sign * (qty - close_qty)
+        self.current_trade["qty"] = qty - close_qty
+
+        log_debug(
+            f"PARTIAL-EXIT {side.upper()} {fraction:.0%} @ {exec_price:.2f} | PnL {net_pnl:.6f} | pos {self.position:.6f}"
+        )
 
     def close_all(self, idx: int = -1) -> None:
         """Force close any open position at end of simulation."""
@@ -392,20 +586,45 @@ def run_simulation(
         initial_equity=INITIAL_EQUITY,
     )
 
-    # Get threshold
+    # Get threshold (static fallback used when adaptive disabled / insufficient data)
     threshold = getattr(config, 'ABSOLUTE_THRESHOLD', ABSOLUTE_THRESHOLD) if config else ABSOLUTE_THRESHOLD
+
+    # Phase 2: adaptive threshold state
+    adaptive_enabled = bool(_cfg_flag("ADAPTIVE_THRESHOLD_ENABLED", True, config))
+    pred_history: List[float] = []
+    lookback = int(_cfg_flag("ADAPTIVE_LOOKBACK", 200, config))
+    quantile = float(_cfg_flag("ADAPTIVE_QUANTILE", 0.95, config))
+    min_thr = float(_cfg_flag("ADAPTIVE_MIN_THRESHOLD", 0.002, config))
+    max_thr = float(_cfg_flag("ADAPTIVE_MAX_THRESHOLD", 0.02, config))
+    extreme_vol_ratio = float(_cfg_flag("EXTREME_VOL_RATIO", 1.8, config))
+    gate_extreme_vol = bool(_cfg_flag("GATE_EXTREME_VOL", True, config))
 
     # Run simulation
     for i in range(len(df_val)):
         # Get tactical prediction
         pred = tactical_preds.iloc[i] if i < len(tactical_preds) else 0.0
 
+        # Phase 2: adaptive threshold from rolling |pred| history (excl. warmup NaNs)
+        thr = threshold
+        if adaptive_enabled and not np.isnan(pred):
+            pred_history.append(float(pred))
+            if len(pred_history) > lookback:
+                pred_history = pred_history[-lookback:]
+            thr = adaptive_threshold(
+                pd.Series(pred_history),
+                lookback=lookback,
+                quantile=quantile,
+                min_threshold=min_thr,
+                max_threshold=max_thr,
+                fallback=threshold,
+            )
+
         # Convert prediction to signal
         if np.isnan(pred):
             signal = "hold"
-        elif pred > threshold:
+        elif pred > thr:
             signal = "long"
-        elif pred < -threshold:
+        elif pred < -thr:
             signal = "short"
         else:
             signal = "hold"
@@ -414,6 +633,15 @@ def run_simulation(
         row_regime = df_val.iloc[i].get("regime", "trend")
         if signal in ("long", "short") and row_regime == "chop":
             signal = "hold"
+
+        # Phase 2: extreme-volatility gate (entry only)
+        if signal in ("long", "short") and gate_extreme_vol:
+            row = df_val.iloc[i]
+            vol_12 = row.get("vol_12", 0.0)
+            vol_48 = row.get("vol_48", 0.0)
+            vol_ratio = vol_12 / max(vol_48, 1e-8)
+            if classify_vol_state(vol_ratio, extreme_vol_ratio) == "extreme":
+                signal = "hold"
 
         # Get strategic meta-params
         meta = strategic_meta_params[i] if i < len(strategic_meta_params) else {}
@@ -469,16 +697,50 @@ def quick_simulate(
         "regime": "trend",
     }
 
+    # Phase 2: adaptive threshold state
+    pred_history: List[float] = []
+
     for i in range(len(df_val)):
         pred = predictions.iloc[i] if i < len(predictions) else 0.0
+
+        # Phase 2: adaptive threshold from rolling |pred| history (excl. warmup NaNs)
+        thr = threshold
+        if _cfg_flag("ADAPTIVE_THRESHOLD_ENABLED", True) and not np.isnan(pred):
+            pred_history.append(float(pred))
+            if len(pred_history) > _cfg_flag("ADAPTIVE_LOOKBACK", 200):
+                pred_history = pred_history[-_cfg_flag("ADAPTIVE_LOOKBACK", 200):]
+            thr = adaptive_threshold(
+                pd.Series(pred_history),
+                lookback=_cfg_flag("ADAPTIVE_LOOKBACK", 200),
+                quantile=_cfg_flag("ADAPTIVE_QUANTILE", 0.95),
+                min_threshold=_cfg_flag("ADAPTIVE_MIN_THRESHOLD", 0.002),
+                max_threshold=_cfg_flag("ADAPTIVE_MAX_THRESHOLD", 0.02),
+                fallback=threshold,
+            )
+
         if np.isnan(pred):
             signal = "hold"
-        elif pred > threshold:
+        elif pred > thr:
             signal = "long"
-        elif pred < -threshold:
+        elif pred < -thr:
             signal = "short"
         else:
             signal = "hold"
+
+        # Regime gate: skip entries in choppy markets (only trend/high_vol)
+        row_regime = df_val.iloc[i].get("regime", "trend")
+        if signal in ("long", "short") and row_regime == "chop":
+            signal = "hold"
+
+        # Phase 2: extreme-volatility gate (entry only)
+        if signal in ("long", "short") and _cfg_flag("GATE_EXTREME_VOL", True):
+            row = df_val.iloc[i]
+            vol_12 = row.get("vol_12", 0.0)
+            vol_48 = row.get("vol_48", 0.0)
+            vol_ratio = vol_12 / max(vol_48, 1e-8)
+            if classify_vol_state(vol_ratio, _cfg_flag("EXTREME_VOL_RATIO", 1.8)) == "extreme":
+                signal = "hold"
+
         broker.step(i, signal)
 
     broker.close_all()

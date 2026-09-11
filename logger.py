@@ -17,7 +17,13 @@ LOG_DIR.mkdir(exist_ok=True)
 
 FILE_LOG_LEVEL = logging.DEBUG
 CONSOLE_LOG_LEVEL = logging.INFO
-LOG_RETENTION_DAYS = 10
+LOG_RETENTION_DAYS = 3
+
+# Size-based rotation: when today's log exceeds MAX_LOG_BYTES it is rotated
+# to <file>.N (larger N = older backup), capped at LOG_BACKUP_COUNT, so a
+# single long-running day cannot exhaust disk.
+MAX_LOG_BYTES = 10 * 1024 * 1024
+LOG_BACKUP_COUNT = 3
 
 # Trade CSV
 TRADE_CSV_DIR = LOG_DIR
@@ -25,17 +31,20 @@ TRADE_CSV_PREFIX = "trades"
 
 
 # ── Daily Dated Log Handler (from original) ─────────────────────────────
-def _today_log_path() -> Path:
-    """Path of the current UTC-day log file."""
-    return LOG_DIR / f"trading_{datetime.now(timezone.utc):%Y-%m-%d}.log"
-
-
 class DailyDatedLogHandler(logging.Handler):
-    """Writes one daily file per UTC date with rotation and pruning."""
+    """Writes one daily file per UTC date with size-based rotation and pruning."""
 
-    def __init__(self, log_dir: Path = LOG_DIR, level: int = FILE_LOG_LEVEL):
+    def __init__(
+        self,
+        log_dir: Path = LOG_DIR,
+        level: int = FILE_LOG_LEVEL,
+        max_bytes: int = MAX_LOG_BYTES,
+        backup_count: int = LOG_BACKUP_COUNT,
+    ):
         super().__init__(level=level)
-        self.log_dir = log_dir
+        self.log_dir = Path(log_dir)
+        self.max_bytes = max_bytes
+        self.backup_count = backup_count
         self._stream = None
 
     @property
@@ -51,6 +60,8 @@ class DailyDatedLogHandler(logging.Handler):
                 msg = msg.replace("\n", " | ")
             self._stream.write(msg + "\n")
             self.flush()
+            if self._stream.tell() > self.max_bytes:
+                self._rotate()
         except Exception:
             self.handleError(record)
 
@@ -58,16 +69,37 @@ class DailyDatedLogHandler(logging.Handler):
         self._prune_old_files()
         self._stream = open(self._today(), "a", encoding="utf-8")
 
+    def _rotate(self) -> None:
+        self._stream.close()
+        self._stream = None
+        today = str(self._today())
+        for i in range(self.backup_count, 0, -1):
+            dst = f"{today}.{i}"
+            src = f"{today}.{i-1}"
+            if i == 1:
+                dst = f"{today}.1"
+                src = today
+            if Path(dst).exists() and i == self.backup_count:
+                Path(dst).unlink()
+            if Path(src).exists():
+                Path(src).replace(dst)
+        self._prune_old_files()
+        self._stream = open(self._today(), "a", encoding="utf-8")
+
     def _today(self) -> Path:
-        return _today_log_path()
+        date_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return self.log_dir / f"trading_{date_str}.log"
 
     def _prune_old_files(self) -> None:
         cutoff = datetime.now(timezone.utc).date() - timedelta(days=LOG_RETENTION_DAYS)
         if not self.log_dir.exists():
             return
-        for f in self.log_dir.glob("trading_????-??-??.log"):
+        for f in list(self.log_dir.glob("trading_????-??-??.log")) + list(
+            self.log_dir.glob("trading_????-??-??.log.*")
+        ):
+            stem = f.name.split(".log", 1)[0]
             try:
-                fdate = datetime.strptime(f.stem.split("_", 1)[1], "%Y-%m-%d").date()
+                fdate = datetime.strptime(stem.split("_", 1)[1], "%Y-%m-%d").date()
                 if fdate < cutoff:
                     f.unlink()
             except (IndexError, ValueError):

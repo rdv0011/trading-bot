@@ -24,13 +24,11 @@ import numpy as np
 import pandas as pd
 import pytest
 
-# Add project root so simplified modules are importable
+# Project root on sys.path so the bot modules are importable
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-# Also add simplified/ so 'from logger import ...' works inside simplified modules
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), 'simplified'))
 
 # ---------------------------------------------------------------------------
-# Mock config before any simplified module imports
+# Mock config before any bot module imports
 # ---------------------------------------------------------------------------
 mock_config = MagicMock()
 mock_config.MODEL_DIR = "models"
@@ -54,28 +52,61 @@ mock_config.STOP_LOSS_FRAC_DEFAULT = 0.02
 mock_config.TAKE_PROFIT_FRAC_DEFAULT = 0.04
 mock_config.MAX_HOLD_HOURS_DEFAULT = 4.0
 mock_config.LEVERAGE_DEFAULT = 1.0
+mock_config.STRATEGIC_TARGET_COLS = [
+    "recommended_leverage",
+    "max_exposure_frac",
+    "stake_long_frac",
+    "stake_short_frac",
+    "stop_loss_frac",
+    "take_profit_frac",
+    "max_hold_hours",
+]
+# Phase 1-3 flags: explicitly DISABLED for legacy tests. MagicMock auto-creates
+# truthy attributes for unset names, which would silently enable the new
+# features (adaptive threshold, trailing, vol gate, scaling, partial exit,
+# cooldown, feature cache) and break legacy expectations.
+mock_config.FEATURE_CACHE_TTL = 60
+mock_config.ADAPTIVE_THRESHOLD_ENABLED = False
+mock_config.ADAPTIVE_LOOKBACK = 200
+mock_config.ADAPTIVE_QUANTILE = 0.95
+mock_config.ADAPTIVE_MIN_THRESHOLD = 0.002
+mock_config.ADAPTIVE_MAX_THRESHOLD = 0.02
+mock_config.TRAILING_STOP_ENABLED = False
+mock_config.TRAILING_ATR_MULT = 1.5
+mock_config.TRAILING_BREAKEVEN_MULT = 1.0
+mock_config.GATE_EXTREME_VOL = False
+mock_config.EXTREME_VOL_RATIO = 1.8
+mock_config.SCALING_ENABLED = False
+mock_config.MAX_SCALE_COUNT = 2
+mock_config.SCALE_CONFIRM_BARS = 2
+mock_config.SCALE_STAKE_FRAC = 0.5
+mock_config.PARTIAL_EXIT_ENABLED = False
+mock_config.PARTIAL_EXIT_FRACTION = 0.33
+mock_config.REVERSAL_FULL_CLOSE_STREAK = 2
+mock_config.TRADE_COOLDOWN_ENABLED = False
+mock_config.TRADE_COOLDOWN_MINUTES = 30
 
 sys.modules["config"] = mock_config
 
-from simplified.model import (
+from model import (
     CatBoostModel,
     rolling_tactical_predict,
     predict_strategic_meta_params,
     strategic_batch_predict,
     TARGET_COLUMN,
 )
-from simplified.config import STRATEGIC_TARGET_COLS
-from simplified.simulate import (
+from config import STRATEGIC_TARGET_COLS
+from simulate import (
     MockBroker,
     run_simulation,
     quick_simulate,
 )
-from simplified.data import (
+from data import (
     load_featured_df,
     get_feature_cols,
     save_featured_df,
 )
-from simplified.utils import (
+from utils import (
     save_trades_csv,
     load_trades_csv,
     calculate_metrics,
@@ -182,28 +213,28 @@ class TestCatBoostModelInit:
     """Test CatBoostModel constructor and parameter selection."""
 
     def test_ss01_init_tactical_default(self):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {"iterations": 10}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {"iterations": 20}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {"iterations": 10}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {"iterations": 20}):
                 model = CatBoostModel(model_type="tactical")
         assert model.model_type == "tactical"
         assert model.model is None
         assert model.metadata is None
 
     def test_ss02_init_strategic_default(self):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {"iterations": 10}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {"iterations": 20}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {"iterations": 10}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {"iterations": 20}):
                 model = CatBoostModel(model_type="strategic")
         assert model.model_type == "strategic"
 
     def test_ss03_init_unknown_type_raises(self):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 with pytest.raises(ValueError, match="Unknown model_type"):
                     CatBoostModel(model_type="unknown")
 
     def test_ss04_init_with_custom_params(self):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {"iterations": 10}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {"iterations": 20}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {"iterations": 10}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {"iterations": 20}):
                 model = CatBoostModel(
                     model_type="tactical",
                     model_params={"depth": 6},
@@ -212,8 +243,8 @@ class TestCatBoostModelInit:
         assert model.params["iterations"] == 10  # from default
 
     def test_ss05_init_custom_model_dir(self, tmp_path):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(
                     model_type="tactical",
                     model_dir=str(tmp_path / "custom_models"),
@@ -225,8 +256,8 @@ class TestCatBoostModelSaveLoad:
     """Test CatBoostModel save and load operations."""
 
     def test_ss06_save_no_model_raises(self, tmp_path):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         with pytest.raises(RuntimeError, match="No model to save"):
             model.save()
@@ -237,8 +268,8 @@ class TestCatBoostModelSaveLoad:
         def save_side_effect(path):
             Path(path).touch()
         cb_model.save_model = MagicMock(side_effect=save_side_effect)
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         model.model = cb_model
         model.metadata = {"feature_cols": ["a", "b"]}
@@ -249,8 +280,8 @@ class TestCatBoostModelSaveLoad:
         assert (tmp_path / "model_tactical_meta.json").exists()
 
     def test_ss08_load_no_model_file_raises(self, tmp_path):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         with pytest.raises(FileNotFoundError, match="No model found"):
             model.load()
@@ -268,11 +299,11 @@ class TestCatBoostModelSaveLoad:
         with open(meta_path, "w") as f:
             json.dump({"feature_cols": ["ret1", "atr14"], "n_features": 2}, f)
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
 
-        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+        with patch("model.CatBoostRegressor", return_value=cb_model):
             model.load()
 
         assert model.model is not None
@@ -288,11 +319,11 @@ class TestCatBoostModelSaveLoad:
         with open(meta_path, "w") as f:
             json.dump({"feature_cols": ["x"]}, f)
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical")
 
-        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+        with patch("model.CatBoostRegressor", return_value=cb_model):
             model.load(
                 model_path=str(model_path),
                 meta_path=str(meta_path),
@@ -307,18 +338,18 @@ class TestCatBoostModelSaveLoad:
         model_path = tmp_path / "model_tactical.cbm"
         model_path.touch()
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
 
-        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+        with patch("model.CatBoostRegressor", return_value=cb_model):
             model.load()
 
         assert model.metadata == {}
 
     def test_ss12_get_path_generates_correct_names(self, tmp_path):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         model_path, meta_path = model._get_path()
         assert model_path.name == "model_tactical.cbm"
@@ -329,8 +360,8 @@ class TestCatBoostModelPredict:
     """Test CatBoostModel predict method."""
 
     def test_ss13_predict_no_model_raises(self):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical")
         with pytest.raises(RuntimeError, match="TACTICAL model not loaded"):
             model.predict(_make_ohlcv(10), ["ret1"])
@@ -341,8 +372,8 @@ class TestCatBoostModelPredict:
         cb_model = MagicMock()
         cb_model.predict = MagicMock(return_value=np.zeros(len(df)))
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         model.model = cb_model
         model.metadata = {"feature_cols": feature_cols}
@@ -360,8 +391,8 @@ class TestCatBoostModelPredict:
         cb_model = MagicMock()
         cb_model.predict = MagicMock(return_value=np.zeros(len(df)))
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         model.model = cb_model
         model.metadata = {"feature_cols": feature_cols}
@@ -371,8 +402,8 @@ class TestCatBoostModelPredict:
         assert len(result) == len(df)
 
     def test_ss16_get_feature_importance_no_model(self):
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical")
         assert model.get_feature_importance() == {}
 
@@ -381,8 +412,8 @@ class TestCatBoostModelPredict:
         cb_model.feature_importances_ = np.array([0.6, 0.4])
         cb_model.get_param = MagicMock(return_value=10)
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(tmp_path))
         model.model = cb_model
         model.metadata = {"feature_cols": ["ret1", "atr14"]}
@@ -397,8 +428,8 @@ class TestCatBoostModelPredict:
         cb_model = MagicMock()
         cb_model.predict = MagicMock(return_value=np.zeros(len(df)))
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="strategic", model_dir=str(tmp_path))
         model.model = cb_model
 
@@ -443,7 +474,7 @@ class TestGetFeatureCols:
 
     def test_ss23_get_feature_cols_utils_module(self):
         df = _make_featured_df(200)
-        from simplified.utils import get_feature_cols as get_fc
+        from utils import get_feature_cols as get_fc
         cols = get_fc(df)
         assert "ret1" in cols
         # utils excludes more columns by default
@@ -459,7 +490,7 @@ class TestDataPersistence:
     """Test load_featured_df, save_featured_df, save_trades_csv, load_trades_csv."""
 
     def test_ss24_load_featured_df_not_found(self):
-        with patch("simplified.data.DATA_DIR", Path("/nonexistent")):
+        with patch("data.DATA_DIR", Path("/nonexistent")):
             result = load_featured_df("nonexistent.csv")
         assert result is None
 
@@ -468,7 +499,7 @@ class TestDataPersistence:
         path = tmp_path / "df_BTC_15m_val.csv"
         df.to_csv(path, index=True)
 
-        with patch("simplified.data.DATA_DIR", tmp_path):
+        with patch("data.DATA_DIR", tmp_path):
             result = load_featured_df("df_BTC_15m_val.csv")
 
         assert result is not None
@@ -476,7 +507,7 @@ class TestDataPersistence:
 
     def test_ss26_save_featured_df(self, tmp_path):
         df = _make_featured_df(50)
-        with patch("simplified.data.DATA_DIR", tmp_path):
+        with patch("data.DATA_DIR", tmp_path):
             result = save_featured_df(df, "test.csv")
 
         assert result == tmp_path / "test.csv"
@@ -528,7 +559,7 @@ class TestDataPersistence:
         path = tmp_path / "empty.csv"
         pd.DataFrame(columns=["a", "b"]).to_csv(path)
 
-        with patch("simplified.data.DATA_DIR", tmp_path):
+        with patch("data.DATA_DIR", tmp_path):
             result = load_featured_df("empty.csv")
 
         assert result is not None
@@ -554,12 +585,12 @@ class TestDownloadPagination:
         """Downloading fewer than 1000 candles returns exactly target count."""
         b1 = [_make_kline(i * INTERVAL_MS) for i in range(0, 1000)]
 
-        def fake_get_klines(**params):
+        def fake_futures_klines(**params):
             return b1
 
-        with patch("simplified.data.Client") as MockClient:
-            MockClient.return_value.get_klines.side_effect = fake_get_klines
-            from simplified.data import download_historical
+        with patch("data.Client") as MockClient:
+            MockClient.return_value.futures_klines.side_effect = fake_futures_klines
+            from data import download_historical
             df = download_historical(days=2, timeframe="15m", testnet=True)
 
         assert len(df) == 192
@@ -571,7 +602,7 @@ class TestDownloadPagination:
         b2 = [_make_kline(999 * INTERVAL_MS + i * INTERVAL_MS) for i in range(0, 1000)]
         b1 = [_make_kline(1998 * INTERVAL_MS + i * INTERVAL_MS) for i in range(0, 1000)]
 
-        def fake_get_klines(**params):
+        def fake_futures_klines(**params):
             end = params["endTime"]
             if end >= 2998 * INTERVAL_MS:
                 return b1
@@ -579,9 +610,9 @@ class TestDownloadPagination:
                 return b2
             return b3
 
-        with patch("simplified.data.Client") as MockClient:
-            MockClient.return_value.get_klines.side_effect = fake_get_klines
-            from simplified.data import download_historical
+        with patch("data.Client") as MockClient:
+            MockClient.return_value.futures_klines.side_effect = fake_futures_klines
+            from data import download_historical
             df = download_historical(days=5, timeframe="15m", testnet=True)
 
         assert len(df) == 480
@@ -591,12 +622,12 @@ class TestDownloadPagination:
     def test_ss113_download_empty_raises(self):
         """Downloading with no data returned raises RuntimeError."""
 
-        def fake_get_klines(**params):
+        def fake_futures_klines(**params):
             return []
 
-        with patch("simplified.data.Client") as MockClient:
-            MockClient.return_value.get_klines.side_effect = fake_get_klines
-            from simplified.data import download_historical
+        with patch("data.Client") as MockClient:
+            MockClient.return_value.futures_klines.side_effect = fake_futures_klines
+            from data import download_historical
             with pytest.raises(RuntimeError, match="No data returned"):
                 download_historical(days=1, timeframe="15m", testnet=True)
 
@@ -977,7 +1008,7 @@ class TestRollingTacticalPredict:
         model = MagicMock(spec=CatBoostModel)
         model.params = cb_model.params
 
-        with patch("simplified.model.CatBoostRegressor") as MockCB:
+        with patch("model.CatBoostRegressor") as MockCB:
             mock_cb = MagicMock()
             mock_cb.fit = MagicMock()
             mock_cb.predict = MagicMock(return_value=np.array([0.01]))
@@ -994,7 +1025,7 @@ class TestRollingTacticalPredict:
         model = MagicMock(spec=CatBoostModel)
         model.params = {"iterations": 5, "depth": 3}
 
-        with patch("simplified.model.CatBoostRegressor") as MockCB:
+        with patch("model.CatBoostRegressor") as MockCB:
             mock_cb = MagicMock()
             mock_cb.fit = MagicMock()
             mock_cb.predict = MagicMock(return_value=np.array([0.01]))
@@ -1011,7 +1042,7 @@ class TestRollingTacticalPredict:
         model = MagicMock(spec=CatBoostModel)
         model.params = {"iterations": 5, "depth": 3}
 
-        with patch("simplified.model.CatBoostRegressor") as MockCB:
+        with patch("model.CatBoostRegressor") as MockCB:
             mock_cb = MagicMock()
             mock_cb.fit = MagicMock()
             mock_cb.predict = MagicMock(return_value=np.array([0.01]))
@@ -1029,7 +1060,7 @@ class TestRollingTacticalPredict:
         model = MagicMock(spec=CatBoostModel)
         model.params = {"iterations": 5, "depth": 3}
 
-        with patch("simplified.model.CatBoostRegressor") as MockCB:
+        with patch("model.CatBoostRegressor") as MockCB:
             mock_cb = MagicMock()
             mock_cb.fit = MagicMock()
             mock_cb.predict = MagicMock(return_value=np.array([0.01]))
@@ -1355,7 +1386,7 @@ class TestSimulateFlowIntegration:
         (data_dir / "df_BTC_15m_val.csv").write_text(df_val.to_csv(index=True))
 
         # Step 3: Mock CatBoostRegressor with a predict that returns matching-length arrays
-        with patch("simplified.model.CatBoostRegressor") as MockCB:
+        with patch("model.CatBoostRegressor") as MockCB:
             mock_cb = MagicMock()
             mock_cb.fit = MagicMock()
             # Use side_effect to return array matching input length
@@ -1366,8 +1397,8 @@ class TestSimulateFlowIntegration:
             MockCB.return_value = mock_cb
 
             # Step 4: Mock data directory
-            with patch("simplified.data.DATA_DIR", data_dir):
-                with patch("simplified.model.MODEL_DIR", str(model_dir)):
+            with patch("data.DATA_DIR", data_dir):
+                with patch("model.MODEL_DIR", str(model_dir)):
                     # Load models (mocked)
                     tactical_model = CatBoostModel(model_type="tactical", model_dir=str(model_dir))
                     tactical_model.load()
@@ -1404,7 +1435,7 @@ class TestSimulateFlowIntegration:
         model_dir = tmp_path / "models"
         model_dir.mkdir()
 
-        with patch("simplified.model.MODEL_DIR", str(model_dir)):
+        with patch("model.MODEL_DIR", str(model_dir)):
             model = CatBoostModel(model_type="tactical", model_dir=str(model_dir))
             with pytest.raises(FileNotFoundError):
                 model.load()
@@ -1414,7 +1445,7 @@ class TestSimulateFlowIntegration:
         data_dir = tmp_path / "data"
         data_dir.mkdir()
 
-        with patch("simplified.data.DATA_DIR", data_dir):
+        with patch("data.DATA_DIR", data_dir):
             result = load_featured_df("nonexistent.csv")
             assert result is None
 
@@ -1507,8 +1538,8 @@ class TestSimulateFlowIntegration:
             Path(path).touch()
         cb_model.save_model = MagicMock(side_effect=save_side_effect)
 
-        with patch("simplified.model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("simplified.model.STRATEGIC_MODEL_PARAMS", {}):
+        with patch("model.TACTICAL_MODEL_PARAMS", {}):
+            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
                 model = CatBoostModel(model_type="tactical", model_dir=str(model_dir))
         model.model = cb_model
         model.metadata = {
@@ -1521,7 +1552,7 @@ class TestSimulateFlowIntegration:
 
         # Reload
         model2 = CatBoostModel(model_type="tactical", model_dir=str(model_dir))
-        with patch("simplified.model.CatBoostRegressor", return_value=cb_model):
+        with patch("model.CatBoostRegressor", return_value=cb_model):
             model2.load()
 
         assert model2.metadata["feature_cols"] == ["ret1", "atr14", "ema_20"]
@@ -1533,8 +1564,8 @@ class TestTrainModeArgs:
 
     def test_ss114_train_mode_uses_args_days_and_symbol(self):
         """train_mode passes args.symbol and args.days to run_full_pipeline."""
-        from simplified import main as main_mod
-        from simplified import data as data_mod
+        import main as main_mod
+        import data as data_mod
 
         args = MagicMock()
         args.symbol = "ETHUSDT"

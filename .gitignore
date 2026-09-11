@@ -2,13 +2,11 @@
 data/
 cache/
 logs/
+logs.legacy_archive/
 historical_data/
 catboost_info/
 .sisyphus/
 .omo
-
-# Board-specific fan control config (copy from fancontrol/fanctl.toml.example)
-fanctl.toml
 
 # Files
 .env
@@ -17,6 +15,7 @@ optimized_params.csv
 
 # Generated trade data
 trades/
+models/
 
 # Python
 __pycache__/
