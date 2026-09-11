@@ -4,7 +4,7 @@ PWM Fan Controller — libgpiod v2, CPU-temperature-based speed curve.
 
 Installed to /usr/local/bin/fan_pwm.py and managed by a systemd service.
 
-See plans/update_fan_control.md for full setup instructions.
+See fancontrol/UPDATE_FAN_CONTROL.md in the repo for full setup instructions.
 """
 
 import time

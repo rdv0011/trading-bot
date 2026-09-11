@@ -95,7 +95,7 @@ sudo journalctl -u fan-pwm.service -f
 
 ## Full Documentation
 
-See **[`plans/update_fan_control.md`](../plans/update_fan_control.md)** for:
+See **[`UPDATE_FAN_CONTROL.md`](UPDATE_FAN_CONTROL.md)** for:
 
 - Hardware verification steps
 - Manual testing
