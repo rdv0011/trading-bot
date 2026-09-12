@@ -154,6 +154,7 @@ def setup_logging(
     logging.getLogger("urllib3").setLevel(logging.WARNING)
     logging.getLogger("binance").setLevel(logging.WARNING)
     logging.getLogger("catboost").setLevel(logging.WARNING)
+    logging.getLogger("websockets").setLevel(logging.WARNING)
 
     return root
 
