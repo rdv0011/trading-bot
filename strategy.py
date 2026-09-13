@@ -33,11 +33,59 @@ from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predi
 from data import make_features_df, add_strategic_features_df, make_labels_df, adaptive_threshold, classify_vol_state
 
 
-# ── Flag Reader (module-level config w/ optional injected cfg) ──────────
+# ── Flag Reader (runtime overrides → injected cfg → module config) ─────
+RUNTIME_OVERRIDES_PATH = Path(__file__).parent / "runtime_overrides.json"
+_RUNTIME_OVERRIDES: Dict[str, Any] = {}
+_RUNTIME_OVERRIDES_MTIME: float = 0.0
+
+
+def reload_runtime_overrides(path: Path = RUNTIME_OVERRIDES_PATH) -> bool:
+    """Refresh live-tunable flags from a JSON file (e.g. runtime_overrides.json).
+
+    Call this repeatedly (the live loop does, each iteration); it only re-parses
+    the file when mtime actually changes. Values are applied to every _cfg_flag()
+    read, letting flags like LIQ_EXIT_SPREAD_BPS be tuned on a running bot
+    without restart. Fail-open: a missing file, corrupt JSON, or non-dict content
+    leaves the previous overrides unchanged and returns False (never halts).
+
+    Returns:
+        True if overrides were (re)loaded, False if the file was missing,
+        unchanged, or unparsable.
+    """
+    global _RUNTIME_OVERRIDES_MTIME
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        return False
+    if mtime == _RUNTIME_OVERRIDES_MTIME:
+        return False
+    try:
+        with open(path, encoding="utf-8") as f:
+            data = json.load(f)
+    except Exception as exc:
+        log_warning(
+            f"Runtime overrides file unparsable ({path}): {exc}; keeping previous overrides"
+        )
+        _RUNTIME_OVERRIDES_MTIME = mtime  # don't re-parse the same broken file every tick
+        return False
+    if not isinstance(data, dict):
+        log_warning(
+            f"Runtime overrides file {path}: expected JSON object, got {type(data).__name__}; "
+            "keeping previous overrides"
+        )
+        _RUNTIME_OVERRIDES_MTIME = mtime
+        return False
+    _RUNTIME_OVERRIDES.update(data)
+    _RUNTIME_OVERRIDES_MTIME = mtime
+    log_info(f"Runtime overrides loaded from {path}: {_RUNTIME_OVERRIDES}")
+    return True
+
+
 def _cfg_flag(name: str, default: Any, cfg: Any = None) -> Any:
-    """Read a runtime flag from an injected config object (e.g. mock in tests),
-    falling back to the module-level config module. Calling this at runtime
-    (not import time) is what makes env-variable overrides effective after boot."""
+    """Read a runtime flag: live file override (highest), then an injected
+    config object (e.g. mock in tests), then the module-level config module."""
+    if name in _RUNTIME_OVERRIDES:
+        return _RUNTIME_OVERRIDES[name]
     src = cfg if cfg is not None else _config
     return getattr(src, name, default)
 
@@ -343,6 +391,7 @@ class DualMLStrategy:
         while max_iterations is None or iteration < max_iterations:
             try:
                 iteration += 1
+                reload_runtime_overrides()
                 if self.model_dir and iteration % model_refresh_every == 0:
                     self._refresh_models()
                 self._live_iteration()
