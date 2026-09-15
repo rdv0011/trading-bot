@@ -22,7 +22,7 @@ from config import (
     FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
     TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
     INITIAL_EQUITY, FEE, SLIPPAGE,
-    WALKFORWARD_RETRAIN_EVERY, ABSOLUTE_THRESHOLD,
+    WALKFORWARD_RETRAIN_EVERY_CANDLES, ABSOLUTE_THRESHOLD,
     LIQUIDITY_RECORDER_ENABLED,
 )
 
@@ -151,7 +151,7 @@ def simulate_mode(args):
         df_val,
         tactical_model,
         feature_cols,
-        retrain_every=WALKFORWARD_RETRAIN_EVERY,
+        retrain_every=WALKFORWARD_RETRAIN_EVERY_CANDLES,
         window=wf_window,
     )
 

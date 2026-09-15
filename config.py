@@ -94,8 +94,18 @@ INITIAL_EQUITY = 1.0          # Start with 1.0 (100%)
 FEE = 0.0004                  # Binance taker fee per side
 SLIPPAGE = 0.0003             # Fixed slippage per trade
 
-# Walk-forward settings (simulation retrains tactical every N candles)
-WALKFORWARD_RETRAIN_EVERY = 100  # Candles between tactical model retraining
+# Walk-forward settings.
+# LIVE cadence: the live loop retrains tactical every N live ITERATIONS
+# (~4s each, so 100 iterations ~= 6-10 min at observed pacing), on the recent
+# `_tactical_window` (200) candles folded to ~145 usable after labeling.
+# SIM cadence: rolling_tactical_predict counts CANDLES, not iterations. 100
+# candles = 25h of 15m bars, far older than the live model -- the stale sim
+# model compresses predictions to ~0 and never crosses the threshold, while
+# the live model retrained every ~10 min DOES signal (observed: live saw ~28
+# entry episodes over 2 days, default sim saw 0). The sim therefore must
+# retrain far more often than 100 candles to mirror live's behavior.
+WALKFORWARD_RETRAIN_EVERY = 100    # how often LIVE retrains, in live iterations
+WALKFORWARD_RETRAIN_EVERY_CANDLES = 1   # how often SIM retrains, in 15m candles (mirrors live)
 
 # Live model hot-swap: reload tactical/strategic models from disk this often
 # (in iterations) so newly trained models are picked up without a restart.

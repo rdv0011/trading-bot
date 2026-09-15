@@ -47,7 +47,7 @@ from config import (  # noqa: E402
     SYMBOL,
     TIMEFRAME,
     STRATEGIC_TF,
-    WALKFORWARD_RETRAIN_EVERY,
+    WALKFORWARD_RETRAIN_EVERY_CANDLES,
     STRATEGIC_TARGET_COLS,
     ABSOLUTE_THRESHOLD,
 )
@@ -372,7 +372,7 @@ def main():
     ap.add_argument("--toleranc-s", type=int, default=900, help="Match tolerance seconds")
     ap.add_argument("--tactical-window", type=int, default=500, help="Walk-forward window")
     ap.add_argument("--retrain-every", type=int, default=None,
-                    help="Walk-forward retrain cadence in candles (default: 100, mirrors live which retrains every ~100 iterations)")
+                    help=f"Walk-forward retrain cadence in candles (default {WALKFORWARD_RETRAIN_EVERY_CANDLES}, mirrors live's ~10 min retrain)")
     ap.add_argument("--testnet", action="store_true",
                     help="Replay TESTNET candles (matches live bot data source)")
     ap.add_argument("--output", default="logs/live_vs_sim_report", help="Report prefix")
@@ -397,7 +397,7 @@ def main():
         replay=args.replay,
         tactical_window=args.tactical_window,
         testnet=args.testnet,
-        retrain_every=args.retrain_every if args.retrain_every else 100,
+        retrain_every=args.retrain_every if args.retrain_every else WALKFORWARD_RETRAIN_EVERY_CANDLES,
     )
     print(f"\nSim replay produced {len(sim)} trades")
 

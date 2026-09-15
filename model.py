@@ -17,7 +17,7 @@ from catboost import CatBoostRegressor, Pool
 
 from config import (
     MODEL_DIR, TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
-    WALKFORWARD_RETRAIN_EVERY, TACTICAL_TF, STRATEGIC_TARGET_COLS,
+    WALKFORWARD_RETRAIN_EVERY_CANDLES, TACTICAL_TF, STRATEGIC_TARGET_COLS,
 )
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -292,7 +292,7 @@ def rolling_tactical_predict(
     df: pd.DataFrame,
     model: CatBoostModel,
     feature_cols: List[str],
-    retrain_every: int = WALKFORWARD_RETRAIN_EVERY,
+    retrain_every: int = WALKFORWARD_RETRAIN_EVERY_CANDLES,
     window: int = 500,
 ) -> pd.Series:
     """
