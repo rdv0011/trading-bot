@@ -7,9 +7,32 @@ import os
 import logging
 import logging.handlers
 import csv
+import functools
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, Any, Optional
+
+# Completed trades append to today's CSV unless suppressed by sim runs.
+_TRADE_CSV_ENABLED = True
+
+
+def set_trade_csv_enabled(enabled: bool) -> None:
+    """Enable/disable appending completed trades to today's CSV."""
+    global _TRADE_CSV_ENABLED
+    _TRADE_CSV_ENABLED = enabled
+
+
+def suppress_trade_csv(fn):
+    """Decorator: run fn with trade CSV logging disabled (used by sim entry points)."""
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        prev = _TRADE_CSV_ENABLED
+        set_trade_csv_enabled(False)
+        try:
+            return fn(*args, **kwargs)
+        finally:
+            set_trade_csv_enabled(prev)
+    return wrapper
 
 # ── Configuration ──────────────────────────────────────────────────────
 LOG_DIR = Path("logs")
@@ -195,6 +218,9 @@ def log_trade(trade: Dict[str, Any]) -> None:
     Append a completed trade to today's CSV log.
     Creates file with header if it doesn't exist.
     """
+    if not _TRADE_CSV_ENABLED:
+        return
+
     csv_path = _get_trade_csv_path()
     file_exists = csv_path.exists()
 

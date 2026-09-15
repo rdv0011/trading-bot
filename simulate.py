@@ -26,7 +26,7 @@ from config import (
     TRADE_COOLDOWN_ENABLED, TRADE_COOLDOWN_MINUTES,
 )
 from data import adaptive_threshold, classify_vol_state
-from logger import log_trade_entry, log_trade_exit, log_equity, log_info, log_debug
+from logger import log_trade_entry, log_trade_exit, log_equity, log_info, log_debug, suppress_trade_csv
 
 
 def _cfg_flag(name: str, default: Any, cfg: Any = None) -> Any:
@@ -547,6 +547,7 @@ class MockBroker:
 
 
 # ── Run Simulation ──────────────────────────────────────────────────────
+@suppress_trade_csv
 def run_simulation(
     df_val: pd.DataFrame,
     tactical_preds: pd.Series,
@@ -677,6 +678,7 @@ def run_simulation(
 
 
 # ── Quick Simulation (for testing) ─────────────────────────────────────
+@suppress_trade_csv
 def quick_simulate(
     df_val: pd.DataFrame,
     predictions: pd.Series,

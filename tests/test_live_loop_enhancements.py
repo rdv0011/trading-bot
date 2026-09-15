@@ -184,6 +184,29 @@ def test_log_prune_removes_old_rotated_backups(tmp_path, simp_path):
     handler.close()
 
 
+def test_trade_csv_suppressed_inside_decorated_fn():
+    import logger as logger_mod
+    from logger import suppress_trade_csv, log_trade
+
+    @suppress_trade_csv
+    def run():
+        logger_mod.set_trade_csv_enabled(True)
+        log_trade({"timestamp": "2024-01-01T00:00:00", "symbol": "BTCUSDT",
+                   "side": "long", "entry_price": 40000.0, "exit_price": 39900.0,
+                   "qty": 1.0, "pnl": -100.0, "pnl_pct": -0.01, "exit_reason": "test",
+                   "regime": "trend", "stake_frac": 0.1, "leverage": 1.0,
+                   "stop_loss": 0.02, "take_profit": 0.04, "max_hold_hours": 4.0,
+                   "equity_before": 1000.0, "equity_after": 900.0, "fee_paid": 0.0,
+                   "slippage_paid": 0.0, "tactical_pred": 0.01, "strategic_params": "{}"})
+        return logger_mod._TRADE_CSV_ENABLED
+
+    assert run() is False  # suppressed inside, restored after
+    assert logger_mod._TRADE_CSV_ENABLED is True  # state restored on exit
+    assert not list(logger_mod.LOG_DIR.glob("trades_*.csv")) or all(
+        "2024-01-01" not in p.read_text() for p in logger_mod.LOG_DIR.glob("trades_*.csv")
+    )
+
+
 # ── Requirement 3: Atomic model save ───────────────────────────────────
 def test_atomic_save_writes_no_partial(tmp_path, simp_path):
     import numpy as np
