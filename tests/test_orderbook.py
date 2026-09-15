@@ -168,10 +168,12 @@ def test_recorder_current_url_defaults_to_aggtrade():
 
 def test_recorder_no_switch_when_trades_fresh():
     from orderbook import OrderBookRecorder
+    import orderbook as ob_mod
     rec = OrderBookRecorder(fallback_after_s=30.0)
-    rec._stream_started_ts = 1000.0
-    rec._last_trade_ts = 1000.0
-    assert rec._maybe_switch_stream() is False
+    rec._stream_started_ts = 999.0
+    rec._last_trade_ts = 999.0  # last trade 1s ago
+    with patch.object(ob_mod.time, "time", return_value=1000.0):
+        assert rec._maybe_switch_stream() is False
     assert rec._on_fallback is False
 
 
@@ -215,8 +217,10 @@ def test_recorder_reprobe_aggtrade_after_interval():
     rec = OrderBookRecorder(reprobe_after_s=3600.0)
     rec._on_fallback = True
     rec._fallback_started_ts = 1000.0
-    assert rec._maybe_switch_stream() is False  # 0s on fallback
-    with patch.object(ob_mod.time, "time", return_value=4600.0):
+    with patch.object(ob_mod.time, "time", return_value=2000.0):  # 1000s on fallback < 3600
+        assert rec._maybe_switch_stream() is False
+    assert rec._on_fallback is True
+    with patch.object(ob_mod.time, "time", return_value=4600.0):  # 3600s on fallback
         switched = rec._maybe_switch_stream()
     assert switched is True
     assert rec._on_fallback is False
