@@ -155,6 +155,73 @@ def test_recorder_vanish_pct():
     assert rec._vanish_pct_locked() == pytest.approx(40.0)
 
 
+# ── Stream fallback (aggTrade silent -> trade stream) ──────────────────
+def test_recorder_current_url_defaults_to_aggtrade():
+    from orderbook import OrderBookRecorder, WS_URL, WS_URL_FALLBACK
+    rec = OrderBookRecorder()
+    assert rec._current_url() == WS_URL
+    assert "aggTrade" in rec._current_url()
+    rec._on_fallback = True
+    assert rec._current_url() == WS_URL_FALLBACK
+    assert "btcusdt@trade" in rec._current_url()
+
+
+def test_recorder_no_switch_when_trades_fresh():
+    from orderbook import OrderBookRecorder
+    rec = OrderBookRecorder(fallback_after_s=30.0)
+    rec._stream_started_ts = 1000.0
+    rec._last_trade_ts = 1000.0
+    assert rec._maybe_switch_stream() is False
+    assert rec._on_fallback is False
+
+
+def test_recorder_switches_to_fallback_on_agg_silence():
+    from orderbook import OrderBookRecorder
+    rec = OrderBookRecorder(fallback_after_s=30.0)
+    rec._stream_started_ts = 1000.0
+    rec._last_trade_ts = 1000.0  # trades stopped at t=1000
+    with patch.object(rec, "_fallback_started_ts", 1000.0), \
+         patch.object(__import__("orderbook"), "time") as mock_time:
+        mock_time.time.return_value = 1031.0
+        switched = rec._maybe_switch_stream()
+    assert switched is True
+    assert rec._on_fallback is True
+
+
+def test_recorder_no_switch_within_silence_window():
+    from orderbook import OrderBookRecorder
+    rec = OrderBookRecorder(fallback_after_s=30.0)
+    rec._stream_started_ts = 1000.0
+    rec._last_trade_ts = 1000.0
+    with patch.object(__import__("orderbook"), "time") as mock_time:
+        mock_time.time.return_value = 1020.0  # 20s silence < 30s threshold
+        switched = rec._maybe_switch_stream()
+    assert switched is False
+    assert rec._on_fallback is False
+
+
+def test_recorder_fallback_resets_on_trade():
+    from orderbook import OrderBookRecorder
+    rec = OrderBookRecorder()
+    rec._seed_book({"bids": [["100.0", "10.0"]], "asks": [["101.0", "10.0"]]})
+    rec.apply_trade({"e": "trade", "p": "100.5", "q": "1.0", "m": False})
+    assert rec._last_trade_ts > 0
+    assert len(rec._tape) == 1
+
+
+def test_recorder_reprobe_aggtrade_after_interval():
+    from orderbook import OrderBookRecorder
+    import orderbook as ob_mod
+    rec = OrderBookRecorder(reprobe_after_s=3600.0)
+    rec._on_fallback = True
+    rec._fallback_started_ts = 1000.0
+    assert rec._maybe_switch_stream() is False  # 0s on fallback
+    with patch.object(ob_mod.time, "time", return_value=4600.0):
+        switched = rec._maybe_switch_stream()
+    assert switched is True
+    assert rec._on_fallback is False
+
+
 # ── Strategy entry gate ────────────────────────────────────────────────
 def _fresh_snapshot(**overrides):
     snap = {

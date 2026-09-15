@@ -7,6 +7,13 @@ trades) -- no API keys required. Maintains a local orderbook and a rolling
 trade tape; `snapshot()` returns thread-safe liquidity metrics consumed by
 DualMLStrategy's liquidity gates in live mode.
 
+Stream fallback: fstream occasionally connects `btcusdt@aggTrade` but delivers
+zero trade frames (observed on the ARM server, probe-proven). When no trade
+event arrives within `fallback_after_s`, the recorder reconnects to
+`btcusdt@trade` -- same `p/q/m` payload schema, and proven to stream normally.
+While on the fallback, it re-probes `aggTrade` every `reprobe_after_s` so the
+primary stream resumes automatically when it recovers.
+
 The live bot may trade on testnet (debug) while this recorder streams real
 mainnet liquidity ("Option B" per the approved plan): the liquidity signal is
 real regardless of the trading venue, so gates are validated against actual
@@ -33,6 +40,10 @@ WS_URL = (
     "wss://fstream.binance.com/stream?streams="
     "btcusdt@depth@100ms/btcusdt@aggTrade"
 )
+WS_URL_FALLBACK = (
+    "wss://fstream.binance.com/stream?streams="
+    "btcusdt@depth@100ms/btcusdt@trade"
+)
 REST_DEPTH_URL = "https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=100"
 
 
@@ -57,6 +68,9 @@ class OrderBookRecorder(threading.Thread):
         top_n_vanish: int = 25,
         vanish_interval: float = 10.0,
         url: Optional[str] = None,
+        fallback_url: Optional[str] = None,
+        fallback_after_s: float = 30.0,
+        reprobe_after_s: float = 3600.0,
     ) -> None:
         super().__init__(daemon=True, name="OrderBookRecorder")
         self.symbol = symbol
@@ -66,12 +80,19 @@ class OrderBookRecorder(threading.Thread):
         self.top_n_vanish = top_n_vanish
         self.vanish_interval = vanish_interval
         self._url = url or WS_URL
+        self._url_fallback = fallback_url or WS_URL_FALLBACK
+        self._fallback_after_s = fallback_after_s
+        self._reprobe_after_s = reprobe_after_s
         self._lock = threading.RLock()
         self._stop = threading.Event()
         self._bids: Dict[float, float] = {}
         self._asks: Dict[float, float] = {}
         self._tape: Deque[Tuple[float, float, float, bool]] = deque()
         self._last_msg_ts: float = 0.0
+        self._last_trade_ts: float = 0.0
+        self._stream_started_ts: float = 0.0
+        self._fallback_started_ts: float = 0.0
+        self._on_fallback: bool = False
         self._vanish_cur: Optional[Set[float]] = None
         self._vanish_prev: Optional[Set[float]] = None
         self._vanish_mark_ts: float = 0.0
@@ -103,7 +124,7 @@ class OrderBookRecorder(threading.Thread):
                     self._asks.pop(p, None)
 
     def apply_trade(self, data: Dict[str, Any]) -> None:
-        """Append an aggTrade event to the rolling tape. m=True => buyer is maker."""
+        """Append a trade event (aggTrade or trade) to the rolling tape."""
         price, qty = float(data.get("p", 0.0)), float(data.get("q", 0.0))
         maker = bool(data.get("m", False))
         if price <= 0 or qty <= 0:
@@ -111,8 +132,37 @@ class OrderBookRecorder(threading.Thread):
         now = time.time()
         with self._lock:
             self._tape.append((now, price, qty, maker))
+            self._last_trade_ts = now
             while self._tape and now - self._tape[0][0] > self.window_sec:
                 self._tape.popleft()
+
+    def _current_url(self) -> str:
+        """Return the URL for the currently active stream."""
+        return self._url_fallback if self._on_fallback else self._url
+
+    def _maybe_switch_stream(self) -> bool:
+        """Switch to the fallback stream when aggTrade goes silent; after a
+        long fallback period, re-probe aggTrade to self-heal.
+
+        Returns True when the stream selection changed (caller must reconnect).
+        """
+        now = time.time()
+        if self._on_fallback:
+            if now - self._fallback_started_ts >= self._reprobe_after_s:
+                self._on_fallback = False
+                log_info("OrderBookRecorder re-probing aggTrade stream")
+                return True
+            return False
+        silent_for = now - max(self._stream_started_ts, self._last_trade_ts)
+        if silent_for >= self._fallback_after_s and silent_for > 0:
+            self._on_fallback = True
+            self._fallback_started_ts = now
+            log_warning(
+                f"OrderBookRecorder aggTrade silent {silent_for:.0f}s "
+                f"> {self._fallback_after_s:.0f}s, falling back to trade stream"
+            )
+            return True
+        return False
 
     def _seed_book(self, snap: Dict[str, Any]) -> None:
         bids, asks = {}, {}
@@ -202,12 +252,14 @@ class OrderBookRecorder(threading.Thread):
             try:
                 if not self._bids and not self._asks:
                     self._seed_book(_fetch_snapshot_rest())
+                url = self._current_url()
                 async with websockets.connect(
-                    self._url, ping_interval=20, ping_timeout=20, close_timeout=5
+                    url, ping_interval=20, ping_timeout=20, close_timeout=5
                 ) as ws:
                     self._connected = True
                     backoff = 1.0
-                    log_info(f"OrderBookRecorder connected: {self._url}")
+                    self._stream_started_ts = time.time()
+                    log_info(f"OrderBookRecorder connected: {url}")
                     async for raw in ws:
                         if self._stop.is_set():
                             break
@@ -219,10 +271,12 @@ class OrderBookRecorder(threading.Thread):
                         evt = data.get("e") if isinstance(data, dict) else None
                         if evt == "depthUpdate":
                             self.apply_depth(data)
-                        elif evt == "aggTrade":
+                        elif evt in ("aggTrade", "trade"):
                             self.apply_trade(data)
                         self._last_msg_ts = time.time()
                         self._maybe_mark_vanish()
+                        if self._maybe_switch_stream():
+                            break
             except Exception as exc:
                 if self._stop.is_set():
                     break
