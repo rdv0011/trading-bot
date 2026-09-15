@@ -190,7 +190,6 @@ def test_trade_csv_suppressed_inside_decorated_fn():
 
     @suppress_trade_csv
     def run():
-        logger_mod.set_trade_csv_enabled(True)
         log_trade({"timestamp": "2024-01-01T00:00:00", "symbol": "BTCUSDT",
                    "side": "long", "entry_price": 40000.0, "exit_price": 39900.0,
                    "qty": 1.0, "pnl": -100.0, "pnl_pct": -0.01, "exit_reason": "test",
