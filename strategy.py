@@ -178,6 +178,11 @@ class DualMLStrategy:
         self._last_atr14: float = 0.0
         self._initial_qty: float = 0.0
 
+        # Hybrid trailing SL/TP sync state (exchange-side order prices)
+        self._last_synced_sl_price: Optional[float] = None
+        self._last_synced_tp_price: Optional[float] = None
+        self._last_sl_update_ts: float = 0.0
+
         # Phase 2: rolling raw prediction history (for retrain cadence only)
 
         # Threshold
@@ -232,6 +237,11 @@ class DualMLStrategy:
         self._feature_cache = {}
         self._last_atr14 = 0.0
         self._initial_qty = 0.0
+
+        # Hybrid trailing sync state
+        self._last_synced_sl_price = None
+        self._last_synced_tp_price = None
+        self._last_sl_update_ts = 0.0
 
     def _retrain_tactical(self, df_raw: pd.DataFrame) -> None:
         """Retrain the tactical model on the recent window (mirrors walk-forward)."""
@@ -619,6 +629,10 @@ class DualMLStrategy:
         if exit_reason is not None and self.position != 0:
             self._exit_position(exit_reason, current_price, now)
 
+        # Sync trailing SL/TP to exchange when position is still open
+        if self.position != 0:
+            self._sync_trailing_orders(current_price)
+
         # ── Decision logging (Phase 2/3 reasons) ───────────────────────
         regime = self.current_meta.get("regime", "unknown")
         adaptive_on = bool(_cfg_flag("ADAPTIVE_THRESHOLD_ENABLED", True, self.config))
@@ -873,6 +887,87 @@ class DualMLStrategy:
 
         return None
 
+    def _sync_trailing_orders(self, current_price: float) -> None:
+        """Sync trailing SL/TP levels to the exchange when moved meaningfully.
+
+        Calculates the strategy's trailing SL and TP, then calls the broker's
+        update methods only if the new price differs from the last synced
+        exchange price by at least TRAILING_SL_UPDATE_THRESHOLD (hybrid
+        approach — minimises API calls while keeping protection tight).
+        """
+        if self.position == 0:
+            return
+
+        atr14 = self._last_atr14
+        if not atr14 or atr14 <= 0:
+            return
+
+        sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+        tp_frac = self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)
+        atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.5, self.config))
+        be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
+        threshold = float(_cfg_flag("TRAILING_SL_UPDATE_THRESHOLD", 0.005, self.config))
+
+        if self.trail_extreme <= 0:
+            self.trail_extreme = self.entry_price
+
+        # Calculate trailing SL
+        if self.position > 0:  # Long
+            self.trail_extreme = max(self.trail_extreme, current_price)
+            breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
+            if self.trail_extreme >= breakeven_price:
+                base_sl = self.entry_price * (1 - sl_frac)
+                trail_sl = self.trail_extreme - atr_mult * atr14
+                new_sl = max(base_sl, trail_sl)
+            else:
+                new_sl = self.entry_price * (1 - sl_frac)
+
+            # Calculate trailing TP (trail upward once 2x initial risk gained)
+            initial_risk = self.entry_price * sl_frac
+            current_gain = self.trail_extreme - self.entry_price
+            if current_gain >= 2 * initial_risk:
+                tp_trail = self.entry_price + current_gain * 0.5
+                new_tp = max(
+                    self.entry_price * (1 + tp_frac),
+                    tp_trail,
+                )
+            else:
+                new_tp = self.entry_price * (1 + tp_frac)
+
+        else:  # Short
+            self.trail_extreme = min(self.trail_extreme, current_price)
+            breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
+            if self.trail_extreme <= breakeven_price:
+                base_sl = self.entry_price * (1 + sl_frac)
+                trail_sl = self.trail_extreme + atr_mult * atr14
+                new_sl = min(base_sl, trail_sl)
+            else:
+                new_sl = self.entry_price * (1 + sl_frac)
+
+            initial_risk = self.entry_price * sl_frac
+            current_gain = self.entry_price - self.trail_extreme
+            if current_gain >= 2 * initial_risk:
+                tp_trail = self.entry_price - current_gain * 0.5
+                new_tp = min(
+                    self.entry_price * (1 - tp_frac),
+                    tp_trail,
+                )
+            else:
+                new_tp = self.entry_price * (1 - tp_frac)
+
+        # Sync SL to exchange if moved meaningfully
+        if self._last_synced_sl_price is None or abs(new_sl - self._last_synced_sl_price) / self._last_synced_sl_price >= threshold:
+            now = time.time()
+            if now - self._last_sl_update_ts >= 60:  # 1-min cooldown between updates
+                if self.broker.update_sl_order(self.broker.symbol, new_sl, threshold):
+                    self._last_synced_sl_price = new_sl
+                    self._last_sl_update_ts = now
+
+        # Sync TP to exchange if moved meaningfully
+        if self._last_synced_tp_price is None or abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price >= threshold:
+            if self.broker.update_tp_order(self.broker.symbol, new_tp, threshold):
+                self._last_synced_tp_price = new_tp
+
     def _execute_signal(self, signal: str, current_price: float, current_time: datetime) -> None:
         """Execute trading signal."""
         # Exit if reversal
@@ -1087,6 +1182,11 @@ class DualMLStrategy:
         self.same_dir_streak = 0
         self.reversal_streak = 0
         self._initial_qty = 0.0
+
+        # Reset hybrid sync state
+        self._last_synced_sl_price = None
+        self._last_synced_tp_price = None
+        self._last_sl_update_ts = 0.0
 
 
 # ── Utility Functions ───────────────────────────────────────────────────
