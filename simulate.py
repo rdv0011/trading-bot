@@ -170,6 +170,14 @@ class MockBroker:
         """Update meta-parameters from strategic ML."""
         self.current_meta.update(meta_params)
 
+    def update_sl_order(self, symbol: str, new_sl_price: float, threshold: float = 0.005) -> bool:
+        """Mock: no-op for simulation."""
+        return False
+
+    def update_tp_order(self, symbol: str, new_tp_price: float, threshold: float = 0.005) -> bool:
+        """Mock: no-op for simulation."""
+        return False
+
     def step(
         self,
         idx: int,

@@ -912,6 +912,203 @@ class BinanceBroker(BaseBroker):
 
         return self._create_bracket_order(sym, amount, side, tp_price, sl_price)
 
+    def update_sl_order(self, symbol: str, new_sl_price: float, threshold: float = 0.005) -> bool:
+        """Update the SL order to a new price on the exchange.
+
+        Hybrid approach: only cancels and re-places the SL order if the new
+        price differs from the current exchange SL by at least *threshold*
+        (default 0.5 %).  This minimises API calls while keeping the exchange
+        order meaningfully aligned with the strategy's trailing calculation.
+
+        Args:
+            symbol: Trading symbol (defaults to broker's symbol).
+            new_sl_price: New stop-loss price.
+            threshold: Minimum price change ratio to trigger an update.
+
+        Returns:
+            True if the order was updated, False if no change was needed or
+            the update failed.
+        """
+        sym = symbol or self.symbol
+
+        # Quick guard: if new price is not better than current (for long: higher;
+        # for short: lower), skip the update entirely.
+        try:
+            pos = self.get_position(sym)
+            if pos is None or not pos.amount:
+                return False
+            is_long = pos.amount > 0
+            if is_long and new_sl_price <= 0:
+                return False
+            if not is_long and new_sl_price <= 0:
+                return False
+        except Exception:
+            return False
+
+        # Fetch current conditional orders
+        try:
+            open_orders = self.client.futures_get_open_orders(sym, conditional=True)
+        except Exception as e:
+            self.logger.error(f"update_sl_order: failed to query conditional orders: {e}")
+            return False
+
+        if not open_orders:
+            return False
+
+        # Find the current SL order (STOP_MARKET, closePosition)
+        sl_order = None
+        for o in open_orders:
+            if (o.get("type") == "STOP_MARKET"
+                    and o.get("closePosition", False)):
+                sl_order = o
+                break
+
+        if sl_order is None:
+            # No SL order exists yet (edge case: bracket placement failed).
+            # Don't try to create one here; let the entry flow handle it.
+            return False
+
+        current_sl = float(sl_order.get("stopPrice", "0"))
+        if current_sl <= 0:
+            return False
+
+        # Hybrid threshold check
+        price_diff = abs(new_sl_price - current_sl) / current_sl
+        if price_diff < threshold:
+            return False
+
+        # Directional guard: for a long position the SL should only move UP,
+        # not down.  For short, only move DOWN.
+        if is_long and new_sl_price < current_sl:
+            return False
+        if not is_long and new_sl_price > current_sl:
+            return False
+
+        # Cancel existing SL order
+        algo_id = sl_order.get("algoId")
+        try:
+            self.client.futures_cancel_order(sym, algoId=algo_id, conditional=True)
+            time.sleep(0.3)  # Let the exchange process the cancel
+        except BinanceAPIException as e:
+            # Order may already be filled / cancelled – treat as no-op
+            if e.code in ("-2011", "-1111"):  # UNKNOWN_ORDER / UNKNOWN
+                return False
+            self.logger.error(f"update_sl_order: cancel failed: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"update_sl_order: cancel failed: {e}")
+            return False
+
+        # Place new SL order
+        try:
+            sl_side = SIDE_BUY if not is_long else SIDE_SELL
+            self.client.futures_create_order(
+                symbol=sym,
+                side=sl_side,
+                type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                stopPrice=new_sl_price,
+                closePosition=True,
+            )
+            self.logger.info(
+                f"SL order updated: {sym} {current_sl:.2f} -> {new_sl_price:.2f} "
+                f"(diff={price_diff:.4%})"
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"update_sl_order: place new SL failed: {e}")
+            return False
+
+    def update_tp_order(self, symbol: str, new_tp_price: float, threshold: float = 0.005) -> bool:
+        """Update the TP order to a new price on the exchange.
+
+        Same hybrid logic as *update_sl_order*.
+
+        Args:
+            symbol: Trading symbol (defaults to broker's symbol).
+            new_tp_price: New take-profit price.
+            threshold: Minimum price change ratio to trigger an update.
+
+        Returns:
+            True if the order was updated, False otherwise.
+        """
+        sym = symbol or self.symbol
+
+        try:
+            pos = self.get_position(sym)
+            if pos is None or not pos.amount:
+                return False
+            is_long = pos.amount > 0
+            if new_tp_price <= 0:
+                return False
+        except Exception:
+            return False
+
+        try:
+            open_orders = self.client.futures_get_open_orders(sym, conditional=True)
+        except Exception as e:
+            self.logger.error(f"update_tp_order: failed to query conditional orders: {e}")
+            return False
+
+        if not open_orders:
+            return False
+
+        # Find the current TP order (TAKE_PROFIT_MARKET, closePosition)
+        tp_order = None
+        for o in open_orders:
+            if (o.get("type") == "TAKE_PROFIT_MARKET"
+                    and o.get("closePosition", False)):
+                tp_order = o
+                break
+
+        if tp_order is None:
+            return False
+
+        current_tp = float(tp_order.get("stopPrice", "0"))
+        if current_tp <= 0:
+            return False
+
+        price_diff = abs(new_tp_price - current_tp) / current_tp
+        if price_diff < threshold:
+            return False
+
+        # Directional guard: for long, TP should only move UP.
+        # For short, TP should only move DOWN.
+        if is_long and new_tp_price < current_tp:
+            return False
+        if not is_long and new_tp_price > current_tp:
+            return False
+
+        algo_id = tp_order.get("algoId")
+        try:
+            self.client.futures_cancel_order(sym, algoId=algo_id, conditional=True)
+            time.sleep(0.3)
+        except BinanceAPIException as e:
+            if e.code in ("-2011", "-1111"):
+                return False
+            self.logger.error(f"update_tp_order: cancel failed: {e}")
+            return False
+        except Exception as e:
+            self.logger.error(f"update_tp_order: cancel failed: {e}")
+            return False
+
+        try:
+            tp_side = SIDE_SELL if is_long else SIDE_BUY
+            self.client.futures_create_order(
+                symbol=sym,
+                side=tp_side,
+                type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                stopPrice=new_tp_price,
+                closePosition=True,
+            )
+            self.logger.info(
+                f"TP order updated: {sym} {current_tp:.2f} -> {new_tp_price:.2f} "
+                f"(diff={price_diff:.4%})"
+            )
+            return True
+        except Exception as e:
+            self.logger.error(f"update_tp_order: place new TP failed: {e}")
+            return False
+
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
 
