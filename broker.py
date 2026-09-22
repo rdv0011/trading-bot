@@ -947,13 +947,31 @@ class BinanceBroker(BaseBroker):
 
         # Fetch current conditional orders
         try:
-            open_orders = self.client.futures_get_open_orders(sym, conditional=True)
+            open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)
         except Exception as e:
             self.logger.error(f"update_sl_order: failed to query conditional orders: {e}")
             return False
 
         if not open_orders:
-            return False
+            # No SL order exists yet (edge case: bracket placement failed or
+            # orders haven't propagated).  Create one so the position is
+            # protected from the start.
+            try:
+                sl_side = SIDE_BUY if not is_long else SIDE_SELL
+                self.client.futures_create_order(
+                    symbol=sym,
+                    side=sl_side,
+                    type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                    stopPrice=new_sl_price,
+                    closePosition=True,
+                )
+                self.logger.info(
+                    f"SL order created: {sym} {new_sl_price:.2f}"
+                )
+                return True
+            except Exception as e:
+                self.logger.error(f"update_sl_order: create new SL failed: {e}")
+                return False
 
         # Find the current SL order (STOP_MARKET, closePosition)
         sl_order = None
@@ -964,8 +982,6 @@ class BinanceBroker(BaseBroker):
                 break
 
         if sl_order is None:
-            # No SL order exists yet (edge case: bracket placement failed).
-            # Don't try to create one here; let the entry flow handle it.
             return False
 
         current_sl = float(sl_order.get("stopPrice", "0"))
@@ -1044,7 +1060,7 @@ class BinanceBroker(BaseBroker):
             return False
 
         try:
-            open_orders = self.client.futures_get_open_orders(sym, conditional=True)
+            open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)
         except Exception as e:
             self.logger.error(f"update_tp_order: failed to query conditional orders: {e}")
             return False
