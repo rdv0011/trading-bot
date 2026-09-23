@@ -178,6 +178,52 @@ class OrderBookRecorder(threading.Thread):
             with self._lock:
                 self._bids, self._asks = bids, asks
 
+    # ── Health ───────────────────────────────────────────────────────────
+    def health_report(self) -> Dict[str, Any]:
+        """Self-diagnostic: book health, stream health, data freshness.
+
+        Returns a dict that the strategy can use as a higher-level gate
+        beyond the per-metric thresholds.
+
+        Fail-open: if the recorder has no data at all, returns
+        ``{"status": "no_data", "safe_to_trade": False}`` so the caller
+        can decide whether to fail open or closed.  When data exists but
+        individual metrics are pathological, returns ``"degraded"`` with
+        a list of issues -- the caller should treat ``inverted_book`` and
+        ``dead_tape`` as hard blocks regardless of fail-open config.
+        """
+        snap = self.snapshot()
+        if snap is None:
+            return {"status": "no_data", "safe_to_trade": False}
+
+        issues: list[str] = []
+
+        # Book inversion
+        if snap["best_bid"] > snap["best_ask"]:
+            issues.append("inverted_book")
+
+        # Thin book: fewer than 3 levels on either side
+        if snap["n_levels_bid"] < 3:
+            issues.append("thin_bid_side")
+        if snap["n_levels_ask"] < 3:
+            issues.append("thin_ask_side")
+
+        # No trade tape activity
+        if snap["trade_count_ps"] < 0.01:  # less than 1 trade per 100s
+            issues.append("dead_tape")
+
+        # Spread is pathological
+        if snap["spread_bps"] > 50.0:
+            issues.append("pathological_spread")
+
+        status = "healthy" if not issues else "degraded"
+        return {
+            "status": status,
+            "safe_to_trade": len(issues) == 0,
+            "issues": issues,
+            "snap": snap,  # pass-through for consumer-level gates
+        }
+
     # ── Metrics ─────────────────────────────────────────────────────────
     def snapshot(self) -> Optional[Dict[str, Any]]:
         """Thread-safe liquidity metrics, or None if no book data yet."""
@@ -189,6 +235,8 @@ class OrderBookRecorder(threading.Thread):
             asks = sorted(self._asks.items(), key=lambda kv: kv[0])
             best_bid = bids[0][0] if bids else 0.0
             best_ask = asks[0][0] if asks else 0.0
+            if best_bid > best_ask:
+                return None  # inverted book
             mid = (best_bid + best_ask) / 2 if best_bid and best_ask else 0.0
             if mid <= 0:
                 return None

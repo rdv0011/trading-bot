@@ -779,13 +779,28 @@ class DualMLStrategy:
 
     # ── Position Management ─────────────────────────────────────────────
     def _liquidity_entry_gate(self, side: str) -> Optional[str]:
-        """Return block reason if orderbook too thin for a new entry, else None."""
+        """Return block reason if orderbook too thin for a new entry, else None.
+
+        Uses the recorder's ``health_report()`` for hard-block checks
+        (inverted book, dead tape) that override fail-open semantics, then
+        falls back to per-metric gates on the raw snapshot.
+        """
         mon = self.liquidity_monitor
         if mon is None:
             return None
-        snap = mon.snapshot()
-        if snap is None:
+
+        # ── Hard-blocks from health report (override fail-open) ──────────
+        health = mon.health_report()
+        if health["status"] == "no_data":
             return None if _cfg_flag("LIQUIDITY_FAIL_OPEN_ON_STALE", True, self.config) else "stale_book"
+        if not health["safe_to_trade"]:
+            if "inverted_book" in health["issues"]:
+                return "inverted_book"
+            if "dead_tape" in health["issues"]:
+                return "dead_tape"
+
+        # ── Per-metric gates (fail-open on stale) ────────────────────────
+        snap = health["snap"]
         if not snap["fresh"] and not _cfg_flag("LIQUIDITY_FAIL_OPEN_ON_STALE", True, self.config):
             return "stale_book"
         if snap["spread_bps"] > float(_cfg_flag("LIQ_MAX_SPREAD_BPS", 10.0, self.config)):
