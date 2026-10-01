@@ -703,10 +703,16 @@ class BinanceBroker(BaseBroker):
                 commission_asset = commissions.get("asset", "")
 
             # Compute slippage: difference between expected (last price) and fill price
-            fill_price = order.get("avgPrice") or order.get("price", "0")
+            # Binance testnet market order ACKs often return avgPrice="0" — treat it as missing.
+            avg = order.get("avgPrice")
+            if avg and str(avg).strip() not in ("0", "0.0", "0.00", "0.000"):
+                fill_price = str(avg)
+            else:
+                fill_price = None
+
             expected_price = self.get_last_price(symbol)
             slippage = 0.0
-            if expected_price > 0 and float(fill_price) > 0:
+            if expected_price > 0 and fill_price and float(fill_price) > 0:
                 slippage = abs(float(fill_price) - expected_price) * quantity
 
             return MarketOrderResult(
@@ -814,7 +820,7 @@ class BinanceBroker(BaseBroker):
                     "tp_price": tp_price,
                     "sl_price": sl_price,
                     "tp_algo_id": bracket_order_result.tp_order_id,
-                    "sl_algo_id": bracket_order_result.sl_algo_id,
+                    "sl_algo_id": bracket_order_result.sl_order_id,
                     # Granular trading costs (from _create_market_order)
                     "commission": order_result.commission,
                     "slippage": order_result.slippage,
