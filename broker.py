@@ -234,12 +234,25 @@ class PositionResult:
 class MarketOrderResult:
     order_id: str
     entry_price: Optional[float]
+    # Trading cost metadata (populated by broker)
+    commission: float = 0.0          # Commission paid (quote currency)
+    commission_asset: str = ""       # Asset in which commission was charged
+    slippage: float = 0.0            # Slippage amount (quote currency)
 
 
 @dataclass
 class BracketOrderResult:
     tp_order_id: str
     sl_order_id: str
+
+
+@dataclass
+class ClosePositionResult:
+    fill_price: Optional[float]
+    commission: float = 0.0
+    slippage: float = 0.0
+    spread: float = 0.0
+    financing: float = 0.0
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -286,7 +299,7 @@ class BaseBroker(ABC):
         pass
 
     @abstractmethod
-    def close_position(self, symbol: str, position: float) -> Optional[float]:
+    def close_position(self, symbol: str, position: float) -> Optional[ClosePositionResult]:
         pass
 
     def _parse_timeframe_to_minutes(self, timeframe: str) -> int:
@@ -421,6 +434,19 @@ class BinanceBroker(BaseBroker):
         self.client = None
         self.setup_client()
 
+        # Trading cost parameters (broker/market specific)
+        self.fee = getattr(config, "FEE", 0.0004)
+        self.slippage = getattr(config, "SLIPPAGE", 0.0003)
+        self.spread = getattr(config, "SPREAD", 0.0001)
+        self.funding_rate = getattr(config, "FUNDING_RATE", 0.0)
+        self.funding_interval_hours = getattr(config, "FUNDING_INTERVAL_HOURS", 8)
+
+        # Fetch actual rates from exchange at init
+        self._load_symbol_trading_rules()
+
+        # Position tracking for financing calculation
+        self.entry_time: Optional[datetime] = None
+
     def setup_client(self):
         self.client = Client(
             api_key=self.api_key,
@@ -429,6 +455,66 @@ class BinanceBroker(BaseBroker):
         )
         self._install_rate_limiter()
         self.logger.info(f"Connected to Binance Futures ({'testnet' if self.testnet else 'mainnet'})")
+
+    def _load_symbol_trading_rules(self):
+        """Fetch actual trading rules from exchange and update cost parameters.
+
+        Reads the symbol configuration (filters for lot_size, price_filter) and
+        the fee_rate endpoint to populate self.fee, self.spread, and
+        self.funding_rate from real exchange data instead of defaults.
+        """
+        sym = self.symbol
+        try:
+            info = self.client.futures_symbol_info(sym)
+            if not info:
+                self.logger.warning(f"No symbol info for {sym}; keeping defaults")
+                return
+
+            # ── Taker fee from fee_rate ──────────────────────────────────
+            try:
+                fee_rate = self.client.futures_fee_rate(sym=sym)
+                for entry in fee_rate:
+                    # Binance returns rate as e.g. "00400" meaning 0.0400%
+                    rate_str = entry.get("makerCommission", "0") + entry.get("takerCommission", "0")
+                    # Actually the API returns takerCommission as a string like "400" (basis points * 10)
+                    taker = float(entry.get("takerCommission", 0))
+                    # takerCommission is in basis-points-of-basis-points: 400 = 0.04%
+                    self.fee = taker / 10000  # 400 -> 0.0004
+                self.logger.info(f"Loaded taker fee for {sym}: {self.fee:.6f} ({self.fee:.4%})")
+            except Exception as e:
+                self.logger.warning(f"Could not fetch fee_rate for {sym}: {e}")
+
+            # ── Spread from order book snapshot ──────────────────────────
+            try:
+                depth = self.client.futures_order_book(symbol=sym, limit=5)
+                bid = float(depth["bids"][0][0])
+                ask = float(depth["asks"][0][0])
+                mid = (bid + ask) / 2
+                if mid > 0:
+                    self.spread = (ask - bid) / mid
+                    self.logger.info(
+                        f"Loaded spread for {sym}: {self.spread:.8f} "
+                        f"({self.spread:.4%}, bid={bid:.2f}, ask={ask:.2f})"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Could not fetch order book for {sym}: {e}")
+
+            # ── Funding rate ───────────────────────────────────────────
+            try:
+                funding = self.client.futures_funding_rate(symbol=sym)
+                if funding:
+                    # Latest funding rate as string
+                    rate = float(funding.get("fundingRate", 0))
+                    self.funding_rate = rate
+                    self.logger.info(
+                        f"Loaded funding rate for {sym}: {self.funding_rate:.8f} "
+                        f"({self.funding_rate:.4%})"
+                    )
+            except Exception as e:
+                self.logger.warning(f"Could not fetch funding rate for {sym}: {e}")
+
+        except Exception as e:
+            self.logger.warning(f"Could not load trading rules for {sym}: {e}")
 
     def _install_rate_limiter(self):
         """Install rate limiter with circuit breaker (from original)."""
@@ -497,6 +583,24 @@ class BinanceBroker(BaseBroker):
         except Exception as e:
             self.logger.error(f"Failed to get price for {sym}: {e}")
             return 0.0
+
+    def get_market_snapshot(self, symbol: str = None) -> Tuple[float, float, float]:
+        """Return (bid, ask, mid) from the current order book.
+
+        Used by the strategy to populate the new trade-log fields
+        (bid, ask, mid) at signal/entry/exit time.  Fail-open: returns
+        (0, 0, 0) on any error so the live loop never halts.
+        """
+        sym = symbol or self.symbol
+        try:
+            depth = self.client.futures_order_book(symbol=sym, limit=1)
+            bid = float(depth["bids"][0][0])
+            ask = float(depth["asks"][0][0])
+            mid = (bid + ask) / 2.0
+            return bid, ask, mid
+        except Exception as e:
+            self.logger.debug(f"Market snapshot failed for {sym}: {e}")
+            return 0.0, 0.0, 0.0
 
     # ── Cash ───────────────────────────────────────────────────────────
     def get_cash(self, quote_asset_symbol="USDT") -> float:
@@ -585,7 +689,33 @@ class BinanceBroker(BaseBroker):
                 type=ORDER_TYPE_MARKET,
                 quantity=quantity,
             )
-            return MarketOrderResult(order_id=str(order.get("orderId")), entry_price=None)
+            # Extract commission from order response
+            commissions = order.get("commissions", [])
+            commission_total = 0.0
+            commission_asset = ""
+            if isinstance(commissions, list):
+                for c in commissions:
+                    commission_total += float(c.get("quoteAdjustment", 0) or c.get("commission", 0))
+                    if not commission_asset:
+                        commission_asset = c.get("asset", "")
+            elif isinstance(commissions, dict):
+                commission_total = float(commissions.get("quoteAdjustment", 0) or commissions.get("commission", 0))
+                commission_asset = commissions.get("asset", "")
+
+            # Compute slippage: difference between expected (last price) and fill price
+            fill_price = order.get("avgPrice") or order.get("price", "0")
+            expected_price = self.get_last_price(symbol)
+            slippage = 0.0
+            if expected_price > 0 and float(fill_price) > 0:
+                slippage = abs(float(fill_price) - expected_price) * quantity
+
+            return MarketOrderResult(
+                order_id=str(order.get("orderId")),
+                entry_price=float(fill_price) if fill_price else None,
+                commission=commission_total,
+                commission_asset=commission_asset,
+                slippage=slippage,
+            )
         except Exception as e:
             self.logger.error(f"Market order failed: {e}")
             return None
@@ -648,6 +778,9 @@ class BinanceBroker(BaseBroker):
                     self.close_position(symbol, close_qty)
                     return BracketResult(success=False, error="Fill confirmation timeout")
 
+            # Track entry time for financing calculation
+            self.entry_time = datetime.now(timezone.utc)
+
             if not order_result.order_id:
                 return BracketResult(success=False, error="No order_id returned")
             if entry_price is None or entry_price <= 0:
@@ -681,7 +814,10 @@ class BinanceBroker(BaseBroker):
                     "tp_price": tp_price,
                     "sl_price": sl_price,
                     "tp_algo_id": bracket_order_result.tp_order_id,
-                    "sl_algo_id": bracket_order_result.sl_order_id,
+                    "sl_algo_id": bracket_order_result.sl_algo_id,
+                    # Granular trading costs (from _create_market_order)
+                    "commission": order_result.commission,
+                    "slippage": order_result.slippage,
                 }
             )
         except Exception as e:
@@ -764,8 +900,8 @@ class BinanceBroker(BaseBroker):
                     time.sleep(base_delay * (2 ** attempt))
         self.logger.error(f"Cancel open orders failed after {max_retries} retries: {last_error}")
 
-    def close_position(self, symbol: str = None, position: float = None) -> Optional[float]:
-        """Close position and return fill price (from original)."""
+    def close_position(self, symbol: str = None, position: float = None) -> Optional[ClosePositionResult]:
+        """Close position and return fill price with granular cost breakdown."""
         sym = symbol or self.symbol
         if position is None:
             pos = self.get_position(sym)
@@ -791,10 +927,44 @@ class BinanceBroker(BaseBroker):
                 avg_price = order.get("avgPrice")
                 if avg_price:
                     fill_price = float(avg_price)
+
+            # ── Granular costs ───────────────────────────────────────
+            commissions = order.get("commissions", [])
+            commission_total = 0.0
+            if isinstance(commissions, list):
+                for c in commissions:
+                    commission_total += float(c.get("quoteAdjustment", 0) or c.get("commission", 0))
+            elif isinstance(commissions, dict):
+                commission_total = float(commissions.get("quoteAdjustment", 0) or commissions.get("commission", 0))
+
+            slippage = 0.0
+            if fill_price:
+                last_price = self.get_last_price(sym)
+                if last_price > 0:
+                    slippage = abs(fill_price - last_price) * abs(position)
+
+            bid, ask, mid = self.get_market_snapshot(sym)
+            spread = 0.0
+            if mid > 0:
+                spread = (abs(ask - bid) / mid) * abs(position) / 2.0
+
+            # Financing: proportional to holding duration
+            financing = 0.0
+            if self.entry_time:
+                duration_hours = (datetime.now(timezone.utc) - self.entry_time).total_seconds() / 3600
+                intervals = duration_hours / max(self.funding_interval_hours, 1)
+                financing = abs(position) * mid * self.funding_rate * intervals if mid > 0 else 0.0
+
             self.logger.info(
                 f"Close position: {sym} qty={abs(position):.4f} fill={fill_price if fill_price else 0:.2f}"
             )
-            return fill_price
+            return ClosePositionResult(
+                fill_price=fill_price,
+                commission=commission_total,
+                slippage=slippage,
+                spread=spread,
+                financing=financing,
+            )
         except Exception as e:
             self.logger.error(f"Close position failed for {sym}: {e}")
             return None

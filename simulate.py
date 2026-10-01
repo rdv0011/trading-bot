@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from typing import Dict, List, Any, Optional, Tuple
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from datetime import datetime, timedelta
 import json
 
@@ -87,15 +88,29 @@ class MockBroker:
             "regime": "trend",
         }
 
-    def _get_price(self, idx: int, side: str) -> float:
-        """Get execution price with slippage."""
-        close = self.df.iloc[idx]['close']
+    def _get_price_and_market(self, idx: int, side: str) -> Tuple[float, float, float, float]:
+        """Get execution price with slippage and market snapshot.
+
+        Returns
+        -------
+        (exec_price, bid, ask, mid)
+        """
+        row = self.df.iloc[idx]
+        close = float(row['close'])
+        high = float(row.get('high', close))
+        low = float(row.get('low', close))
+        open_ = float(row.get('open', close))
+        # Approximate bid/ask/mid from OHLC
+        mid = (high + low) / 2.0
+        spread_frac = self.slippage  # reuse slippage config as spread proxy
+        half_spread = mid * spread_frac / 2.0
+        bid = round(mid - half_spread, 4)
+        ask = round(mid + half_spread, 4)
         if side == "long":
-            # Buy at ask (higher)
-            return close * (1 + self.slippage)
+            exec_price = close * (1 + self.slippage)
         else:
-            # Sell at bid (lower)
-            return close * (1 - self.slippage)
+            exec_price = close * (1 - self.slippage)
+        return exec_price, bid, ask, mid
 
     def _calculate_qty(self, price: float, stake_frac: float, leverage: float) -> float:
         """Calculate position size in base currency."""
@@ -269,7 +284,7 @@ class MockBroker:
 
     def _execute_entry(self, idx: int, side: str, close_price: float) -> None:
         """Open a new position."""
-        exec_price = self._get_price(idx, side)
+        exec_price, bid, ask, mid = self._get_price_and_market(idx, side)
         stake_frac = (
             self.current_meta["stake_long_frac"]
             if side == "long"
@@ -286,6 +301,12 @@ class MockBroker:
         # Slippage cost (already in exec_price, but track separately)
         slippage_paid = abs(exec_price - close_price) * qty
 
+        # Spread cost
+        spread_paid = (ask - bid) * qty / 2.0 if side == "long" else (ask - bid) * qty / 2.0
+
+        # Financing (simulated: 0 for now, configurable)
+        financing_paid = 0.0
+
         # Update state
         self.position = qty if side == "long" else -qty
         self.entry_price = exec_price
@@ -301,10 +322,17 @@ class MockBroker:
 
         # Create trade record
         self.current_trade = log_trade_entry(
-            timestamp=self.df.index[idx],
+            signal_time=self.df.index[idx],
+            order_submit_time=self.df.index[idx],
+            exchange_ack_time=self.df.index[idx],
+            fill_time=self.df.index[idx],
             symbol="BTCUSDT",
             side=side,
-            entry_price=exec_price,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            requested_price=exec_price,
+            fill_price=exec_price,
             qty=qty,
             stake_frac=stake_frac,
             leverage=leverage,
@@ -312,7 +340,7 @@ class MockBroker:
             take_profit=self.current_meta["take_profit_frac"],
             max_hold_hours=self.current_meta["max_hold_hours"],
             regime=self.current_meta["regime"],
-            tactical_pred=0.0,  # Will be filled by caller
+            tactical_pred=0.0,
             strategic_params=self.current_meta.copy(),
             equity_before=self.entry_equity,
         )
@@ -325,7 +353,7 @@ class MockBroker:
             return
 
         side = "long" if self.position > 0 else "short"
-        exec_price = self._get_price(idx, side)
+        exec_price, bid, ask, mid = self._get_price_and_market(idx, side)
         qty = abs(self.position)
 
         # Apply fee
@@ -345,6 +373,18 @@ class MockBroker:
         # Slippage
         slippage_paid = abs(exec_price - close_price) * qty
 
+        # Spread cost
+        spread_paid = (ask - bid) * qty / 2.0
+
+        # Financing (simulated: 0 for now)
+        financing_paid = 0.0
+
+        # Effective cost
+        effective_cost = spread_paid + slippage_paid + fee_paid + financing_paid
+
+        # Average expected trade profit (from config or heuristic)
+        avg_expected_profit = self.entry_equity * self.current_meta.get("take_profit_frac", 0.02)
+
         # Log exit
         log_trade_exit(
             trade=self.current_trade,
@@ -353,8 +393,11 @@ class MockBroker:
             pnl=net_pnl,
             pnl_pct=pnl_pct,
             equity_after=self.equity,
-            fee_paid=fee_paid,
-            slippage_paid=slippage_paid,
+            spread=spread_paid,
+            slippage=slippage_paid,
+            commission=fee_paid,
+            financing=financing_paid,
+            avg_expected_trade_profit=avg_expected_profit,
         )
 
         # Archive trade
@@ -463,6 +506,128 @@ class MockBroker:
 
         log_debug(
             f"PARTIAL-EXIT {side.upper()} {fraction:.0%} @ {exec_price:.2f} | PnL {net_pnl:.6f} | pos {self.position:.6f}"
+        )
+
+    # ── Strategy-friendly entry/exit (for live-loop compatibility) ──
+
+    def open_position(
+        self,
+        side: str,
+        stake_frac: float,
+        leverage: int,
+        stop_loss_frac: float,
+        take_profit_frac: float,
+    ) -> "BracketResult":
+        """Open a simulated position and return a BracketResult with cost data.
+
+        Mirrors BinanceBroker.open_position so the strategy can call the
+        same entry path in both live and simulation modes.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class BracketResult:
+            success: bool
+            error: str = ""
+            data: Dict[str, Any] = field(default_factory=dict)
+
+        @dataclass
+        class MarketOrderResult:
+            order_id: str
+            entry_price: Optional[float]
+            commission: float = 0.0
+            commission_asset: str = ""
+            slippage: float = 0.0
+
+        price = self.df.iloc[-1]['close'] if len(self.df) > 0 else 0.0
+        if price <= 0:
+            return BracketResult(success=False, error="price fetch failed")
+
+        equity = self.equity
+        if equity <= 0:
+            return BracketResult(success=False, error="no equity")
+
+        stake = equity * stake_frac * leverage
+        qty = stake / price
+        qty = round(qty, 3)  # rough quantize
+
+        # Market order simulation
+        exec_price, bid, ask, mid = self._get_price_and_market(len(self.df) - 1, side)
+        commission = exec_price * qty * self.fee
+        slippage = abs(exec_price - price) * qty
+        spread_cost = (abs(ask - bid) / mid) * qty / 2.0 if mid > 0 else 0.0
+        financing = 0.0
+
+        self.position = qty if side == "long" else -qty
+        self.entry_price = exec_price
+        self.entry_time = self.df.index[-1] if len(self.df) > 0 else datetime.now(timezone.utc)
+        self.entry_equity = equity
+
+        return BracketResult(
+            success=True,
+            data={
+                "order_id": "sim",
+                "entry_price": exec_price,
+                "commission": commission,
+                "slippage": slippage,
+            },
+        )
+
+    def close_position(self, symbol: str = None, position: float = None) -> "ClosePositionResult":
+        """Close a simulated position and return granular cost breakdown.
+
+        Mirrors BinanceBroker.close_position so the strategy can call the
+        same exit path in both live and simulation modes.
+        """
+        from dataclasses import dataclass
+
+        @dataclass
+        class ClosePositionResult:
+            fill_price: Optional[float]
+            commission: float = 0.0
+            slippage: float = 0.0
+            spread: float = 0.0
+            financing: float = 0.0
+
+        if position is None:
+            position = self.position
+        if not position:
+            return ClosePositionResult(fill_price=None)
+
+        side = "long" if position > 0 else "short"
+        idx = len(self.df) - 1
+        exec_price, bid, ask, mid = self._get_price_and_market(idx, side)
+        qty = abs(position)
+
+        commission = exec_price * qty * self.fee
+        slippage = abs(exec_price - float(self.df.iloc[idx]['close'])) * qty if idx >= 0 else 0.0
+        spread_cost = (abs(ask - bid) / mid) * qty / 2.0 if mid > 0 else 0.0
+
+        # Financing
+        financing = 0.0
+        if self.entry_time:
+            duration_hours = (datetime.now(timezone.utc) - self.entry_time).total_seconds() / 3600
+            intervals = duration_hours / 8  # 8-hour funding intervals
+            financing = qty * mid * 0.0 * intervals if mid > 0 else 0.0  # funding_rate=0 in sim
+
+        # PnL
+        if side == "long":
+            gross_pnl = (exec_price - self.entry_price) * qty
+        else:
+            gross_pnl = (self.entry_price - exec_price) * qty
+        net_pnl = gross_pnl - commission
+        self.equity += net_pnl
+
+        self.position = 0.0
+        self.entry_price = 0.0
+        self.entry_time = None
+
+        return ClosePositionResult(
+            fill_price=exec_price,
+            commission=commission,
+            slippage=slippage,
+            spread=spread_cost,
+            financing=financing,
         )
 
     def close_all(self, idx: int = -1) -> None:
