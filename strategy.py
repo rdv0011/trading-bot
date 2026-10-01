@@ -353,10 +353,12 @@ class DualMLStrategy:
             STAKE_LONG_FRAC_DEFAULT if side == "long" else STAKE_SHORT_FRAC_DEFAULT,
         )
         self.current_trade = log_trade_entry(
-            timestamp=self.entry_time,
+            signal_time=self.entry_time,
+            fill_time=self.entry_time,
             symbol=symbol,
             side=side,
-            entry_price=self.entry_price,
+            requested_price=self.entry_price,
+            fill_price=self.entry_price,
             qty=abs(amount),
             stake_frac=stake_frac,
             leverage=meta.get("recommended_leverage", LEVERAGE_DEFAULT),
