@@ -89,10 +89,26 @@ TAKE_PROFIT_FRAC_DEFAULT = 0.04   # 4% take profit
 MAX_HOLD_HOURS_DEFAULT = 4.0      # Maximum hold time in hours
 LEVERAGE_DEFAULT = 1.0            # Default leverage (1x = spot)
 
+# ── Trading Parameters (broker/market specific) ────────────────────────
+# These are used to log and compare actual costs across live/demo/backtest.
+# When a broker supports per-symbol rates, the broker overrides these at init.
+
+# Commission / fee per side (fraction of notional)
+FEE = 0.0004                  # Binance taker fee per side (0.04%)
+
+# Slippage model (fraction of price)
+SLIPPAGE = 0.0003             # Fixed slippage per trade (0.03%)
+
+# Spread (fraction of price) — midpoint-to-worst-fill spread
+SPREAD = 0.0001               # Default mid-spread estimate (0.01%)
+
+# Funding rate / swap (per-hour fraction, applied at funding intervals)
+# Binance perpetuals fund every 8 hours; this is the expected hourly rate.
+FUNDING_RATE = 0.0            # Expected hourly funding rate (fraction)
+FUNDING_INTERVAL_HOURS = 8    # Funding payment interval in hours
+
 # ── Simulation / Backtest ──────────────────────────────────────────────
 INITIAL_EQUITY = 1.0          # Start with 1.0 (100%)
-FEE = 0.0004                  # Binance taker fee per side
-SLIPPAGE = 0.0003             # Fixed slippage per trade
 
 # Walk-forward settings.
 # LIVE cadence: the live loop retrains tactical every N live ITERATIONS

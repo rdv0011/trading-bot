@@ -184,11 +184,20 @@ def setup_logging(
 
 # ── Trade CSV Logging ──────────────────────────────────────────────────
 TRADE_CSV_FIELDS = [
-    "timestamp",          # ISO format entry time
+    # ── Timing ─────────────────────────────────────────────────────────
+    "signal_time",        # When the strategy generated the signal
+    "order_submit_time",  # When broker submitted the order
+    "exchange_ack_time",  # When exchange acknowledged the order
+    "fill_time",          # When order was fully filled
+    # ── Price / Market snapshot at entry ───────────────────────────────
     "symbol",
     "side",               # "long" or "short"
-    "entry_price",
-    "exit_price",
+    "bid",                # Best bid at signal time
+    "ask",                # Best ask at signal time
+    "mid",                # Mid price at signal time
+    "requested_price",    # Price used to submit the order
+    "fill_price",         # Actual fill price
+    # ── Position sizing ────────────────────────────────────────────────
     "qty",                # Position size (base currency)
     "stake_frac",         # Fraction of equity
     "leverage",
@@ -196,13 +205,32 @@ TRADE_CSV_FIELDS = [
     "take_profit",
     "max_hold_hours",
     "regime",
+    # ── Exit info ──────────────────────────────────────────────────────
     "exit_reason",        # "sl", "tp", "max_hold", "reversal", "manual"
     "pnl",                # Realized PnL (quote currency)
     "pnl_pct",            # PnL as % of stake
     "equity_before",
     "equity_after",
-    "fee_paid",
+    # ── Trading costs (absolute, quote currency) ───────────────────────
+    "spread",             # Absolute spread cost (quote currency)
+    "slippage",           # Absolute slippage cost (quote currency)
+    "commission",         # Absolute commission / fee (quote currency)
+    "financing",          # Net funding / swap paid (positive = cost)
+    "effective_cost",     # spread + slippage + commission + financing
+    "effective_cost_frac",# effective_cost / notional (fraction)
+    "effective_cost_profit_ratio",  # effective_cost / average expected trade profit
+    # ── Legacy aliases (kept for backward compat) ──────────────────────
+    "spread_paid",
+    "commission_paid",
     "slippage_paid",
+    "funding_paid",
+    "total_cost",
+    "spread_frac",
+    "commission_frac",
+    "slippage_frac",
+    "funding_frac",
+    "total_cost_frac",
+    # ── ML / strategy metadata ─────────────────────────────────────────
     "tactical_pred",      # Tactical ML prediction at entry
     "strategic_params",   # JSON string of strategic meta-params
 ]
@@ -244,32 +272,46 @@ def log_trade(trade: Dict[str, Any]) -> None:
 
 
 def log_trade_entry(
-    timestamp: datetime,
-    symbol: str,
-    side: str,
-    entry_price: float,
-    qty: float,
-    stake_frac: float,
-    leverage: float,
-    stop_loss: float,
-    take_profit: float,
-    max_hold_hours: float,
-    regime: str,
-    tactical_pred: float,
-    strategic_params: dict,
-    equity_before: float,
+    signal_time: datetime,
+    order_submit_time: Optional[datetime] = None,
+    exchange_ack_time: Optional[datetime] = None,
+    fill_time: Optional[datetime] = None,
+    symbol: str = "",
+    side: str = "",
+    bid: float = 0.0,
+    ask: float = 0.0,
+    mid: float = 0.0,
+    requested_price: float = 0.0,
+    fill_price: float = 0.0,
+    qty: float = 0.0,
+    stake_frac: float = 0.0,
+    leverage: float = 0.0,
+    stop_loss: float = 0.0,
+    take_profit: float = 0.0,
+    max_hold_hours: float = 0.0,
+    regime: str = "",
+    tactical_pred: float = 0.0,
+    strategic_params: Optional[dict] = None,
+    equity_before: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Create a trade dict for an entry (exit fields left empty).
     Returns the trade dict to be updated on exit.
     """
     import json
+    notional = fill_price * qty if fill_price and qty else (requested_price * qty) if requested_price and qty else 0.0
     return {
-        "timestamp": timestamp.isoformat(),
+        "signal_time": signal_time.isoformat(),
+        "order_submit_time": order_submit_time.isoformat() if order_submit_time else "",
+        "exchange_ack_time": exchange_ack_time.isoformat() if exchange_ack_time else "",
+        "fill_time": fill_time.isoformat() if fill_time else "",
         "symbol": symbol,
         "side": side,
-        "entry_price": round(entry_price, 2),
-        "exit_price": "",
+        "bid": round(bid, 4) if bid else "",
+        "ask": round(ask, 4) if ask else "",
+        "mid": round(mid, 4) if mid else "",
+        "requested_price": round(requested_price, 4) if requested_price else "",
+        "fill_price": round(fill_price, 4) if fill_price else "",
         "qty": round(qty, 6),
         "stake_frac": round(stake_frac, 4),
         "leverage": round(leverage, 2),
@@ -282,10 +324,28 @@ def log_trade_entry(
         "pnl_pct": "",
         "equity_before": round(equity_before, 6),
         "equity_after": "",
-        "fee_paid": "",
+        # Trading costs — filled on exit
+        "spread": "",
+        "slippage": "",
+        "commission": "",
+        "financing": "",
+        "effective_cost": "",
+        "effective_cost_frac": "",
+        "effective_cost_profit_ratio": "",
+        # Legacy aliases
+        "spread_paid": "",
+        "commission_paid": "",
         "slippage_paid": "",
+        "funding_paid": "",
+        "total_cost": "",
+        "spread_frac": "",
+        "commission_frac": "",
+        "slippage_frac": "",
+        "funding_frac": "",
+        "total_cost_frac": "",
         "tactical_pred": round(tactical_pred, 6),
-        "strategic_params": json.dumps(strategic_params),
+        "strategic_params": json.dumps(strategic_params) if strategic_params else "",
+        "_notional": notional,
     }
 
 
@@ -296,21 +356,53 @@ def log_trade_exit(
     pnl: float,
     pnl_pct: float,
     equity_after: float,
-    fee_paid: float,
-    slippage_paid: float,
+    # ── New granular costs ─────────────────────────────────────────────
+    spread: float = 0.0,
+    slippage: float = 0.0,
+    commission: float = 0.0,
+    financing: float = 0.0,
+    # ── Legacy aliases ─────────────────────────────────────────────────
+    fee_paid: float = 0.0,
+    slippage_paid: float = 0.0,
+    spread_paid: float = 0.0,
+    funding_paid: float = 0.0,
+    # ── Optional ───────────────────────────────────────────────────────
+    avg_expected_trade_profit: float = 0.0,
 ) -> Dict[str, Any]:
     """
     Update trade dict with exit info and log to CSV.
     Returns the completed trade dict.
     """
+    notional = trade.get("_notional", exit_price * abs(trade.get("qty", 1.0)))
+
+    effective_cost = spread + slippage + commission + financing
+    total_cost = spread_paid + fee_paid + slippage_paid + funding_paid or effective_cost
+
     trade.update({
-        "exit_price": round(exit_price, 2),
+        "exit_price": round(exit_price, 4),
         "exit_reason": exit_reason,
         "pnl": round(pnl, 6),
         "pnl_pct": round(pnl_pct, 6),
         "equity_after": round(equity_after, 6),
-        "fee_paid": round(fee_paid, 6),
-        "slippage_paid": round(slippage_paid, 6),
+        # New granular costs
+        "spread": round(spread, 6),
+        "slippage": round(slippage, 6),
+        "commission": round(commission, 6),
+        "financing": round(financing, 6),
+        "effective_cost": round(effective_cost, 6),
+        "effective_cost_frac": round(effective_cost / notional, 8) if notional else "",
+        "effective_cost_profit_ratio": round(effective_cost / avg_expected_trade_profit, 4) if avg_expected_trade_profit else "",
+        # Legacy aliases
+        "spread_paid": round(spread_paid or spread, 6),
+        "commission_paid": round(fee_paid or commission, 6),
+        "slippage_paid": round(slippage_paid or slippage, 6),
+        "funding_paid": round(funding_paid or financing, 6),
+        "total_cost": round(total_cost, 6),
+        "spread_frac": round((spread_paid or spread) / notional, 8) if notional else "",
+        "commission_frac": round((fee_paid or commission) / notional, 8) if notional else "",
+        "slippage_frac": round((slippage_paid or slippage) / notional, 8) if notional else "",
+        "funding_frac": round((funding_paid or financing) / notional, 8) if notional else "",
+        "total_cost_frac": round(total_cost / notional, 8) if notional else "",
     })
     log_trade(trade)
     return trade
