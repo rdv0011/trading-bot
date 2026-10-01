@@ -729,18 +729,21 @@ class BinanceBroker(BaseBroker):
     def _create_bracket_order(self, symbol, amount, side, tp_price, sl_price) -> Optional[BracketOrderResult]:
         try:
             exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
+            # Round to exchange-accepted precision (1 dp for high-value assets).
+            tp_rounded = round(tp_price, 1) if tp_price >= 1000 else round(tp_price, 2)
+            sl_rounded = round(sl_price, 1) if sl_price >= 1000 else round(sl_price, 2)
             tp_order = self.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
-                stopPrice=tp_price,
+                stopPrice=tp_rounded,
                 closePosition=True,
             )
             sl_order = self.client.futures_create_order(
                 symbol=symbol,
                 side=exit_side,
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                stopPrice=sl_price,
+                stopPrice=sl_rounded,
                 closePosition=True,
             )
             tp_id = str(tp_order.get("algoId"))
@@ -1134,15 +1137,18 @@ class BinanceBroker(BaseBroker):
             # protected from the start.
             try:
                 sl_side = SIDE_BUY if not is_long else SIDE_SELL
+                # Round stopPrice to exchange-accepted precision (1 dp for
+                # high-value assets like BTC, 2 dp otherwise).
+                rounded_price = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
                 self.client.futures_create_order(
                     symbol=sym,
                     side=sl_side,
                     type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                    stopPrice=new_sl_price,
+                    stopPrice=rounded_price,
                     closePosition=True,
                 )
                 self.logger.info(
-                    f"SL order created: {sym} {new_sl_price:.2f}"
+                    f"SL order created: {sym} {rounded_price:.2f}"
                 )
                 return True
             except Exception as e:
@@ -1194,15 +1200,16 @@ class BinanceBroker(BaseBroker):
         # Place new SL order
         try:
             sl_side = SIDE_BUY if not is_long else SIDE_SELL
+            rounded_sl = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
             self.client.futures_create_order(
                 symbol=sym,
                 side=sl_side,
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                stopPrice=new_sl_price,
+                stopPrice=rounded_sl,
                 closePosition=True,
             )
             self.logger.info(
-                f"SL order updated: {sym} {current_sl:.2f} -> {new_sl_price:.2f} "
+                f"SL order updated: {sym} {current_sl:.2f} -> {rounded_sl:.2f} "
                 f"(diff={price_diff:.4%})"
             )
             return True
@@ -1285,15 +1292,16 @@ class BinanceBroker(BaseBroker):
 
         try:
             tp_side = SIDE_SELL if is_long else SIDE_BUY
+            rounded_tp = round(new_tp_price, 1) if new_tp_price >= 1000 else round(new_tp_price, 2)
             self.client.futures_create_order(
                 symbol=sym,
                 side=tp_side,
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
-                stopPrice=new_tp_price,
+                stopPrice=rounded_tp,
                 closePosition=True,
             )
             self.logger.info(
-                f"TP order updated: {sym} {current_tp:.2f} -> {new_tp_price:.2f} "
+                f"TP order updated: {sym} {current_tp:.2f} -> {rounded_tp:.2f} "
                 f"(diff={price_diff:.4%})"
             )
             return True
