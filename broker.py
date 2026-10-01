@@ -465,8 +465,14 @@ class BinanceBroker(BaseBroker):
         """
         sym = self.symbol
         try:
-            info = self.client.futures_symbol_info(sym)
-            if not info:
+            # futures_exchange_info() returns ALL symbols; filter for ours.
+            all_symbols = self.client.futures_exchange_info()
+            sym_info = None
+            for s in all_symbols.get("symbols", []):
+                if s.get("symbol") == sym:
+                    sym_info = s
+                    break
+            if not sym_info:
                 self.logger.warning(f"No symbol info for {sym}; keeping defaults")
                 return
 
