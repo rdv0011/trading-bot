@@ -477,18 +477,10 @@ class BinanceBroker(BaseBroker):
                 return
 
             # ── Taker fee from fee_rate ──────────────────────────────────
-            try:
-                fee_rate = self.client.futures_fee_rate(sym=sym)
-                for entry in fee_rate:
-                    # Binance returns rate as e.g. "00400" meaning 0.0400%
-                    rate_str = entry.get("makerCommission", "0") + entry.get("takerCommission", "0")
-                    # Actually the API returns takerCommission as a string like "400" (basis points * 10)
-                    taker = float(entry.get("takerCommission", 0))
-                    # takerCommission is in basis-points-of-basis-points: 400 = 0.04%
-                    self.fee = taker / 10000  # 400 -> 0.0004
-                self.logger.info(f"Loaded taker fee for {sym}: {self.fee:.6f} ({self.fee:.4%})")
-            except Exception as e:
-                self.logger.warning(f"Could not fetch fee_rate for {sym}: {e}")
+            # futures_fee_rate() does not exist on python-binance Client;
+            # keep the config default (0.0004 = 0.04%) which matches
+            # Binance Futures taker fee.
+            self.logger.info(f"Using default taker fee for {sym}: {self.fee:.6f} ({self.fee:.4%})")
 
             # ── Spread from order book snapshot ──────────────────────────
             try:
@@ -509,8 +501,11 @@ class BinanceBroker(BaseBroker):
             try:
                 funding = self.client.futures_funding_rate(symbol=sym)
                 if funding:
-                    # Latest funding rate as string
-                    rate = float(funding.get("fundingRate", 0))
+                    # futures_funding_rate returns a list; take the first entry.
+                    if isinstance(funding, list) and funding:
+                        rate = float(funding[0].get("fundingRate", 0))
+                    else:
+                        rate = float(funding.get("fundingRate", 0))
                     self.funding_rate = rate
                     self.logger.info(
                         f"Loaded funding rate for {sym}: {self.funding_rate:.8f} "
