@@ -997,8 +997,6 @@ class DualMLStrategy:
 
     def _enter_position(self, side: str, price: float, timestamp: datetime) -> None:
         """Open new position."""
-        # Apply slippage (broker handles this in reality)
-        # For strategy, we just log intent
         stake_frac = (
             self.current_meta["stake_long_frac"]
             if side == "long"
@@ -1032,12 +1030,29 @@ class DualMLStrategy:
         self.same_dir_streak = 0
         self.reversal_streak = 0
 
-        # Create trade record
+        # Market snapshot at signal time
+        bid, ask, mid = 0.0, 0.0, 0.0
+        if hasattr(self.broker, "get_market_snapshot"):
+            bid, ask, mid = self.broker.get_market_snapshot()
+
+        # Granular costs from broker result
+        data = getattr(result, "data", {}) or {}
+        commission = data.get("commission", 0.0)
+        slippage = data.get("slippage", 0.0)
+
+        # Create trade record with full timing/market/cost data
         self.current_trade = log_trade_entry(
-            timestamp=timestamp,
+            signal_time=timestamp,
+            order_submit_time=timestamp,
+            exchange_ack_time=timestamp,
+            fill_time=timestamp,
             symbol="BTCUSDT",
             side=side,
-            entry_price=self.entry_price,
+            bid=bid,
+            ask=ask,
+            mid=mid,
+            requested_price=self.entry_price,
+            fill_price=self.entry_price,
             qty=qty,
             stake_frac=stake_frac,
             leverage=leverage,
@@ -1160,8 +1175,8 @@ class DualMLStrategy:
         side = "long" if self.position > 0 else "short"
 
         # Delegate to broker; broker.close_position() uses its own symbol/position
-        fill_price = self.broker.close_position()
-        actual_fill = fill_price or price
+        close_result = self.broker.close_position()
+        actual_fill = close_result.fill_price if close_result else (price if close_result is None else 0.0)
 
         if self.current_trade:
             entry_price = self.entry_price or actual_fill
@@ -1172,6 +1187,21 @@ class DualMLStrategy:
                 else (entry_price - actual_fill) * notional
             )
             equity_before = self.current_trade.get("equity_before") or 1.0
+
+            # Market snapshot at exit time
+            bid, ask, mid = 0.0, 0.0, 0.0
+            if hasattr(self.broker, "get_market_snapshot"):
+                bid, ask, mid = self.broker.get_market_snapshot()
+
+            # Granular costs from broker result
+            spread = close_result.spread if close_result else 0.0
+            slippage = close_result.slippage if close_result else 0.0
+            commission = close_result.commission if close_result else 0.0
+            financing = close_result.financing if close_result else 0.0
+
+            # Average expected trade profit (from config or heuristic)
+            avg_expected_profit = equity_before * self.current_meta.get("take_profit_frac", 0.02)
+
             log_trade_exit(
                 trade=self.current_trade,
                 exit_price=actual_fill,
@@ -1179,8 +1209,11 @@ class DualMLStrategy:
                 pnl=raw_pnl,
                 pnl_pct=raw_pnl / equity_before if equity_before else 0.0,
                 equity_after=self.broker.get_equity(),
-                fee_paid=0.0,
-                slippage_paid=0.0,
+                spread=spread,
+                slippage=slippage,
+                commission=commission,
+                financing=financing,
+                avg_expected_trade_profit=avg_expected_profit,
             )
 
         log_info(f"LIVE EXIT {reason.upper()} @ {actual_fill:.2f}")
