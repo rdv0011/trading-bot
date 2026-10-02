@@ -263,10 +263,18 @@ def log_trade(trade: Dict[str, Any]) -> None:
 
     # Also log to file logger
     logger = logging.getLogger(__name__)
+    entry = float(trade.get('entry_price')) if trade.get('entry_price') else 'N/A'
+    exit_p = float(trade.get('exit_price')) if trade.get('exit_price') else 'N/A'
+    pnl = float(trade.get('pnl')) if trade.get('pnl') else 'N/A'
+    pnl_pct = float(trade.get('pnl_pct')) if trade.get('pnl_pct') else 'N/A'
+    entry_fmt = f"{entry:.2f}" if isinstance(entry, float) else entry
+    exit_fmt = f"{exit_p:.2f}" if isinstance(exit_p, float) else exit_p
+    pnl_fmt = f"{pnl:.6f}" if isinstance(pnl, float) else pnl
+    pnl_pct_fmt = f"{pnl_pct:.2%}" if isinstance(pnl_pct, float) else pnl_pct
     logger.debug(
         f"TRADE | {trade.get('timestamp')} | {trade.get('side').upper()} | "
-        f"Entry: {trade.get('entry_price'):.2f} | Exit: {trade.get('exit_price'):.2f} | "
-        f"PnL: {trade.get('pnl'):.6f} ({trade.get('pnl_pct'):.2%}) | "
+        f"Entry: {entry_fmt} | Exit: {exit_fmt} | "
+        f"PnL: {pnl_fmt} ({pnl_pct_fmt}) | "
         f"Regime: {trade.get('regime')} | Reason: {trade.get('exit_reason')}"
     )
 

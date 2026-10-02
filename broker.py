@@ -594,7 +594,7 @@ class BinanceBroker(BaseBroker):
         """
         sym = symbol or self.symbol
         try:
-            depth = self.client.futures_order_book(symbol=sym, limit=1)
+            depth = self.client.futures_order_book(symbol=sym, limit=5)
             bid = float(depth["bids"][0][0])
             ask = float(depth["asks"][0][0])
             mid = (bid + ask) / 2.0
