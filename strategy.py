@@ -694,9 +694,14 @@ class DualMLStrategy:
                 else "below_thr" if not np.isnan(pred) and abs(pred) <= thr
                 else "nan_pred"
             )
-            log_debug(
+            thr_detail = ""
+            if thr_mode == "adapt":
+                q95 = int(_cfg_flag("ADAPTIVE_QUANTILE", 0.95, self.config) * 100)
+                lookback = _cfg_flag("ADAPTIVE_LOOKBACK", 200, self.config)
+                thr_detail = f" q95={q95} lookback={lookback} preds={len(self.pred_history)}"
+            log_info(
                 f"DECISION iter={self._iteration} pred={pred:+.6f} "
-                f"thr={thr:.6f}({thr_mode}) regime={regime} vol={vol_ratio:.2f}({vol_state}) "
+                f"thr={thr:.6f}({thr_mode}{thr_detail}) regime={regime} vol={vol_ratio:.2f}({vol_state}) "
                 f"pos={self.position:+.6f} price={current_price:.2f} "
                 f"atr14={self._last_atr14:.4f} cooldown_left={cooldown_left:.1f}m "
                 f"signal=hold reason={reason}"
