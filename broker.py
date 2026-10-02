@@ -563,7 +563,7 @@ class BinanceBroker(BaseBroker):
                 )
                 return result
             except BinanceAPIException as exc:
-                raw_params = kwargs.get("params", "")
+                raw_params = kwargs.get("data", kwargs.get("params", ""))
                 self.logger.error(f"API error: {method} {uri} — params={raw_params} — code={exc.code}")
                 if "-1003" in str(exc):
                     ban_ms = _parse_ban_ms(str(exc))
