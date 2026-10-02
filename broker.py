@@ -563,7 +563,8 @@ class BinanceBroker(BaseBroker):
                 )
                 return result
             except BinanceAPIException as exc:
-                self.logger.error(f"API error: {method} {uri} — code={exc.code}")
+                params = [f"{k}={v}" for k, v in kwargs.items() if v is not None]
+                self.logger.error(f"API error: {method} {uri} — params={params} — code={exc.code}")
                 if "-1003" in str(exc):
                     ban_ms = _parse_ban_ms(str(exc))
                     self.logger.error(f"Rate-limit ban detected — entering cooldown")
