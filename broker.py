@@ -805,6 +805,32 @@ class BinanceBroker(BaseBroker):
                 tp_price = round(entry_price * (1 - tp_frac), 2)
                 sl_price = round(entry_price * (1 + sl_frac), 2)
 
+            # 3b. Position verification — guard against race condition where the
+            #     entry filled but the position was already closed (e.g. by another
+            #     signal or cooldown) before bracket placement.  Binance rejects
+            #     closePosition=True bracket orders with APIError -4509 when no
+            #     position exists.  In that case the entry succeeded; brackets are
+            #     unnecessary.
+            current_position = self.get_position(symbol)
+            if current_position is None or not current_position.amount:
+                self.logger.warning(
+                    f"Position already closed after entry fill for {symbol}; "
+                    f"skipping bracket placement"
+                )
+                return BracketResult(
+                    success=True,
+                    data={
+                        "order_id": order_result.order_id,
+                        "entry_price": entry_price,
+                        "tp_price": tp_price,
+                        "sl_price": sl_price,
+                        "tp_algo_id": "",
+                        "sl_algo_id": "",
+                        "commission": order_result.commission,
+                        "slippage": order_result.slippage,
+                    },
+                )
+
             # 4. Place bracket orders
             bracket_order_result = self._create_bracket_order(
                 symbol, quantity, market_order_side, tp_price, sl_price
