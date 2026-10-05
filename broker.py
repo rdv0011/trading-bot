@@ -752,6 +752,34 @@ class BinanceBroker(BaseBroker):
             sl_id = str(sl_order.get("algoId"))
             return BracketOrderResult(tp_order_id=tp_id, sl_order_id=sl_id)
         except Exception as e:
+            err_str = str(e)
+            if "-4130" in err_str:
+                self.logger.warning(f"Stale bracket order detected ({e}); canceling all orders and retrying once")
+                self._cancel_all_open_orders(symbol)
+                try:
+                    exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
+                    tp_rounded = round(tp_price, 1) if tp_price >= 1000 else round(tp_price, 2)
+                    sl_rounded = round(sl_price, 1) if sl_price >= 1000 else round(sl_price, 2)
+                    tp_order = self.client.futures_create_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                        stopPrice=tp_rounded,
+                        closePosition=True,
+                    )
+                    sl_order = self.client.futures_create_order(
+                        symbol=symbol,
+                        side=exit_side,
+                        type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                        stopPrice=sl_rounded,
+                        closePosition=True,
+                    )
+                    tp_id = str(tp_order.get("algoId"))
+                    sl_id = str(sl_order.get("algoId"))
+                    return BracketOrderResult(tp_order_id=tp_id, sl_order_id=sl_id)
+                except Exception as retry_e:
+                    self.logger.error(f"Bracket order retry failed: {retry_e}")
+                    return None
             self.logger.error(f"Bracket order failed: {e}")
             return None
 
@@ -912,6 +940,27 @@ class BinanceBroker(BaseBroker):
         """
         step = 10 ** (-TRADEABLE_QUANTITY_PRECISION)
         return round((qty // step) * step, TRADEABLE_QUANTITY_PRECISION)
+
+    def _cancel_all_open_orders(self, symbol: str = None, max_retries: int = 3, base_delay: float = 0.5):
+        """Cancel both regular and conditional open orders for a symbol."""
+        sym = symbol or self.symbol
+        errors = []
+        for attempt in range(max_retries):
+            try:
+                regular_orders = self.client.futures_get_open_orders(symbol=sym)
+                for o in regular_orders:
+                    self.client.futures_cancel_order(symbol=sym, orderId=o.get("orderId"))
+                conditional_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)
+                for o in conditional_orders:
+                    algo_id = o.get("algoId")
+                    if algo_id:
+                        self.client.futures_cancel_order(symbol=sym, algoId=algo_id, conditional=True)
+                return
+            except Exception as e:
+                errors.append(str(e))
+                if attempt < max_retries - 1:
+                    time.sleep(base_delay * (2 ** attempt))
+        self.logger.warning(f"Cancel all open orders encountered errors: {', '.join(errors)}")
 
     def cancel_open_orders(self, symbol: str = None, max_retries: int = 3, base_delay: float = 0.5):
         sym = symbol or self.symbol
@@ -1357,6 +1406,10 @@ class BinanceBroker(BaseBroker):
                     except Exception as e:
                         if "No need to change margin type" in str(e):
                             break
+                        if "-4067" in str(e):
+                            self.logger.warning(f"Margin type blocked by open orders ({e}); canceling all orders and retrying")
+                            self._cancel_all_open_orders(sym)
+                            continue
                         if "-1007" in str(e) and _attempt == 0:
                             time.sleep(1)
                             continue
