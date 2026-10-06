@@ -359,7 +359,9 @@ class BaseBroker(ABC):
                 "taker_buy_base_asset_volume", "taker_buy_quote_asset_volume", "ignore"
             ])
             df["timestamp"] = pd.to_datetime(df["timestamp"], unit="ms")
-            df = df[["timestamp", "open", "high", "low", "close", "volume"]]
+            # Keep quote_volume for absolute volume gating (Oct 5 post-mortem)
+            df = df[["timestamp", "open", "high", "low", "close", "volume", "quote_asset_volume"]]
+            df = df.rename(columns={"quote_asset_volume": "quote_volume"})
             df.set_index("timestamp", inplace=True)
             df = df.astype(float)
 
