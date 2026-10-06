@@ -259,6 +259,16 @@ def test_classify_vol_state_normal_and_extreme(sim_module):
     assert classify_vol_state(float("inf")) == "normal"
 
 
+def test_classify_abs_vol_state_normal_and_dropped(sim_module):
+    from data import classify_abs_vol_state
+    assert classify_abs_vol_state(1.0) == "normal"
+    assert classify_abs_vol_state(0.10) == "normal"
+    assert classify_abs_vol_state(0.09) == "abs_vol_dropped"
+    assert classify_abs_vol_state(0.01) == "abs_vol_dropped"
+    assert classify_abs_vol_state(float("nan")) == "abs_vol_dropped"
+    assert classify_abs_vol_state(float("inf")) == "abs_vol_dropped"
+
+
 # ── Phase 2: Adaptive threshold via run_simulation ──────────────────────
 def test_run_adaptive_threshold_blocks_weak_signals(sim_module, monkeypatch):
     df = _make_featured_df()

@@ -190,6 +190,21 @@ TRADE_COOLDOWN_MINUTES = 30           # minimum gap between new entries
 # False, startup is refused if an open position exists.
 ADOPT_EXISTING_POSITION = _get_bool("ADOPT_EXISTING_POSITION", True)
 
+# ── Absolute Volume Gating (Oct 5 post-mortem) ─────────────────────────
+# vol_ratio (vol_12/vol_48) is a RELATIVE metric: it stays near 1.0 when
+# BOTH short-term and long-term return-volatility collapse together — which
+# is exactly what happens during a liquidity vacuum.  quote_volume from the
+# kline bar is the ABSOLUTE measure of actual trading activity.
+#
+# abs_vol_ratio = current_bar_quote_volume / rolling_median_quote_volume
+#   < 0.10  → "abs_vol_dropped"  (volume < 10% of rolling median)
+#   >= 0.10 → "normal"
+#
+# When abs_vol_ratio is critical, regime detection forces "halt" and the
+# strategy blocks entries / exits positions.
+ABS_VOL_RATIO_CRITICAL = 0.10             # ratio below this = absolute volume drop
+ABS_VOL_RATIO_ROLLING_WINDOW = 48          # rolling window for median (candles)
+
 # ── Signal Thresholds ──────────────────────────────────────────────────
 # Tactical signal threshold (absolute; used when ADAPTIVE_THRESHOLD_ENABLED=False)
 ABSOLUTE_THRESHOLD = 0.006      # Minimum prediction to trigger LONG/SHORT

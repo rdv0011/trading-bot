@@ -22,6 +22,7 @@ from config import (
     MODEL_DIR, STRATEGIC_TARGET_COLS,
     REGIME_LEVERAGE, REGIME_STAKE_LONG, REGIME_STAKE_SHORT,
     REGIME_STOP_LOSS, TAKE_PROFIT_MULT, REGIME_MAX_HOLD,
+    ABS_VOL_RATIO_CRITICAL, ABS_VOL_RATIO_ROLLING_WINDOW,
 )
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -124,8 +125,8 @@ def download_historical(
     df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
     df.set_index('timestamp', inplace=True)
 
-    # Keep only OHLCV
-    df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    # Keep OHLCV + quote_volume (absolute volume measure for Oct 5 post-mortem gating)
+    df = df[['open', 'high', 'low', 'close', 'volume', 'quote_volume']].astype(float)
 
     # Deduplicate overlapping batch boundaries, sort chronologically,
     # then trim to the most recent `target_candles`.
@@ -177,8 +178,20 @@ def make_features_df(
     df['dow_sin'] = np.sin(2 * np.pi * dows / 7)
     df['dow_cos'] = np.cos(2 * np.pi * dows / 7)
 
-    # Regime detection
+    # Regime detection (old logic based on vol_ratio only)
     df['regime'] = df.apply(_detect_regime, axis=1)
+
+    # Absolute volume ratio (Oct 5 post-mortem: relative vol_ratio masks
+    # volume vacuums where both short and long vol collapse together).
+    # abs_vol_ratio = current bar quote_volume / rolling median quote_volume
+    rolling_median_vol = df['quote_volume'].rolling(ABS_VOL_RATIO_ROLLING_WINDOW, min_periods=1).median()
+    df['abs_vol_ratio'] = df['quote_volume'] / rolling_median_vol.clip(lower=1e-8)
+
+    # Override regime to "halt" where absolute volume is critically low
+    df['abs_vol_state'] = df['abs_vol_ratio'].apply(
+        lambda x: classify_abs_vol_state(x, ABS_VOL_RATIO_CRITICAL)
+    )
+    df.loc[df['abs_vol_state'] == 'abs_vol_dropped', 'regime'] = 'halt' 
 
     # Drop NaN rows from feature engineering
     df = df.dropna().round(5)
@@ -186,8 +199,10 @@ def make_features_df(
     return df
 
 
-def _detect_regime(row) -> str:
-    """Detect regime: trend, chop, high_vol (from original mltrainingcore)."""
+def _detect_regime(row, abs_vol_state: str = "normal") -> str:
+    """Detect regime: trend, chop, high_vol, or halt."""
+    if abs_vol_state == "abs_vol_dropped":
+        return "halt"
     atr = max(row["atr14"], 1e-8)
     trend_strength = abs(row["ema_20"] - row["ema_100"]) / atr
     vol_ratio = row["vol_12"] / max(row["vol_48"], 1e-8)
@@ -245,6 +260,18 @@ def classify_vol_state(vol_ratio: float, extreme_ratio: float = 1.8) -> str:
     if not np.isfinite(vol_ratio):
         return "extreme" if extreme_ratio <= 0 else "normal"
     return "extreme" if vol_ratio >= extreme_ratio else "normal"
+
+
+def classify_abs_vol_state(abs_vol_ratio: float, critical_ratio: float = 0.10) -> str:
+    """
+    Classify absolute volume ratio into a state.
+
+    Returns "abs_vol_dropped" when abs_vol_ratio < critical_ratio
+    (actual trading activity collapsed below rolling median), else "normal".
+    """
+    if not np.isfinite(abs_vol_ratio):
+        return "abs_vol_dropped"
+    return "abs_vol_dropped" if abs_vol_ratio < critical_ratio else "normal"
 
 
 # ── Strategic Feature & Label Engineering (1h) ─────────────────────────

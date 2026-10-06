@@ -98,7 +98,7 @@ Get testnet API keys from: https://testnet.binance.vision/
 Downloads historical data, engineers features, and trains both models:
 
 ```bash
-python main.py train --symbol BTCUSDT --days 90
+python main.py train --symbol BTCUSDT --days 180
 ```
 
 **What it does:**

@@ -594,7 +594,7 @@ class TestDownloadPagination:
             df = download_historical(days=2, timeframe="15m", testnet=True)
 
         assert len(df) == 192
-        assert len(df.columns) == 5
+        assert len(df.columns) == 6
 
     def test_ss112_download_trims_to_most_recent(self):
         """Downloading trims to the most recent target candles."""

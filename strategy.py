@@ -30,7 +30,7 @@ from config import (
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
-from data import make_features_df, add_strategic_features_df, make_labels_df, adaptive_threshold, classify_vol_state
+from data import make_features_df, add_strategic_features_df, make_labels_df, adaptive_threshold, classify_vol_state, classify_abs_vol_state
 
 
 # ── Flag Reader (runtime overrides → injected cfg → module config) ─────
@@ -645,6 +645,11 @@ class DualMLStrategy:
         vol_state = classify_vol_state(
             vol_ratio, float(_cfg_flag("EXTREME_VOL_RATIO", 1.8, self.config))
         )
+        # Absolute volume ratio (Oct 5 post-mortem: relative vol_ratio masks volume vacuums)
+        abs_vol_ratio = last_row.get("abs_vol_ratio", 1.0)
+        abs_vol_state = classify_abs_vol_state(
+            abs_vol_ratio, float(_cfg_flag("ABS_VOL_RATIO_CRITICAL", 0.10, self.config))
+        )
         cooldown_left = 0.0
         if (
             self.position == 0
@@ -681,7 +686,8 @@ class DualMLStrategy:
                 )
 
         # Chop/hold gate blocks ENTRIES only (exits ran above)
-        if self.current_meta.get("regime") == "chop" or signal == "hold":
+        halt_regime = self.current_meta.get("regime") in ("chop", "halt")
+        if halt_regime or signal == "hold":
             if self.current_meta.get("regime") == "chop" and signal in ("long", "short"):
                 log_warning(
                     f"GATE regime: chop market blocked {signal} entry "
@@ -690,6 +696,7 @@ class DualMLStrategy:
             reason = (
                 "vol_gate" if vol_blocked
                 else "liq_gate" if liq_blocked
+                else "halt_regime" if self.current_meta.get("regime") == "halt"
                 else "chop_gate" if self.current_meta.get("regime") == "chop"
                 else "below_thr" if not np.isnan(pred) and abs(pred) <= thr
                 else "nan_pred"
@@ -702,6 +709,7 @@ class DualMLStrategy:
             log_info(
                 f"DECISION iter={self._iteration} pred={pred:+.6f} "
                 f"thr={thr:.6f}({thr_mode}{thr_detail}) regime={regime} vol={vol_ratio:.2f}({vol_state}) "
+                f"abs_vol={abs_vol_ratio:.3f}({abs_vol_state}) "
                 f"pos={self.position:+.6f} price={current_price:.2f} "
                 f"atr14={self._last_atr14:.4f} cooldown_left={cooldown_left:.1f}m "
                 f"signal=hold reason={reason}"
@@ -730,6 +738,7 @@ class DualMLStrategy:
             log_debug(
                 f"DECISION iter={self._iteration} pred={pred:+.6f} "
                 f"thr={thr:.6f}({thr_mode}) regime={regime} vol={vol_ratio:.2f}({vol_state}) "
+                f"abs_vol={abs_vol_ratio:.3f}({abs_vol_state}) "
                 f"pos={self.position:+.6f} price={current_price:.2f} "
                 f"atr14={self._last_atr14:.4f} cooldown_left={cooldown_left:.1f}m "
                 f"signal={signal}"
@@ -834,6 +843,13 @@ class DualMLStrategy:
         snap = mon.snapshot()
         if snap is None or not snap["fresh"]:
             return None
+        # Absolute trade intensity: exit if actual trading activity collapses
+        # while holding (Oct 5 post-mortem: bot held through volume vacuum)
+        intensity = snap.get("trade_intensity_usd_s", float('inf'))
+        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 50000.0, self.config))
+        if intensity < min_intensity:
+            return "liq_exit"
+        # Spread and depth checks (existing)
         if snap["spread_bps"] > float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 20.0, self.config)):
             return "liq_exit"
         if snap["depth_total_usd"] < float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 25000.0, self.config)):
