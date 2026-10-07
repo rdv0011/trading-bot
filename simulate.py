@@ -448,7 +448,7 @@ class MockBroker:
         if self.position == 0 or self.current_trade is None:
             return
 
-        exec_price = self._get_price(idx, side)
+        exec_price, _bid, _ask, _mid = self._get_price_and_market(idx, side)
         base_qty = abs(self.position)
         add_qty = base_qty * float(_cfg_flag("SCALE_STAKE_FRAC", 0.5))
         if add_qty <= 0:
@@ -481,7 +481,7 @@ class MockBroker:
         if self.position == 0 or self.current_trade is None:
             return
 
-        exec_price = self._get_price(idx, side)
+        exec_price, _bid, _ask, _mid = self._get_price_and_market(idx, side)
         fraction = float(_cfg_flag("PARTIAL_EXIT_FRACTION", 0.33))
         fraction = min(max(fraction, 0.0), 0.99)
 

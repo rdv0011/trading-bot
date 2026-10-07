@@ -191,7 +191,8 @@ def test_trade_csv_suppressed_inside_decorated_fn(tmp_path):
     target = tmp_path / "trades_test.csv"
 
     def trade_dict():
-        return {"timestamp": "2024-01-01T00:00:00", "symbol": "BTCUSDT",
+        return {"timestamp": "2024-01-01T00:00:00", "signal_time": "2024-01-01T00:00:00",
+                "symbol": "BTCUSDT",
                 "side": "long", "entry_price": 40000.0, "exit_price": 39900.0,
                 "qty": 1.0, "pnl": -100.0, "pnl_pct": -0.01, "exit_reason": "test",
                 "regime": "trend", "stake_frac": 0.1, "leverage": 1.0,

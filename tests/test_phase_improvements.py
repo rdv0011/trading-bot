@@ -625,10 +625,18 @@ def test_strategy_opposite_live_partial_then_full_flip(strategy_factory):
     strat.position = 1.0
     strat._initial_qty = 1.0
     strat.current_trade = _open_trade()
+
+    # Broker must return objects with the attributes strategy expects:
+    #   close_position_fraction → float (fill_price)
+    #   close_position          → object with .fill_price, .spread, .slippage, .commission, .financing
     broker.close_position_fraction.return_value = 39900.0
-    broker.close_position.return_value = 39900.0
+    _CloseResult = types.SimpleNamespace
+    broker.close_position.return_value = _CloseResult(
+        fill_price=39900.0, spread=0.0, slippage=0.0, commission=0.0, financing=0.0,
+    )
     broker.get_position.return_value = MagicMock(amount=0.67, entry_price=39900.0)
     broker.open_position.return_value = MagicMock(success=True, amount=0.67, entry_price=39900.0)
+    broker.get_market_snapshot.return_value = (0.0, 0.0, 0.0)
 
     # First reversal -> partial close (still long)
     strat._handle_opposite_live("short", 40000.0, datetime(2024, 1, 1, 0, 0))
