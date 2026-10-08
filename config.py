@@ -169,6 +169,17 @@ LIQ_EXIT_SPREAD_BPS = 20.0            # exit when spread widens beyond this
 LIQ_EXIT_MIN_DEPTH_USD = 25000.0      # exit when total depth collapses below this
 LIQUIDITY_FAIL_OPEN_ON_STALE = _get_bool("LIQUIDITY_FAIL_OPEN_ON_STALE", True)
 
+# ── Cost-to-Edge Optimizations ─────────────────────────────────────────
+# Confidence-weighted position sizing: stake scales by |pred|/threshold^power
+CONFIDENCE_STAKE_POWER = 0.5                # sqrt scaling (diminishing returns)
+CONFIDENCE_STAKE_CAP = 3.0                  # max stake multiplier (3x base)
+
+# Liquidity exit grace period: suppress liq_exit for N minutes after entry
+LIQ_EXIT_GRACE_PERIOD_MIN = 5               # minutes to suppress liq_exit after entry
+
+# Spread-aware entry gate: block entries when spread exceeds this threshold
+SPREAD_ENTRY_GATE_BPS = 20.0                # bps threshold for entry gate
+
 # ── Position Scaling (Phase 3) ─────────────────────────────────────────
 SCALING_ENABLED = _get_bool("SCALING_ENABLED", True)
 MAX_SCALE_COUNT = 2                   # scale-ins allowed after initial entry
