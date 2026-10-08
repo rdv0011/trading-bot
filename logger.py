@@ -416,6 +416,108 @@ def log_trade_exit(
     return trade
 
 
+# ── Cost Tracking Dashboard (Improvement 4) ────────────────────────────
+COST_CSV_PATH = LOG_DIR / "cost_summary.csv"
+_COST_CSV_FIELDS = [
+    "timestamp",
+    "trade_id",
+    "side",
+    "spread_cost",
+    "commission",
+    "slippage",
+    "financing",
+    "total_cost",
+    "pred",
+    "notional",
+    "expected_profit",
+    "cost_ratio",
+    "net_edge",
+]
+
+
+def _ensure_cost_csv() -> None:
+    """Create cost_summary.csv with header if it doesn't exist."""
+    if not COST_CSV_PATH.exists():
+        with open(COST_CSV_PATH, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=_COST_CSV_FIELDS)
+            writer.writeheader()
+
+
+def log_cost_summary(
+    trade_id: str,
+    side: str,
+    spread_cost: float,
+    commission: float,
+    slippage: float,
+    financing: float,
+    total_cost: float,
+) -> None:
+    """Log a structured cost summary line to logger and CSV."""
+    logger = logging.getLogger(__name__)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    logger.info(
+        f"COST_SUMMARY trade_id={trade_id} side={side} "
+        f"spread_cost={spread_cost:.2f} commission={commission:.2f} "
+        f"slippage={slippage:.2f} financing={financing:.2f} "
+        f"total={total_cost:.2f}"
+    )
+    _ensure_cost_csv()
+    with open(COST_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_COST_CSV_FIELDS)
+        writer.writerow({
+            "timestamp": ts,
+            "trade_id": trade_id,
+            "side": side,
+            "spread_cost": round(spread_cost, 2),
+            "commission": round(commission, 2),
+            "slippage": round(slippage, 2),
+            "financing": round(financing, 2),
+            "total_cost": round(total_cost, 2),
+            "pred": "",
+            "notional": "",
+            "expected_profit": "",
+            "cost_ratio": "",
+            "net_edge": "",
+        })
+
+
+def log_edge_summary(
+    trade_id: str,
+    pred: float,
+    notional: float,
+    expected_profit: float,
+    total_cost: float,
+) -> None:
+    """Log a structured edge summary line to logger and CSV."""
+    logger = logging.getLogger(__name__)
+    ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    cost_ratio = total_cost / expected_profit if expected_profit > 0 else 0.0
+    net_edge = expected_profit - total_cost
+    logger.info(
+        f"EDGE_SUMMARY trade_id={trade_id} pred={pred:+.6f} "
+        f"notional={notional:.2f} expected_profit={expected_profit:.2f} "
+        f"cost_ratio={cost_ratio:.2f} net_edge={net_edge:.2f}"
+    )
+    _ensure_cost_csv()
+    with open(COST_CSV_PATH, "a", newline="", encoding="utf-8") as f:
+        writer = csv.DictWriter(f, fieldnames=_COST_CSV_FIELDS)
+        writer.writerow({
+            "timestamp": ts,
+            "trade_id": trade_id,
+            "side": "",
+            "spread_cost": "",
+            "commission": "",
+            "slippage": "",
+            "financing": "",
+            "total_cost": "",
+            "pred": round(pred, 6),
+            "notional": round(notional, 2),
+            "expected_profit": round(expected_profit, 2),
+            "cost_ratio": round(cost_ratio, 4),
+            "net_edge": round(net_edge, 2),
+        })
+
+
 # ── Convenience Logging Functions ──────────────────────────────────────
 def log_info(msg: str) -> None:
     """Log INFO to console + file."""
