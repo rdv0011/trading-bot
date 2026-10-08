@@ -28,7 +28,7 @@ from config import (
     PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION, REVERSAL_FULL_CLOSE_STREAK,
     TRADE_COOLDOWN_ENABLED, TRADE_COOLDOWN_MINUTES,
 )
-from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity
+from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
 from data import make_features_df, add_strategic_features_df, make_labels_df, adaptive_threshold, classify_vol_state, classify_abs_vol_state
 
@@ -734,6 +734,25 @@ class DualMLStrategy:
                 )
                 signal = "hold"
 
+        # Spread-aware entry gate (Improvement 3): block entries when spread
+        # is wide — wide spreads mean higher entry costs for the same expected move.
+        if signal in ("long", "short") and self.position == 0:
+            spread_bps = 0.0
+            if hasattr(self.broker, "get_market_snapshot"):
+                try:
+                    bid, ask, mid = self.broker.get_market_snapshot()
+                    if mid > 0:
+                        spread_bps = (ask - bid) / mid * 10000
+                except Exception:
+                    pass  # fail-open: missing snapshot does NOT block
+            spread_threshold = float(_cfg_flag("SPREAD_ENTRY_GATE_BPS", 20, self.config))
+            if spread_bps > spread_threshold:
+                signal = "hold"
+                log_warning(
+                    f"GATE spread: {spread_bps:.1f}bps > {spread_threshold:.1f}bps "
+                    f"blocked {pred:+.6f} entry"
+                )
+
         if signal in ("long", "short"):
             log_debug(
                 f"DECISION iter={self._iteration} pred={pred:+.6f} "
@@ -746,14 +765,14 @@ class DualMLStrategy:
 
         # Entry / same-direction scaling / opposite-direction partial exit
         if self.position == 0 and signal in ("long", "short"):
-            self._enter_position(signal, current_price, now)
+            self._enter_position(signal, current_price, now, pred=pred, threshold=thr)
         elif signal in ("long", "short") and self.position != 0:
             same_dir = (
                 (signal == "long" and self.position > 0)
                 or (signal == "short" and self.position < 0)
             )
             if same_dir:
-                self._scale_in_live(signal, current_price, now)
+                self._scale_in_live(signal, current_price, now, pred=pred, threshold=thr)
             else:
                 self._handle_opposite_live(signal, current_price, now)
 
@@ -793,7 +812,21 @@ class DualMLStrategy:
                 f"next_summary_in={sleep_seconds * summary_every}s"
             )
 
-    # ── Position Management ─────────────────────────────────────────────
+    # ── Confidence-Weighted Position Sizing ──────────────────────────────
+    def _confidence_scaled_stake(self, base_stake: float, pred: float, threshold: float) -> float:
+        """Scale stake fraction by prediction confidence relative to threshold.
+
+        Uses sqrt scaling (diminishing returns) with a hard cap to avoid
+        over-exposure on outlier predictions.
+        """
+        if threshold <= 0 or pred == 0:
+            return base_stake
+        confidence = abs(pred) / threshold
+        power = float(_cfg_flag("CONFIDENCE_STAKE_POWER", 0.5, self.config))
+        cap = float(_cfg_flag("CONFIDENCE_STAKE_CAP", 3.0, self.config))
+        factor = min(confidence ** power, cap)
+        return base_stake * factor
+
     def _liquidity_entry_gate(self, side: str) -> Optional[str]:
         """Return block reason if orderbook too thin for a new entry, else None.
 
@@ -868,7 +901,19 @@ class DualMLStrategy:
         if _cfg_flag("GATE_LIQUIDITY_EXIT", True, self.config):
             liq_reason = self._liquidity_exit_gate()
             if liq_reason is not None:
-                return liq_reason
+                # Grace period: suppress liq_exit shortly after entry to avoid
+                # "entry shock" — the book may be thin at entry but recover.
+                grace_min = float(_cfg_flag("LIQ_EXIT_GRACE_PERIOD_MIN", 5, self.config))
+                if self.entry_time is not None:
+                    elapsed_min = (current_time - self.entry_time).total_seconds() / 60.0
+                    if elapsed_min < grace_min:
+                        log_debug(
+                            f"Skipping liq_exit: {grace_min:.0f}min grace period "
+                            f"(elapsed={elapsed_min:.1f}min)"
+                        )
+                        liq_reason = None
+                if liq_reason is not None:
+                    return liq_reason
 
         # Time-based exit
         if self.entry_time is not None:
@@ -1006,7 +1051,7 @@ class DualMLStrategy:
             if self.broker.update_tp_order(self.broker.symbol, new_tp, threshold):
                 self._last_synced_tp_price = new_tp
 
-    def _execute_signal(self, signal: str, current_price: float, current_time: datetime) -> None:
+    def _execute_signal(self, signal: str, current_price: float, current_time: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
         """Execute trading signal."""
         # Exit if reversal
         if signal == "long" and self.position < 0:
@@ -1016,16 +1061,22 @@ class DualMLStrategy:
 
         # Enter if flat
         if self.position == 0 and signal in ("long", "short"):
-            self._enter_position(signal, current_price, current_time)
+            self._enter_position(signal, current_price, current_time, pred=pred, threshold=threshold)
 
-    def _enter_position(self, side: str, price: float, timestamp: datetime) -> None:
-        """Open new position."""
-        stake_frac = (
+    def _enter_position(self, side: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
+        """Open new position with optional confidence-weighted stake scaling."""
+        base_stake_frac = (
             self.current_meta["stake_long_frac"]
             if side == "long"
             else self.current_meta["stake_short_frac"]
         )
         leverage = self.current_meta["recommended_leverage"]
+
+        # Confidence-weighted scaling (Improvement 1)
+        if threshold > 0 and pred != 0:
+            stake_frac = self._confidence_scaled_stake(base_stake_frac, pred, threshold)
+        else:
+            stake_frac = base_stake_frac
 
         result = self.broker.open_position(
             side=side,
@@ -1090,12 +1141,12 @@ class DualMLStrategy:
 
         log_info(f"LIVE ENTRY {side.upper()} @ {self.entry_price:.2f} | Meta: {json.dumps(self.current_meta, default=str)}")
 
-    def _scale_in_live(self, signal: str, price: float, timestamp: datetime) -> None:
+    def _scale_in_live(self, signal: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
         """Phase 3: scale into an open position on a same-direction signal.
 
-        Adds SCALE_STAKE_FRAC of the initial stake via broker.scale_in, re-
-        reconciles from the broker's actual fill, and re-places the TP/SL
-        bracket on the enlarged position (weighted-average entry).
+        Adds SCALE_STAKE_FRAC-sized stake (optionally confidence-scaled) via
+        broker.scale_in, re-reconciles from the broker's actual fill, and re-
+        places the TP/SL bracket on the enlarged position.
         """
         if self.position == 0 or self.current_trade is None:
             return
@@ -1110,9 +1161,12 @@ class DualMLStrategy:
             self.same_dir_streak = 0
             return
 
-        # Add a SCALE_STAKE_FRAC-sized stake to the existing position
+        # Scale-in quantity with optional confidence weighting
         base_qty = self._initial_qty or abs(self.current_trade.get("qty", 0.0))
         add_qty = base_qty * float(_cfg_flag("SCALE_STAKE_FRAC", 0.5, self.config))
+        if threshold > 0 and pred != 0 and add_qty > 0:
+            conf_factor = self._confidence_scaled_stake(1.0, pred, threshold)
+            add_qty = add_qty * conf_factor
         if add_qty <= 0:
             return
 
@@ -1237,6 +1291,27 @@ class DualMLStrategy:
                 commission=commission,
                 financing=financing,
                 avg_expected_trade_profit=avg_expected_profit,
+            )
+
+            # Log cost and edge summaries to CSV + logger
+            trade_id = self.current_trade.get("fill_time", "")[:19].replace("-", "").replace(":", "").replace("T", "") or "0"
+            effective_cost = spread + slippage + commission + financing
+            log_cost_summary(
+                trade_id=trade_id,
+                side=side,
+                spread_cost=spread,
+                commission=commission,
+                slippage=slippage,
+                financing=financing,
+                total_cost=effective_cost,
+            )
+            notional = abs(self.current_trade.get("qty", 0.0) or 1.0) * self.entry_price
+            log_edge_summary(
+                trade_id=trade_id,
+                pred=self._last_tactical_pred,
+                notional=notional,
+                expected_profit=avg_expected_profit,
+                total_cost=effective_cost,
             )
 
         log_info(f"LIVE EXIT {reason.upper()} @ {actual_fill:.2f}")
