@@ -1009,12 +1009,29 @@ class BinanceBroker(BaseBroker):
             executed_qty = order.get("executedQty", "0")
             cum_quote = order.get("cumQuote", "0")
             fill_price = None
-            if executed_qty and float(executed_qty) > 0 and cum_quote and float(cum_quote) > 0:
-                fill_price = float(cum_quote) / float(executed_qty)
+            # Try cumQuote / executedQty first (with error handling)
+            if executed_qty and cum_quote:
+                try:
+                    eq = float(executed_qty)
+                    cq = float(cum_quote)
+                    if eq > 0 and cq > 0:
+                        fill_price = cq / eq
+                except (ValueError, TypeError):
+                    pass
+            # Fallback: avgPrice (handle "0"/"0.00" like _create_market_order does)
             if fill_price is None:
                 avg_price = order.get("avgPrice")
-                if avg_price:
-                    fill_price = float(avg_price)
+                if avg_price and str(avg_price).strip() not in ("0", "0.0", "0.00", "0.000"):
+                    try:
+                        fill_price = float(avg_price)
+                    except (ValueError, TypeError):
+                        pass
+            # Final fallback: use current market price
+            if fill_price is None or fill_price <= 0:
+                try:
+                    fill_price = self.get_last_price(sym)
+                except Exception:
+                    pass
 
             # ── Granular costs ───────────────────────────────────────
             commissions = order.get("commissions", [])
