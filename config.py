@@ -165,8 +165,8 @@ LIQ_MIN_AGGRESSOR_RATIO = 0.35        # taker-buy share below this = sell-domina
 LIQ_MAX_AGGRESSOR_RATIO = 0.65        # taker-buy share above this = buy-dominated
 LIQ_MIN_TRADE_INTENSITY_USD = 50000.0 # min notional traded per second
 GATE_LIQUIDITY_EXIT = _get_bool("GATE_LIQUIDITY_EXIT", True)  # liq_exit on thinning book
-LIQ_EXIT_SPREAD_BPS = 20.0            # exit when spread widens beyond this
-LIQ_EXIT_MIN_DEPTH_USD = 25000.0      # exit when total depth collapses below this
+LIQ_EXIT_SPREAD_BPS = 50.0            # exit when spread widens beyond this
+LIQ_EXIT_MIN_DEPTH_USD = 100000.0      # exit when total depth collapses below this
 LIQUIDITY_FAIL_OPEN_ON_STALE = _get_bool("LIQUIDITY_FAIL_OPEN_ON_STALE", True)
 
 # ── Cost-to-Edge Optimizations ─────────────────────────────────────────
@@ -175,7 +175,7 @@ CONFIDENCE_STAKE_POWER = 0.5                # sqrt scaling (diminishing returns)
 CONFIDENCE_STAKE_CAP = 3.0                  # max stake multiplier (3x base)
 
 # Liquidity exit grace period: suppress liq_exit for N minutes after entry
-LIQ_EXIT_GRACE_PERIOD_MIN = 5               # minutes to suppress liq_exit after entry
+LIQ_EXIT_GRACE_PERIOD_MIN = 10               # minutes to suppress liq_exit after entry
 
 # Spread-aware entry gate: block entries when spread exceeds this threshold
 SPREAD_ENTRY_GATE_BPS = 20.0                # bps threshold for entry gate

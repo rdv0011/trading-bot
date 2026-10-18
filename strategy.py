@@ -879,13 +879,13 @@ class DualMLStrategy:
         # Absolute trade intensity: exit if actual trading activity collapses
         # while holding (Oct 5 post-mortem: bot held through volume vacuum)
         intensity = snap.get("trade_intensity_usd_s", float('inf'))
-        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 50000.0, self.config))
+        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 10000.0, self.config))
         if intensity < min_intensity:
             return "liq_exit"
         # Spread and depth checks (existing)
-        if snap["spread_bps"] > float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 20.0, self.config)):
+        if snap["spread_bps"] > float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 50.0, self.config)):
             return "liq_exit"
-        if snap["depth_total_usd"] < float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 25000.0, self.config)):
+        if snap["depth_total_usd"] < float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 100000.0, self.config)):
             return "liq_exit"
         return None
 
@@ -903,7 +903,7 @@ class DualMLStrategy:
             if liq_reason is not None:
                 # Grace period: suppress liq_exit shortly after entry to avoid
                 # "entry shock" — the book may be thin at entry but recover.
-                grace_min = float(_cfg_flag("LIQ_EXIT_GRACE_PERIOD_MIN", 5, self.config))
+                grace_min = float(_cfg_flag("LIQ_EXIT_GRACE_PERIOD_MIN", 10, self.config))
                 if self.entry_time is not None:
                     elapsed_min = (current_time - self.entry_time).total_seconds() / 60.0
                     if elapsed_min < grace_min:
