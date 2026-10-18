@@ -468,7 +468,7 @@ class BinanceBroker(BaseBroker):
         sym = self.symbol
         try:
             # futures_exchange_info() returns ALL symbols; filter for ours.
-            all_symbols = self.client.futures_exchange_info()
+            all_symbols = self.client.futures_exchange_info()  # type: ignore[attr-defined]
             sym_info = None
             for s in all_symbols.get("symbols", []):
                 if s.get("symbol") == sym:
@@ -486,7 +486,7 @@ class BinanceBroker(BaseBroker):
 
             # ── Spread from order book snapshot ──────────────────────────
             try:
-                depth = self.client.futures_order_book(symbol=sym, limit=5)
+                depth = self.client.futures_order_book(symbol=sym, limit=5)  # type: ignore[attr-defined]
                 bid = float(depth["bids"][0][0])
                 ask = float(depth["asks"][0][0])
                 mid = (bid + ask) / 2
@@ -501,7 +501,7 @@ class BinanceBroker(BaseBroker):
 
             # ── Funding rate ───────────────────────────────────────────
             try:
-                funding = self.client.futures_funding_rate(symbol=sym)
+                funding = self.client.futures_funding_rate(symbol=sym)  # type: ignore[attr-defined]
                 if funding:
                     # futures_funding_rate returns a list; take the first entry.
                     if isinstance(funding, list) and funding:
@@ -522,7 +522,7 @@ class BinanceBroker(BaseBroker):
     def _install_rate_limiter(self):
         """Install rate limiter with circuit breaker (from original)."""
         limiter = BinanceRateLimiter(max_weight=1000)
-        original_request = self.client._request
+        original_request = self.client._request  # type: ignore[attr-defined]
         _last_request_time: float = 0.0
         _request_count = 0
 
@@ -575,14 +575,14 @@ class BinanceBroker(BaseBroker):
             finally:
                 _last_request_time = time.time()
 
-        self.client._request = _wrapped
+        self.client._request = _wrapped  # type: ignore[attr-defined]
         self.logger.info(f"Rate limiter installed (max {limiter.max_weight} weight/min)")
 
     # ── Price Feed ─────────────────────────────────────────────────────
     def get_last_price(self, symbol: str = None) -> float:
         sym = symbol or self.symbol
         try:
-            ticker = self.client.futures_symbol_ticker(symbol=sym)
+            ticker = self.client.futures_symbol_ticker(symbol=sym)  # type: ignore[attr-defined]
             return float(ticker["price"])
         except Exception as e:
             self.logger.error(f"Failed to get price for {sym}: {e}")
@@ -597,7 +597,7 @@ class BinanceBroker(BaseBroker):
         """
         sym = symbol or self.symbol
         try:
-            depth = self.client.futures_order_book(symbol=sym, limit=5)
+            depth = self.client.futures_order_book(symbol=sym, limit=5)  # type: ignore[attr-defined]
             bid = float(depth["bids"][0][0])
             ask = float(depth["asks"][0][0])
             mid = (bid + ask) / 2.0
@@ -612,7 +612,7 @@ class BinanceBroker(BaseBroker):
         if self._cached_balance is not None and now - self._balance_cache_time < self._balance_cache_duration:
             return self._cached_balance
         try:
-            balances = self.client.futures_account_balance()
+            balances = self.client.futures_account_balance()  # type: ignore[attr-defined]
             bal = next((b for b in balances if b["asset"] == quote_asset_symbol), None)
             result = float(bal["balance"]) if bal else 0.0
             self._cached_balance = result
@@ -629,7 +629,7 @@ class BinanceBroker(BaseBroker):
     # ── Position Data (with cache) ─────────────────────────────────────
     def _cache_position_data(self, symbol: str) -> Optional[_PositionData]:
         try:
-            positions = self.client.futures_position_information(symbol=symbol)
+            positions = self.client.futures_position_information(symbol=symbol)  # type: ignore[attr-defined]
             if not positions:
                 self._position_cache.invalidate()
                 return None
@@ -687,7 +687,7 @@ class BinanceBroker(BaseBroker):
     # ── Orders ─────────────────────────────────────────────────────────
     def _create_market_order(self, symbol: str, side: str, quantity: float) -> Optional[MarketOrderResult]:
         try:
-            order = self.client.futures_create_order(
+            order = self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=symbol,
                 side=side,
                 type=ORDER_TYPE_MARKET,
@@ -736,14 +736,14 @@ class BinanceBroker(BaseBroker):
             # Round to exchange-accepted precision (1 dp for high-value assets).
             tp_rounded = round(tp_price, 1) if tp_price >= 1000 else round(tp_price, 2)
             sl_rounded = round(sl_price, 1) if sl_price >= 1000 else round(sl_price, 2)
-            tp_order = self.client.futures_create_order(
+            tp_order = self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=symbol,
                 side=exit_side,
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                 stopPrice=tp_rounded,
                 closePosition=True,
             )
-            sl_order = self.client.futures_create_order(
+            sl_order = self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=symbol,
                 side=exit_side,
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
@@ -762,14 +762,14 @@ class BinanceBroker(BaseBroker):
                     exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
                     tp_rounded = round(tp_price, 1) if tp_price >= 1000 else round(tp_price, 2)
                     sl_rounded = round(sl_price, 1) if sl_price >= 1000 else round(sl_price, 2)
-                    tp_order = self.client.futures_create_order(
+                    tp_order = self.client.futures_create_order(  # type: ignore[attr-defined]
                         symbol=symbol,
                         side=exit_side,
                         type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
                         stopPrice=tp_rounded,
                         closePosition=True,
                     )
-                    sl_order = self.client.futures_create_order(
+                    sl_order = self.client.futures_create_order(  # type: ignore[attr-defined]
                         symbol=symbol,
                         side=exit_side,
                         type=FUTURE_ORDER_TYPE_STOP_MARKET,
@@ -949,14 +949,14 @@ class BinanceBroker(BaseBroker):
         errors = []
         for attempt in range(max_retries):
             try:
-                regular_orders = self.client.futures_get_open_orders(symbol=sym)
+                regular_orders = self.client.futures_get_open_orders(symbol=sym)  # type: ignore[attr-defined]
                 for o in regular_orders:
-                    self.client.futures_cancel_order(symbol=sym, orderId=o.get("orderId"))
-                conditional_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)
+                    self.client.futures_cancel_order(symbol=sym, orderId=o.get("orderId"))  # type: ignore[attr-defined]
+                conditional_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)  # type: ignore[attr-defined]
                 for o in conditional_orders:
                     algo_id = o.get("algoId")
                     if algo_id:
-                        self.client.futures_cancel_order(symbol=sym, algoId=algo_id, conditional=True)
+                        self.client.futures_cancel_order(symbol=sym, algoId=algo_id, conditional=True)  # type: ignore[attr-defined]
                 return
             except Exception as e:
                 errors.append(str(e))
@@ -999,7 +999,7 @@ class BinanceBroker(BaseBroker):
 
         try:
             side = SIDE_SELL if position > 0 else SIDE_BUY
-            order = self.client.futures_create_order(
+            order = self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=sym,
                 side=side,
                 type=ORDER_TYPE_MARKET,
@@ -1118,6 +1118,12 @@ class BinanceBroker(BaseBroker):
         pos = self.get_position(sym)
         if pos is None or not pos.amount:
             return None
+        # Filter out stale positions where avgPrice is "0" (no real position)
+        if pos.entry_price is not None and float(pos.entry_price) == 0.0:
+            self.logger.warning(
+                f"Stale position detected for {sym} (entry_price=0); skipping partial close"
+            )
+            return None
         close_qty = self._quantize_qty(abs(pos.amount) * clamped)
         if close_qty < MIN_TRADEABLE_QUANTITY:
             self.logger.warning(
@@ -1126,7 +1132,7 @@ class BinanceBroker(BaseBroker):
             return None
         side = SIDE_SELL if pos.amount > 0 else SIDE_BUY
         try:
-            order = self.client.futures_create_order(
+            order = self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=sym,
                 side=side,
                 type=ORDER_TYPE_MARKET,
@@ -1142,6 +1148,9 @@ class BinanceBroker(BaseBroker):
                 avg_price = order.get("avgPrice")
                 if avg_price:
                     fill_price = float(avg_price)
+            if fill_price is None:
+                fill_price = self.get_last_price(sym)
+                self.logger.info(f"No fill price from order for {sym}; using get_last_price()={fill_price:.2f}")
             self.logger.info(
                 f"Partial close: {sym} qty={close_qty:.4f} ({clamped:.0%}) "
                 f"fill={fill_price if fill_price else 0:.2f}"
@@ -1222,7 +1231,7 @@ class BinanceBroker(BaseBroker):
 
         # Fetch current conditional orders
         try:
-            open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)
+            open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)  # type: ignore[attr-defined]
         except Exception as e:
             self.logger.error(f"update_sl_order: failed to query conditional orders: {e}")
             return False
@@ -1236,7 +1245,7 @@ class BinanceBroker(BaseBroker):
                 # Round stopPrice to exchange-accepted precision (1 dp for
                 # high-value assets like BTC, 2 dp otherwise).
                 rounded_price = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
-                self.client.futures_create_order(
+                self.client.futures_create_order(  # type: ignore[attr-defined]
                     symbol=sym,
                     side=sl_side,
                     type=FUTURE_ORDER_TYPE_STOP_MARKET,
@@ -1281,7 +1290,7 @@ class BinanceBroker(BaseBroker):
         # Cancel existing SL order
         algo_id = sl_order.get("algoId")
         try:
-            self.client.futures_cancel_order(sym, algoId=algo_id, conditional=True)
+            self.client.futures_cancel_order(sym, algoId=algo_id, conditional=True)  # type: ignore[attr-defined]
             time.sleep(0.3)  # Let the exchange process the cancel
         except BinanceAPIException as e:
             # Order may already be filled / cancelled – treat as no-op
@@ -1297,7 +1306,7 @@ class BinanceBroker(BaseBroker):
         try:
             sl_side = SIDE_BUY if not is_long else SIDE_SELL
             rounded_sl = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
-            self.client.futures_create_order(
+            self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=sym,
                 side=sl_side,
                 type=FUTURE_ORDER_TYPE_STOP_MARKET,
@@ -1339,7 +1348,7 @@ class BinanceBroker(BaseBroker):
             return False
 
         try:
-            open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)
+            open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)  # type: ignore[attr-defined]
         except Exception as e:
             self.logger.error(f"update_tp_order: failed to query conditional orders: {e}")
             return False
@@ -1375,7 +1384,7 @@ class BinanceBroker(BaseBroker):
 
         algo_id = tp_order.get("algoId")
         try:
-            self.client.futures_cancel_order(sym, algoId=algo_id, conditional=True)
+            self.client.futures_cancel_order(sym, algoId=algo_id, conditional=True)  # type: ignore[attr-defined]
             time.sleep(0.3)
         except BinanceAPIException as e:
             if e.code in ("-2011", "-1111"):
@@ -1389,7 +1398,7 @@ class BinanceBroker(BaseBroker):
         try:
             tp_side = SIDE_SELL if is_long else SIDE_BUY
             rounded_tp = round(new_tp_price, 1) if new_tp_price >= 1000 else round(new_tp_price, 2)
-            self.client.futures_create_order(
+            self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=sym,
                 side=tp_side,
                 type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
@@ -1406,21 +1415,21 @@ class BinanceBroker(BaseBroker):
             return False
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
-        return self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)
+        return self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)  # type: ignore[attr-defined]
 
     def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
         sym = symbol or self.symbol
         # Binance requires integer leverage; strategic model emits floats (e.g. 3.33).
         leverage = int(round(leverage)) if leverage is not None else leverage
         try:
-            positions = self.client.futures_position_information(symbol=sym)
+            positions = self.client.futures_position_information(symbol=sym)  # type: ignore[attr-defined]
             current_margin = positions[0].get("marginType", "").upper() if positions else ""
             # No open position => cannot read current margin type; a change attempt
             # is a no-op and just logs a misleading -4046 ERROR. Skip it.
             if positions and current_margin != margin_type.upper():
                 for _attempt in range(2):
                     try:
-                        self.client.futures_change_margin_type(symbol=sym, marginType=margin_type)
+                        self.client.futures_change_margin_type(symbol=sym, marginType=margin_type)  # type: ignore[attr-defined]
                         break
                     except Exception as e:
                         if "No need to change margin type" in str(e):
@@ -1438,7 +1447,7 @@ class BinanceBroker(BaseBroker):
             self.logger.warning(f"Could not read margin type for {sym}: {e}")
 
         try:
-            self.client.futures_change_leverage(symbol=sym, leverage=leverage)
+            self.client.futures_change_leverage(symbol=sym, leverage=leverage)  # type: ignore[attr-defined]
         except Exception as e:
             if "4161" in str(e):
                 self.logger.warning(f"Leverage reduction not supported with open positions")
@@ -1447,7 +1456,7 @@ class BinanceBroker(BaseBroker):
             return False
 
         try:
-            positions = self.client.futures_position_information(symbol=sym)
+            positions = self.client.futures_position_information(symbol=sym)  # type: ignore[attr-defined]
             if positions:
                 confirmed = int(positions[0].get("leverage", 0))
                 if confirmed != leverage:

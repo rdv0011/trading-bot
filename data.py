@@ -32,7 +32,7 @@ DATA_DIR.mkdir(exist_ok=True)
 # Timeframe config (inlined from original timeframe_config.py)
 TIMEFRAME_CONFIG = {
     "15m": {
-        "binance_interval": Client.KLINE_INTERVAL_15MINUTE,
+        "binance_interval": Client.KLINE_INTERVAL_15MINUTE,  # type: ignore[attr-defined]
         "minutes": 15,
         "candles_per_day": 96,
         "label_horizon_candles": 4,
@@ -40,7 +40,7 @@ TIMEFRAME_CONFIG = {
         "ema_spans": [5, 10, 20, 50, 100],
     },
     "1h": {
-        "binance_interval": Client.KLINE_INTERVAL_1HOUR,
+        "binance_interval": Client.KLINE_INTERVAL_1HOUR,  # type: ignore[attr-defined]
         "minutes": 60,
         "candles_per_day": 24,
         "label_horizon_candles": 1,
@@ -79,11 +79,11 @@ def download_historical(
         client = Client("", "")
 
     interval_ms = {
-        Client.KLINE_INTERVAL_1MINUTE: 60_000,
-        Client.KLINE_INTERVAL_15MINUTE: 15 * 60_000,
-        Client.KLINE_INTERVAL_1HOUR: 3600_000,
-        Client.KLINE_INTERVAL_4HOUR: 4 * 3600_000,
-        Client.KLINE_INTERVAL_1DAY: 86_400_000,
+        Client.KLINE_INTERVAL_1MINUTE: 60_000,  # type: ignore[attr-defined]
+        Client.KLINE_INTERVAL_15MINUTE: 15 * 60_000,  # type: ignore[attr-defined]
+        Client.KLINE_INTERVAL_1HOUR: 3600_000,  # type: ignore[attr-defined]
+        Client.KLINE_INTERVAL_4HOUR: 4 * 3600_000,  # type: ignore[attr-defined]
+        Client.KLINE_INTERVAL_1DAY: 86_400_000,  # type: ignore[attr-defined]
     }.get(interval, 60_000)
 
     # Paginate backwards from now in batches of up to 1000 candles
