@@ -869,51 +869,58 @@ class DualMLStrategy:
         return None
 
     def _liquidity_exit_gate(self) -> Optional[str]:
-        """Return 'liq_exit' when the book thins dangerously while holding."""
+        """Return 'liq_exit' when the book thins dangerously while holding.
+
+        Logs which specific metric triggered the exit for debugging.
+        """
         mon = self.liquidity_monitor
         if mon is None:
             return None
         snap = mon.snapshot()
         if snap is None or not snap["fresh"]:
             return None
-        # Absolute trade intensity: exit if actual trading activity collapses
-        # while holding (Oct 5 post-mortem: bot held through volume vacuum)
         intensity = snap.get("trade_intensity_usd_s", float('inf'))
-        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 10000.0, self.config))
+        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 50000.0, self.config))
         if intensity < min_intensity:
+            log_warning(
+                f"LIQ_EXIT triggered: trade_intensity={intensity:.0f} "
+                f"< threshold={min_intensity:.0f} USD/s "
+                f"(spread={snap.get('spread_bps', 0):.1f}bps, "
+                f"depth={snap.get('depth_total_usd', 0):.0f}USD)"
+            )
             return "liq_exit"
-        # Spread and depth checks (existing)
-        if snap["spread_bps"] > float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 50.0, self.config)):
+        spread_bps = snap["spread_bps"]
+        max_spread = float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 100.0, self.config))
+        if spread_bps > max_spread:
+            log_warning(
+                f"LIQ_EXIT triggered: spread={spread_bps:.1f}bps "
+                f"> threshold={max_spread:.1f}bps "
+                f"(intensity={intensity:.0f}USD/s, "
+                f"depth={snap.get('depth_total_usd', 0):.0f}USD)"
+            )
             return "liq_exit"
-        if snap["depth_total_usd"] < float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 100000.0, self.config)):
+        depth = snap["depth_total_usd"]
+        min_depth = float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 500000.0, self.config))
+        if depth < min_depth:
+            log_warning(
+                f"LIQ_EXIT triggered: depth={depth:.0f}USD "
+                f"< threshold={min_depth:.0f}USD "
+                f"(intensity={intensity:.0f}USD/s, "
+                f"spread={spread_bps:.1f}bps)"
+            )
             return "liq_exit"
         return None
 
+
     def _check_exits(self, current_price: float, current_time: datetime) -> Optional[str]:
-        """Check if position should be exited. Returns exit reason or None."""
+        """Check if position should be exited. Returns exit reason or None.
+
+        Priority: time-based exit -> SL/TP -> trailing stop -> liquidity emergency.
+        Price-based exits fire first; liquidity gate acts as emergency override
+        only when market structure is collapsing (Oct 5 post-mortem fix).
+        """
         if self.position == 0:
             return None
-
-        # Phase 1-2 emergency liquidity exit: fires FIRST, before price-based
-        # exits, so a thinning book dumps the position before SL/TP fills slip
-        # (Sept 11: SL slipped 230+ pts in a thin book). Fail-open: stale or
-        # missing book data never forces an exit.
-        if _cfg_flag("GATE_LIQUIDITY_EXIT", True, self.config):
-            liq_reason = self._liquidity_exit_gate()
-            if liq_reason is not None:
-                # Grace period: suppress liq_exit shortly after entry to avoid
-                # "entry shock" — the book may be thin at entry but recover.
-                grace_min = float(_cfg_flag("LIQ_EXIT_GRACE_PERIOD_MIN", 10, self.config))
-                if self.entry_time is not None:
-                    elapsed_min = (current_time - self.entry_time).total_seconds() / 60.0
-                    if elapsed_min < grace_min:
-                        log_debug(
-                            f"Skipping liq_exit: {grace_min:.0f}min grace period "
-                            f"(elapsed={elapsed_min:.1f}min)"
-                        )
-                        liq_reason = None
-                if liq_reason is not None:
-                    return liq_reason
 
         # Time-based exit
         if self.entry_time is not None:
@@ -967,6 +974,27 @@ class DualMLStrategy:
                         eff_sl = min(base_sl, trail_sl)
                         if current_price >= eff_sl and eff_sl < base_sl:
                             return "trailing_sl"
+
+        # Liquidity emergency override: fires LAST, only when book structure
+        # is collapsing. This ensures SL/TP/trailing stop get the first chance
+        # to exit at reasonable prices. Fail-open: stale or missing book data
+        # never forces an exit.
+        if _cfg_flag("GATE_LIQUIDITY_EXIT", True, self.config):
+            liq_reason = self._liquidity_exit_gate()
+            if liq_reason is not None:
+                # Grace period: suppress liq_exit shortly after entry to avoid
+                # "entry shock" - the book may be thin at entry but recover.
+                grace_min = float(_cfg_flag("LIQ_EXIT_GRACE_PERIOD_MIN", 10, self.config))
+                if self.entry_time is not None:
+                    elapsed_min = (current_time - self.entry_time).total_seconds() / 60.0
+                    if elapsed_min < grace_min:
+                        log_debug(
+                            f"Skipping liq_exit: {grace_min:.0f}min grace period "
+                            f"(elapsed={elapsed_min:.1f}min)"
+                        )
+                        liq_reason = None
+                if liq_reason is not None:
+                    return liq_reason
 
         return None
 

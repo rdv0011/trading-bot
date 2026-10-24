@@ -165,8 +165,9 @@ LIQ_MIN_AGGRESSOR_RATIO = 0.35        # taker-buy share below this = sell-domina
 LIQ_MAX_AGGRESSOR_RATIO = 0.65        # taker-buy share above this = buy-dominated
 LIQ_MIN_TRADE_INTENSITY_USD = 50000.0 # min notional traded per second
 GATE_LIQUIDITY_EXIT = _get_bool("GATE_LIQUIDITY_EXIT", True)  # liq_exit on thinning book
-LIQ_EXIT_SPREAD_BPS = 50.0            # exit when spread widens beyond this
-LIQ_EXIT_MIN_DEPTH_USD = 100000.0      # exit when total depth collapses below this
+LIQ_EXIT_SPREAD_BPS = 100.0            # exit when spread widens beyond this
+LIQ_EXIT_MIN_DEPTH_USD = 500000.0      # exit when total depth collapses below this
+LIQ_EXIT_MIN_TRADE_INTENSITY_USD = 50000.0      # exit when trade intensity collapses
 LIQUIDITY_FAIL_OPEN_ON_STALE = _get_bool("LIQUIDITY_FAIL_OPEN_ON_STALE", True)
 
 # ── Cost-to-Edge Optimizations ─────────────────────────────────────────
