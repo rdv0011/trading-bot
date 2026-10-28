@@ -598,13 +598,28 @@ class BinanceBroker(BaseBroker):
         sym = symbol or self.symbol
         try:
             depth = self.client.futures_order_book(symbol=sym, limit=5)  # type: ignore[attr-defined]
-            bid = float(depth["bids"][0][0])
-            ask = float(depth["asks"][0][0])
-            mid = (bid + ask) / 2.0
-            return bid, ask, mid
+            if depth.get("bids") and depth.get("asks"):
+                bid = float(depth["bids"][0][0])
+                ask = float(depth["asks"][0][0])
+                mid = (bid + ask) / 2.0
+                return bid, ask, mid
         except Exception as e:
-            self.logger.debug(f"Market snapshot failed for {sym}: {e}")
-            return 0.0, 0.0, 0.0
+            self.logger.debug(f"Market snapshot order_book failed for {sym}: {e}")
+
+        # Fallback: use ticker to estimate spread from mid-price
+        try:
+            price = self.get_last_price(sym)
+            if price > 0:
+                spread_frac = getattr(self.config, "SPREAD", 0.0001) if hasattr(self, "config") else 0.0001
+                spread_pts = price * spread_frac
+                bid = price - spread_pts / 2.0
+                ask = price + spread_pts / 2.0
+                mid = price
+                return bid, ask, mid
+        except Exception as e:
+            self.logger.debug(f"Market snapshot ticker fallback failed for {sym}: {e}")
+
+        return 0.0, 0.0, 0.0
 
     # ── Cash ───────────────────────────────────────────────────────────
     def get_cash(self, quote_asset_symbol="USDT") -> float:
@@ -1036,11 +1051,26 @@ class BinanceBroker(BaseBroker):
             # ── Granular costs ───────────────────────────────────────
             commissions = order.get("commissions", [])
             commission_total = 0.0
-            if isinstance(commissions, list):
+            if isinstance(commissions, list) and commissions:
                 for c in commissions:
-                    commission_total += float(c.get("quoteAdjustment", 0) or c.get("commission", 0))
+                    if isinstance(c, dict):
+                        val = c.get("commission", "0") or c.get("quoteAdjustment", "0")
+                        if val:
+                            commission_total += float(val)
+                    elif isinstance(c, str):
+                        try:
+                            commission_total += float(c)
+                        except ValueError:
+                            pass
             elif isinstance(commissions, dict):
-                commission_total = float(commissions.get("quoteAdjustment", 0) or commissions.get("commission", 0))
+                val = commissions.get("commission", "0") or commissions.get("quoteAdjustment", "0")
+                if val:
+                    commission_total = float(val)
+
+            # Fallback: if API did not return commissions, calculate from notional
+            if commission_total == 0.0 and fill_price and abs(position) > 0:
+                notional = fill_price * abs(position)
+                commission_total = notional * self.fee
 
             slippage = 0.0
             if fill_price:
