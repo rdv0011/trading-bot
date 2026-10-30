@@ -386,6 +386,25 @@ def log_trade_exit(
     effective_cost = spread + slippage + commission + financing
     total_cost = spread_paid + fee_paid + slippage_paid + funding_paid or effective_cost
 
+    # Cost estimation fallback: if all actual costs are zero, estimate realistic costs
+    if effective_cost == 0.0 and notional > 0:
+        entry_time_str = trade.get("fill_time", "")
+        est = _estimate_trading_costs(
+            entry_price=trade.get("entry_price", exit_price),
+            exit_price=exit_price,
+            qty=trade.get("qty", 1.0),
+            entry_time_str=entry_time_str,
+        )
+        # Only apply estimates if they differ significantly from zero
+        est_total = est["commission"] + est["spread"] + est["slippage"] + est["financing"]
+        if est_total > 0.01:  # Only use if estimate is meaningful
+            spread = est["spread"]
+            slippage = est["slippage"]
+            commission = est["commission"]
+            financing = est["financing"]
+            effective_cost = est_total
+            total_cost = est_total
+
     trade.update({
         "exit_price": round(exit_price, 4),
         "exit_reason": exit_reason,

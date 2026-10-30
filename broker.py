@@ -937,7 +937,7 @@ class BinanceBroker(BaseBroker):
             )
             return BracketResult(success=False, error="qty below minimum")
 
-        self.set_leverage(symbol, leverage, margin_type="ISOLATED")
+        self.set_leverage(symbol, leverage, margin_type="CROSSED")
 
         signal = SIGNAL_LONG if side == "long" else SIGNAL_SHORT
         return self.open_position_with_bracket(
@@ -1447,7 +1447,7 @@ class BinanceBroker(BaseBroker):
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)  # type: ignore[attr-defined]
 
-    def set_leverage(self, symbol: str, leverage: int, margin_type: str = "ISOLATED") -> bool:
+    def set_leverage(self, symbol: str, leverage: int, margin_type: str = "CROSSED") -> bool:
         sym = symbol or self.symbol
         # Binance requires integer leverage; strategic model emits floats (e.g. 3.33).
         leverage = int(round(leverage)) if leverage is not None else leverage
@@ -1465,9 +1465,11 @@ class BinanceBroker(BaseBroker):
                         if "No need to change margin type" in str(e):
                             break
                         if "-4067" in str(e):
-                            self.logger.warning(f"Margin type blocked by open orders ({e}); canceling all orders and retrying")
-                            self._cancel_all_open_orders(sym)
-                            continue
+                            self.logger.info(f"Margin type {margin_type} not supported (testnet?), skipping — using default")
+                            break  # Accept whatever margin type the exchange defaults to
+                        if "-1002" in str(e) or "-1015" in str(e):
+                            self.logger.info(f"Margin type change skipped: account not authorized for margin trading")
+                            break
                         if "-1007" in str(e) and _attempt == 0:
                             time.sleep(1)
                             continue

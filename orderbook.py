@@ -45,6 +45,18 @@ WS_URL_FALLBACK = (
     "btcusdt@depth@100ms/btcusdt@trade"
 )
 REST_DEPTH_URL = "https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=100"
+REST_TICKER_URL = "https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT"
+
+
+def _fetch_ticker_rest(timeout: float = 5.0) -> Optional[float]:
+    """Fetch BTCUSDT last price via REST ticker API as fallback when WebSocket streams fail."""
+    try:
+        with urllib.request.urlopen(REST_TICKER_URL, timeout=timeout) as resp:
+            data = json.loads(resp.read().decode())
+            return float(data.get("price", 0.0))
+    except Exception as exc:
+        log_warning(f"Ticker REST fetch failed: {exc}")
+        return None
 
 
 def _fetch_snapshot_rest(timeout: float = 5.0) -> Optional[Dict[str, Any]]:
@@ -69,7 +81,7 @@ class OrderBookRecorder(threading.Thread):
         vanish_interval: float = 10.0,
         url: Optional[str] = None,
         fallback_url: Optional[str] = None,
-        fallback_after_s: float = 30.0,
+        fallback_after_s: float = 120.0,
         reprobe_after_s: float = 3600.0,
     ) -> None:
         super().__init__(daemon=True, name="OrderBookRecorder")
@@ -162,6 +174,13 @@ class OrderBookRecorder(threading.Thread):
                 f"> {self._fallback_after_s:.0f}s, falling back to trade stream"
             )
             return True
+        # Probing ticker REST API when trade stream has been silent for > 5 minutes
+        if not self._on_fallback and silent_for > 300:
+            ticker_price = _fetch_ticker_rest()
+            if ticker_price and ticker_price > 0:
+                log_debug = getattr(__import__("logger"), "log_debug", None)
+                if log_debug:
+                    log_debug(f"OrderBookRecorder using REST ticker price: {ticker_price:.2f} (WS silent {silent_for:.0f}s)")
         return False
 
     def _seed_book(self, snap: Dict[str, Any]) -> None:
