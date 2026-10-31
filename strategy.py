@@ -11,6 +11,9 @@ from pathlib import Path
 import json
 import time
 import signal
+import logging
+
+logger = logging.getLogger(__name__)
 
 import config as _config
 from config import (
@@ -1093,18 +1096,83 @@ class DualMLStrategy:
             else:
                 new_tp = self.entry_price * (1 - tp_frac)
 
+        # Log significant loss detection before syncing
+        if self._last_synced_sl_price is not None:
+            loss_pct = abs(current_price - self._last_synced_sl_price) / self._last_synced_sl_price
+            if loss_pct > 0.03:  # 3% threshold for significant loss warning
+                logger.warning(
+                    f"[SIGNIFICANT LOSS DETECTED] Symbol: {self.broker.symbol}, "
+                    f"Entry: {self.entry_price}, Current: {current_price}, "
+                    f"Last Synced SL: {self._last_synced_sl_price}, "
+                    f"Loss from SL: {loss_pct:.4%}, "
+                    f"Position: {self.position}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+
         # Sync SL to exchange if moved meaningfully
         if self._last_synced_sl_price is None or abs(new_sl - self._last_synced_sl_price) / self._last_synced_sl_price >= threshold:
             now = time.time()
             if now - self._last_sl_update_ts >= 60:  # 1-min cooldown between updates
-                if self.broker.update_sl_order(self.broker.symbol, new_sl, threshold):
+                success = self.broker.update_sl_order(self.broker.symbol, new_sl, threshold)
+                if success:
                     self._last_synced_sl_price = new_sl
                     self._last_sl_update_ts = now
+                    logger.info(
+                        f"[SL MOVED] Symbol: {self.broker.symbol}, "
+                        f"New SL: {new_sl:.6f}, "
+                        f"Previous SL: {self._last_synced_sl_price or 'N/A'}, "
+                        f"Change: {abs(new_sl - (self._last_synced_sl_price or new_sl)) / new_sl:.4%}, "
+                        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                else:
+                    logger.error(
+                        f"[SL ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
+                        f"Target SL: {new_sl:.6f}, "
+                        f"Entry: {self.entry_price}, Current Price: {current_price}, "
+                        f"Position: {self.position}, ATR: {atr14:.6f}, "
+                        f"Trail Extreme: {self.trail_extreme:.6f}, "
+                        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+            else:
+                logger.debug(
+                    f"[SL UPDATE SKIPPED - COOLDOWN] Symbol: {self.broker.symbol}, "
+                    f"New SL: {new_sl:.6f}, "
+                    f"Last Update: {now - self._last_sl_update_ts:.1f}s ago, "
+                    f"Cooldown: 60s"
+                )
+        else:
+            logger.debug(
+                f"[SL NO CHANGE NEEDED] Symbol: {self.broker.symbol}, "
+                f"New SL: {new_sl:.6f}, Last Synced: {self._last_synced_sl_price:.6f}, "
+                f"Change: {abs(new_sl - self._last_synced_sl_price) / self._last_synced_sl_price:.4%}, "
+                f"Threshold: {threshold:.4%}"
+            )
 
         # Sync TP to exchange if moved meaningfully
         if self._last_synced_tp_price is None or abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price >= threshold:
-            if self.broker.update_tp_order(self.broker.symbol, new_tp, threshold):
+            success = self.broker.update_tp_order(self.broker.symbol, new_tp, threshold)
+            if success:
                 self._last_synced_tp_price = new_tp
+                logger.info(
+                    f"[TP MOVED] Symbol: {self.broker.symbol}, "
+                    f"New TP: {new_tp:.6f}, "
+                    f"Previous TP: {self._last_synced_tp_price or 'N/A'}, "
+                    f"Change: {abs(new_tp - (self._last_synced_tp_price or new_tp)) / new_tp:.4%}, "
+                    f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+            else:
+                logger.error(
+                    f"[TP ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
+                    f"Target TP: {new_tp:.6f}, "
+                    f"Entry: {self.entry_price}, Current Price: {current_price}, "
+                    f"Position: {self.position}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+        else:
+            logger.debug(
+                f"[TP NO CHANGE NEEDED] Symbol: {self.broker.symbol}, "
+                f"New TP: {new_tp:.6f}, Last Synced: {self._last_synced_tp_price:.6f}, "
+                f"Change: {abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price:.4%}, "
+                f"Threshold: {threshold:.4%}"
+            )
 
     def _execute_signal(self, signal: str, current_price: float, current_time: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
         """Execute trading signal."""

@@ -107,8 +107,8 @@ def train_mode(args):
 
     log_info("\n" + "=" * 60)
     log_info("TRAINING COMPLETE")
-    log_info(f"Tactical model: models/tactical_model.cbm")
-    log_info(f"Strategic model: models/strategic_model.cbm")
+    log_info(f"Tactical model: models/model_tactical.cbm")
+    log_info(f"Strategic model: models/model_strategic.joblib")
     log_info("=" * 60)
 
 

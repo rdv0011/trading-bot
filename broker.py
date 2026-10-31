@@ -751,6 +751,11 @@ class BinanceBroker(BaseBroker):
             # Round to exchange-accepted precision (1 dp for high-value assets).
             tp_rounded = round(tp_price, 1) if tp_price >= 1000 else round(tp_price, 2)
             sl_rounded = round(sl_price, 1) if sl_price >= 1000 else round(sl_price, 2)
+            self.logger.info(
+                f"[BRACKET CREATE] Symbol: {symbol}, Side: {side}, "
+                f"TP: {tp_price:.6f} -> {tp_rounded:.2f}, SL: {sl_price:.6f} -> {sl_rounded:.2f}, "
+                f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
             tp_order = self.client.futures_create_order(  # type: ignore[attr-defined]
                 symbol=symbol,
                 side=exit_side,
@@ -767,11 +772,18 @@ class BinanceBroker(BaseBroker):
             )
             tp_id = str(tp_order.get("algoId"))
             sl_id = str(sl_order.get("algoId"))
+            self.logger.info(
+                f"[BRACKET SUCCESS] Symbol: {symbol}, TP ID: {tp_id}, SL ID: {sl_id}"
+            )
             return BracketOrderResult(tp_order_id=tp_id, sl_order_id=sl_id)
         except Exception as e:
             err_str = str(e)
             if "-4130" in err_str:
-                self.logger.warning(f"Stale bracket order detected ({e}); canceling all orders and retrying once")
+                self.logger.warning(
+                    f"[BRACKET STALE] Symbol: {symbol}, Side: {side}, "
+                    f"TP: {tp_price:.2f}, SL: {sl_price:.2f}, "
+                    f"Error: {e}, Retrying once..."
+                )
                 self._cancel_all_open_orders(symbol)
                 try:
                     exit_side = SIDE_SELL if side == SIDE_BUY else SIDE_BUY
@@ -795,9 +807,17 @@ class BinanceBroker(BaseBroker):
                     sl_id = str(sl_order.get("algoId"))
                     return BracketOrderResult(tp_order_id=tp_id, sl_order_id=sl_id)
                 except Exception as retry_e:
-                    self.logger.error(f"Bracket order retry failed: {retry_e}")
+                    self.logger.error(
+                        f"[BRACKET RETRY FAILED] Symbol: {symbol}, Side: {side}, "
+                        f"TP: {tp_price:.2f}, SL: {sl_price:.2f}, "
+                        f"Retry Error: {retry_e}"
+                    )
                     return None
-            self.logger.error(f"Bracket order failed: {e}")
+            self.logger.error(
+                f"[BRACKET FAILED] Symbol: {symbol}, Side: {side}, "
+                f"TP: {tp_price:.2f}, SL: {sl_price:.2f}, "
+                f"Error: {e}"
+            )
             return None
 
     def open_position_with_bracket(
@@ -1283,11 +1303,17 @@ class BinanceBroker(BaseBroker):
                     closePosition=True,
                 )
                 self.logger.info(
-                    f"SL order created: {sym} {rounded_price:.2f}"
+                    f"[SL CREATED] Symbol: {sym}, Price: {rounded_price:.2f}, "
+                    f"Position: {pos.amount}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
                 return True
             except Exception as e:
-                self.logger.error(f"update_sl_order: create new SL failed: {e}")
+                self.logger.error(
+                    f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                    f"Target SL: {new_sl_price:.6f}, Rounded: {round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2):.2f}, "
+                    f"Position Amount: {pos.amount}, Is Long: {is_long}, "
+                    f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
                 return False
 
         # Find the current SL order (STOP_MARKET, closePosition)
@@ -1344,12 +1370,19 @@ class BinanceBroker(BaseBroker):
                 closePosition=True,
             )
             self.logger.info(
-                f"SL order updated: {sym} {current_sl:.2f} -> {rounded_sl:.2f} "
-                f"(diff={price_diff:.4%})"
+                f"[SL UPDATED] Symbol: {sym}, "
+                f"Old SL: {current_sl:.2f}, New SL: {rounded_sl:.2f}, "
+                f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             return True
         except Exception as e:
-            self.logger.error(f"update_sl_order: place new SL failed: {e}")
+            self.logger.error(
+                f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                f"Target SL: {new_sl_price:.6f}, Rounded: {rounded_sl:.2f}, "
+                f"Old SL: {current_sl:.2f}, Position: {pos.amount}, "
+                f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
             return False
 
     def update_tp_order(self, symbol: str, new_tp_price: float, threshold: float = 0.005) -> bool:
@@ -1436,12 +1469,19 @@ class BinanceBroker(BaseBroker):
                 closePosition=True,
             )
             self.logger.info(
-                f"TP order updated: {sym} {current_tp:.2f} -> {rounded_tp:.2f} "
-                f"(diff={price_diff:.4%})"
+                f"[TP UPDATED] Symbol: {sym}, "
+                f"Old TP: {current_tp:.2f}, New TP: {rounded_tp:.2f}, "
+                f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
             )
             return True
         except Exception as e:
-            self.logger.error(f"update_tp_order: place new TP failed: {e}")
+            self.logger.error(
+                f"[TP ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                f"Target TP: {new_tp_price:.6f}, Rounded: {rounded_tp:.2f}, "
+                f"Old TP: {current_tp:.2f}, Position: {pos.amount}, "
+                f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+            )
             return False
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
