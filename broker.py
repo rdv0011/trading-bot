@@ -1290,31 +1290,56 @@ class BinanceBroker(BaseBroker):
             # No SL order exists yet (edge case: bracket placement failed or
             # orders haven't propagated).  Create one so the position is
             # protected from the start.
-            try:
-                sl_side = SIDE_BUY if not is_long else SIDE_SELL
-                # Round stopPrice to exchange-accepted precision (1 dp for
-                # high-value assets like BTC, 2 dp otherwise).
-                rounded_price = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
-                self.client.futures_create_order(  # type: ignore[attr-defined]
-                    symbol=sym,
-                    side=sl_side,
-                    type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                    stopPrice=rounded_price,
-                    closePosition=True,
-                )
-                self.logger.info(
-                    f"[SL CREATED] Symbol: {sym}, Price: {rounded_price:.2f}, "
-                    f"Position: {pos.amount}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+            sl_side = SIDE_BUY if not is_long else SIDE_SELL
+            # Round stopPrice to exchange-accepted precision (1 dp for
+            # high-value assets like BTC, 2 dp otherwise).
+            rounded_price = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
+
+            # Try with closePosition=True first (preferred — lets Binance
+            # calculate the qty from the current position).  On testnet the
+            # algo endpoint may reject closePosition with stopPrice, so fall
+            # back to explicit qty.
+            created = False
+            for use_close_pos in (True, False):
+                try:
+                    kwargs: dict = dict(
+                        symbol=sym,
+                        side=sl_side,
+                        type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                        stopPrice=rounded_price,
+                    )
+                    if use_close_pos:
+                        kwargs["closePosition"] = True
+                    else:
+                        # Explicit qty: use the full position amount.
+                        kwargs["quantity"] = abs(pos.amount)
+                    self.client.futures_create_order(  # type: ignore[attr-defined]
+                        **kwargs
+                    )
+                    self.logger.info(
+                        f"[SL CREATED] Symbol: {sym}, Price: {rounded_price:.2f}, "
+                        f"Position: {pos.amount}, ClosePos: {use_close_pos}, "
+                        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    created = True
+                    break
+                except Exception as e:
+                    if use_close_pos:
+                        self.logger.debug(
+                            f"[SL CREATE closePos=False fallback] Symbol: {sym}, "
+                            f"Error: {e}"
+                        )
+                        continue
+                    # Both attempts failed
+                    self.logger.error(
+                        f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                        f"Target SL: {new_sl_price:.6f}, Rounded: {rounded_price:.2f}, "
+                        f"Position Amount: {pos.amount}, Is Long: {is_long}, "
+                        f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    return False
+            if created:
                 return True
-            except Exception as e:
-                self.logger.error(
-                    f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
-                    f"Target SL: {new_sl_price:.6f}, Rounded: {round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2):.2f}, "
-                    f"Position Amount: {pos.amount}, Is Long: {is_long}, "
-                    f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
-                return False
 
         # Find the current SL order (STOP_MARKET, closePosition)
         sl_order = None
@@ -1416,8 +1441,56 @@ class BinanceBroker(BaseBroker):
             self.logger.error(f"update_tp_order: failed to query conditional orders: {e}")
             return False
 
-        if not open_orders:
-            return False
+        # No orders found or no matching TP order — likely the algo orders
+        # haven't propagated on testnet.  Create one so the position is
+        # protected from the start.
+        if not open_orders or tp_order is None:
+            try:
+                tp_side = SIDE_SELL if not is_long else SIDE_BUY
+                rounded_tp = round(new_tp_price, 1) if new_tp_price >= 1000 else round(new_tp_price, 2)
+
+                created = False
+                for use_close_pos in (True, False):
+                    try:
+                        kwargs: dict = dict(
+                            symbol=sym,
+                            side=tp_side,
+                            type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                            stopPrice=rounded_tp,
+                        )
+                        if use_close_pos:
+                            kwargs["closePosition"] = True
+                        else:
+                            kwargs["quantity"] = abs(pos.amount)
+                        self.client.futures_create_order(  # type: ignore[attr-defined]
+                            **kwargs
+                        )
+                        self.logger.info(
+                            f"[TP CREATED] Symbol: {sym}, Price: {rounded_tp:.2f}, "
+                            f"Position: {pos.amount}, ClosePos: {use_close_pos}, "
+                            f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        created = True
+                        break
+                    except Exception as e:
+                        if use_close_pos:
+                            self.logger.debug(
+                                f"[TP CREATE closePos=False fallback] Symbol: {sym}, "
+                                f"Error: {e}"
+                            )
+                            continue
+                        self.logger.error(
+                            f"[TP ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                            f"Target TP: {new_tp_price:.6f}, Rounded: {rounded_tp:.2f}, "
+                            f"Position Amount: {pos.amount}, Is Long: {is_long}, "
+                            f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        return False
+                if created:
+                    return True
+            except Exception as e:
+                self.logger.error(f"update_tp_order: creation fallback failed: {e}")
+                return False
 
         # Find the current TP order (TAKE_PROFIT_MARKET, closePosition)
         tp_order = None
@@ -1427,8 +1500,9 @@ class BinanceBroker(BaseBroker):
                 tp_order = o
                 break
 
-        if tp_order is None:
-            return False
+        # tp_order is guaranteed non-None here because the early-return block
+        # above already handled the missing-order case.
+        current_tp = float(tp_order.get("stopPrice", "0"))
 
         current_tp = float(tp_order.get("stopPrice", "0"))
         if current_tp <= 0:
@@ -1458,31 +1532,51 @@ class BinanceBroker(BaseBroker):
             self.logger.error(f"update_tp_order: cancel failed: {e}")
             return False
 
-        try:
-            tp_side = SIDE_SELL if is_long else SIDE_BUY
-            rounded_tp = round(new_tp_price, 1) if new_tp_price >= 1000 else round(new_tp_price, 2)
-            self.client.futures_create_order(  # type: ignore[attr-defined]
-                symbol=sym,
-                side=tp_side,
-                type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
-                stopPrice=rounded_tp,
-                closePosition=True,
-            )
-            self.logger.info(
-                f"[TP UPDATED] Symbol: {sym}, "
-                f"Old TP: {current_tp:.2f}, New TP: {rounded_tp:.2f}, "
-                f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
-                f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        # Try with closePosition=True first; fall back to explicit qty on testnet.
+        tp_side = SIDE_SELL if is_long else SIDE_BUY
+        rounded_tp = round(new_tp_price, 1) if new_tp_price >= 1000 else round(new_tp_price, 2)
+
+        updated = False
+        for use_close_pos in (True, False):
+            try:
+                kwargs: dict = dict(
+                    symbol=sym,
+                    side=tp_side,
+                    type=FUTURE_ORDER_TYPE_TAKE_PROFIT_MARKET,
+                    stopPrice=rounded_tp,
+                )
+                if use_close_pos:
+                    kwargs["closePosition"] = True
+                else:
+                    kwargs["quantity"] = abs(pos.amount)
+                self.client.futures_create_order(  # type: ignore[attr-defined]
+                    **kwargs
+                )
+                self.logger.info(
+                    f"[TP UPDATED] Symbol: {sym}, "
+                    f"Old TP: {current_tp:.2f}, New TP: {rounded_tp:.2f}, "
+                    f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                    f"ClosePos: {use_close_pos}, "
+                    f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                updated = True
+                break
+            except Exception as e:
+                if use_close_pos:
+                    self.logger.debug(
+                        f"[TP UPDATE closePos=False fallback] Symbol: {sym}, "
+                        f"Error: {e}"
+                    )
+                    continue
+                self.logger.error(
+                    f"[TP ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                    f"Target TP: {new_tp_price:.6f}, Rounded: {rounded_tp:.2f}, "
+                    f"Old TP: {current_tp:.2f}, Position: {pos.amount}, "
+                    f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return False
+        if updated:
             return True
-        except Exception as e:
-            self.logger.error(
-                f"[TP ORDER FAILED TO BE PLACED] Symbol: {sym}, "
-                f"Target TP: {new_tp_price:.6f}, Rounded: {rounded_tp:.2f}, "
-                f"Old TP: {current_tp:.2f}, Position: {pos.amount}, "
-                f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            return False
 
     def _fetch_klines(self, symbol: str, interval: str, limit: int):
         return self.client.futures_klines(symbol=symbol, interval=interval, limit=limit)  # type: ignore[attr-defined]
