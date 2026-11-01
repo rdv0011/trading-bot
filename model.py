@@ -104,9 +104,34 @@ class CatBoostModel:
         print(f"\n  Training with {n_train} train, {n - n_train} val samples...")
         if multi:
             from sklearn.multioutput import MultiOutputRegressor
-            self.model = MultiOutputRegressor(base)
-            self.model.fit(X_train, y_train)
-            best_score_val = None
+            # Train each target independently with early stopping
+            base_models = []
+            best_scores = []
+            for target_col in target_cols:
+                y_target = y[target_col].fillna(0)
+                y_t_train = y_target.iloc[:n_train]
+                y_t_val = y_target.iloc[n_train:]
+                cb = CatBoostRegressor(**self.params)
+                cb.fit(
+                    X_train, y_t_train,
+                    eval_set=[(X_val, y_t_val)],
+                    early_stopping_rounds=100,
+                    verbose=0,
+                )
+                base_models.append(cb)
+                # Extract best validation RMSE for this target
+                bs = getattr(cb, 'best_score_', None)
+                if isinstance(bs, dict) and 'validation' in bs:
+                    v = bs['validation']
+                    if isinstance(v, dict):
+                        # CatBoost 2.x: {'RMSE': value}, older: {'min': value}
+                        best_scores.append(v.get('RMSE', v.get('min', v.get('current', float('inf')))))
+                    else:
+                        best_scores.append(float(v))
+                else:
+                    best_scores.append(float('inf'))
+            self.model = MultiOutputRegressor(base_models)
+            best_score_val = float(np.mean(best_scores)) if best_scores else None
         else:
             self.model = base
             self.model.fit(
@@ -118,20 +143,14 @@ class CatBoostModel:
             best_score_val = None
             if hasattr(self.model, 'best_score_'):
                 bs = self.model.best_score_
-                if isinstance(bs, dict):
-                    for dataset_key in ('test', 'validation', 'learn'):
-                        if dataset_key in bs:
-                            dataset_val = bs[dataset_key]
-                            best_score_val = (
-                                dataset_val.get('best') or dataset_val.get('min')
-                                if isinstance(dataset_val, dict)
-                                else dataset_val
-                            )
-                            break
-                else:
-                    best_score_val = bs
-                if best_score_val is not None:
-                    best_score_val = float(best_score_val)
+                if isinstance(bs, dict) and 'validation' in bs:
+                    v = bs['validation']
+                    if isinstance(v, dict):
+                        best_score_val = v.get('RMSE', v.get('min', v.get('current', 0.0)))
+                    else:
+                        best_score_val = float(v)
+            if best_score_val is not None:
+                best_score_val = float(best_score_val)
 
         self.metadata = {
             "feature_cols": feature_cols,
