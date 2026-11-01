@@ -42,9 +42,9 @@ ATR_PERIOD = 14                                          # Average True Range
 # ── Model Parameters ───────────────────────────────────────────────────
 # Tactical ML (15m, retrained every candle)
 TACTICAL_MODEL_PARAMS = {
-    "iterations": 100,      # Fast for walk-forward
+    "iterations": 500,      # Fast for walk-forward
     "depth": 6,
-    "learning_rate": 0.05,
+    "learning_rate": 0.03,
     "loss_function": "RMSE",
     "verbose": False,
 }
@@ -120,7 +120,7 @@ INITIAL_EQUITY = 1.0          # Start with 1.0 (100%)
 # the live model retrained every ~10 min DOES signal (observed: live saw ~28
 # entry episodes over 2 days, default sim saw 0). The sim therefore must
 # retrain far more often than 100 candles to mirror live's behavior.
-WALKFORWARD_RETRAIN_EVERY = 100    # how often LIVE retrains, in live iterations
+WALKFORWARD_RETRAIN_EVERY = 10    # how often LIVE retrains, in live iterations
 WALKFORWARD_RETRAIN_EVERY_CANDLES = 1   # how often SIM retrains, in 15m candles (mirrors live)
 
 # Live model hot-swap: reload tactical/strategic models from disk this often

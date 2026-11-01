@@ -123,6 +123,14 @@ def simulate_mode(args):
     tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
     tactical_model.load()
 
+    # Pre-flight validation: reject underfit models
+    tree_count = getattr(tactical_model.model, "tree_count_", None)
+    if tree_count is not None and tree_count < 10:
+        log_error(f"Model underfit: only {tree_count} trees. Minimum 10 required. Retrain required.")
+        sys.exit(1)
+    elif tree_count is not None:
+        log_info(f"Tactical model tree count: {tree_count}")
+
     strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
     strategic_model.load()
 
@@ -235,6 +243,14 @@ def live_mode(args):
     log_info("Loading models...")
     tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
     tactical_model.load()
+
+    # Pre-flight validation: reject underfit models
+    tree_count = getattr(tactical_model.model, "tree_count_", None)
+    if tree_count is not None and tree_count < 10:
+        log_error(f"Model underfit: only {tree_count} trees. Minimum 10 required. Retrain required.")
+        sys.exit(1)
+    elif tree_count is not None:
+        log_info(f"Tactical model tree count: {tree_count}")
 
     strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
     strategic_model.load()

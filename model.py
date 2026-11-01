@@ -112,7 +112,7 @@ class CatBoostModel:
             self.model.fit(
                 X_train, y_train,
                 eval_set=(X_val, y_val),
-                early_stopping_rounds=50,
+                early_stopping_rounds=100,
                 verbose=100,
             )
             best_score_val = None
