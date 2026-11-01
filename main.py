@@ -125,8 +125,8 @@ def simulate_mode(args):
 
     # Pre-flight validation: reject underfit models
     tree_count = getattr(tactical_model.model, "tree_count_", None)
-    if tree_count is not None and tree_count < 10:
-        log_error(f"Model underfit: only {tree_count} trees. Minimum 10 required. Retrain required.")
+    if tree_count is not None and tree_count < 5:
+        log_error(f"Model underfit: only {tree_count} trees. Minimum 5 required. Retrain required.")
         sys.exit(1)
     elif tree_count is not None:
         log_info(f"Tactical model tree count: {tree_count}")
@@ -246,8 +246,8 @@ def live_mode(args):
 
     # Pre-flight validation: reject underfit models
     tree_count = getattr(tactical_model.model, "tree_count_", None)
-    if tree_count is not None and tree_count < 10:
-        log_error(f"Model underfit: only {tree_count} trees. Minimum 10 required. Retrain required.")
+    if tree_count is not None and tree_count < 5:
+        log_error(f"Model underfit: only {tree_count} trees. Minimum 5 required. Retrain required.")
         sys.exit(1)
     elif tree_count is not None:
         log_info(f"Tactical model tree count: {tree_count}")

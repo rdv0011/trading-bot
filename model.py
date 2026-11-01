@@ -115,7 +115,7 @@ class CatBoostModel:
                 cb.fit(
                     X_train, y_t_train,
                     eval_set=[(X_val, y_t_val)],
-                    early_stopping_rounds=100,
+                    early_stopping_rounds=500,
                     verbose=0,
                 )
                 base_models.append(cb)
@@ -137,7 +137,7 @@ class CatBoostModel:
             self.model.fit(
                 X_train, y_train,
                 eval_set=(X_val, y_val),
-                early_stopping_rounds=100,
+                early_stopping_rounds=500,
                 verbose=100,
             )
             best_score_val = None
