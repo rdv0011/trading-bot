@@ -25,6 +25,41 @@ TARGET_COLUMN = 'future_ret'
 SEED_BASE = 42
 
 
+# ── Multi-Output Wrapper (replaces sklearn MultiOutputRegressor) ────────
+class MultiOutputCatBoost:
+    """
+    Custom multi-output wrapper for CatBoostRegressor models.
+    Replaces sklearn's MultiOutputRegressor which doesn't support pre-fitted estimators.
+    Stores individual CatBoostRegressor models per target and delegates predict.
+    """
+
+    def __init__(self, models: List[CatBoostRegressor], target_cols: List[str]):
+        self.models = models
+        self.target_cols = target_cols
+        self.n_outputs_ = len(models)
+        # Mimic sklearn's fitted estimator attribute
+        self.estimators_ = models
+
+    def predict(self, X) -> np.ndarray:
+        """Predict for all targets, returning (n_samples, n_targets) array."""
+        preds = [model.predict(X) for model in self.models]
+        return np.column_stack(preds)
+
+    def get_feature_importance(self):
+        """Aggregate feature importance across all target models. Returns list of importances."""
+        if not self.models:
+            return []
+        if not hasattr(self.models[0], 'feature_importances_'):
+            return []
+        
+        # Average importance across all models
+        importances = np.zeros(len(self.models[0].feature_importances_))
+        for model in self.models:
+            importances += model.feature_importances_
+        importances /= len(self.models)
+        return importances.tolist()
+
+
 # ── CatBoost Model Wrapper ─────────────────────────────────────────────
 class CatBoostModel:
     """
@@ -103,7 +138,6 @@ class CatBoostModel:
 
         print(f"\n  Training with {n_train} train, {n - n_train} val samples...")
         if multi:
-            from sklearn.multioutput import MultiOutputRegressor
             # Train each target independently with early stopping
             base_models = []
             best_scores = []
@@ -130,7 +164,7 @@ class CatBoostModel:
                         best_scores.append(float(v))
                 else:
                     best_scores.append(float('inf'))
-            self.model = MultiOutputRegressor(base_models)
+            self.model = MultiOutputCatBoost(base_models, target_cols)
             best_score_val = float(np.mean(best_scores)) if best_scores else None
         else:
             self.model = base
@@ -187,8 +221,8 @@ class CatBoostModel:
 
         friendly_path = model_path
         if self.metadata.get("multi_output"):
-            import joblib
-            friendly_path = self.model_dir / f"{prefix}_{self.model_type}.joblib"
+            # For multi-output, save each CatBoost model as separate .cbm file
+            friendly_path = self.model_dir / f"{prefix}_{self.model_type}"
             self.meta_path = meta_path
         self.metadata["saved_at"] = pd.Timestamp.now().isoformat()
 
@@ -201,11 +235,14 @@ class CatBoostModel:
         os.close(tmp_fd)
         try:
             if self.metadata.get("multi_output"):
-                import joblib
-                joblib.dump(self.model, tmp_model)
+                # Save each CatBoost model individually
+                target_cols = self.metadata.get("target_cols", [])
+                for i, (model, target) in enumerate(zip(self.model.models, target_cols)):
+                    model_path = self.model_dir / f"{prefix}_{self.model_type}_{target}.cbm"
+                    model.save_model(str(model_path))
             else:
                 self.model.save_model(tmp_model)
-            os.replace(tmp_model, str(friendly_path))
+                os.replace(tmp_model, str(friendly_path))
         finally:
             if os.path.exists(tmp_model):
                 os.unlink(tmp_model)
@@ -243,8 +280,18 @@ class CatBoostModel:
             self.metadata = loaded_meta
 
         if loaded_meta.get("multi_output"):
-            import joblib
-            self.model = joblib.load(str(self.model_path))
+            # Load each CatBoost model individually
+            target_cols = loaded_meta.get("target_cols", [])
+            models = []
+            for target in target_cols:
+                model_file = self.model_dir / f"model_{self.model_type}_{target}.cbm"
+                if not model_file.exists():
+                    # Fallback: try with prefix from metadata or default
+                    model_file = self.model_dir / f"model_{self.model_type}_{target}.cbm"
+                cb = CatBoostRegressor(**self.params)
+                cb.load_model(str(model_file))
+                models.append(cb)
+            self.model = MultiOutputCatBoost(models, target_cols)
         else:
             self.model = CatBoostRegressor(**self.params)
             self.model.load_model(str(self.model_path))
@@ -259,18 +306,43 @@ class CatBoostModel:
         """Find latest model file in model directory."""
         self.model_dir.mkdir(parents=True, exist_ok=True)
 
-        pattern = f"model_{self.model_type}.cbm"
-        model_path = self.model_dir / pattern
-        joblib_pattern = self.model_dir / f"model_{self.model_type}.joblib"
+        # For multi-output models, check for individual target model files
+        meta_path = self.model_dir / f"model_{self.model_type}_meta.json"
+        if meta_path.exists():
+            try:
+                with open(meta_path, 'r') as f:
+                    meta = json.load(f)
+                if meta.get("multi_output"):
+                    target_cols = meta.get("target_cols", [])
+                    # Check if all target model files exist
+                    all_exist = True
+                    for target in target_cols:
+                        model_file = self.model_dir / f"model_{self.model_type}_{target}.cbm"
+                        if not model_file.exists():
+                            all_exist = False
+                            break
+                    if all_exist and target_cols:
+                        # Return the first target's model file as representative
+                        model_path = self.model_dir / f"model_{self.model_type}_{target_cols[0]}.cbm"
+                        return model_path, meta_path
+            except (json.JSONDecodeError, OSError):
+                pass
 
+        # Fallback: check for old joblib format
+        joblib_pattern = self.model_dir / f"model_{self.model_type}.joblib"
         if joblib_pattern.exists():
             model_path = joblib_pattern
-        elif not model_path.exists():
+            return model_path, meta_path
+
+        # Fallback: single .cbm file
+        pattern = f"model_{self.model_type}.cbm"
+        model_path = self.model_dir / pattern
+        if not model_path.exists():
             raise FileNotFoundError(
                 f"No model found at {model_path}. Run 'train' mode first."
             )
 
-        meta_path = self.model_dir / f"model_{self.model_type}_meta.json"
+        return model_path, meta_path
         return model_path, meta_path
 
     def predict(
@@ -297,6 +369,15 @@ class CatBoostModel:
         """Get feature importance from trained model."""
         if self.model is None:
             return {}
+        
+        # Handle MultiOutputCatBoost wrapper
+        if hasattr(self.model, 'get_feature_importance'):
+            importances = self.model.get_feature_importance()
+            if importances:
+                feature_cols = self.metadata.get("feature_cols", [])
+                return dict(zip(feature_cols, importances))
+        
+        # Handle single CatBoostRegressor
         if not hasattr(self.model, 'feature_importances_'):
             return {}
 
