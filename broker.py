@@ -1323,6 +1323,21 @@ class BinanceBroker(BaseBroker):
                     )
                     created = True
                     break
+                except BinanceAPIException as e:
+                    if use_close_pos and e.code == -4509:
+                        self.logger.debug(
+                            f"[SL CREATE closePos=False fallback] Symbol: {sym}, "
+                            f"Error: {e}"
+                        )
+                        continue
+                    # Both attempts failed
+                    self.logger.error(
+                        f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                        f"Target SL: {new_sl_price:.6f}, Rounded: {rounded_price:.2f}, "
+                        f"Position Amount: {pos.amount}, Is Long: {is_long}, "
+                        f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+                    return False
                 except Exception as e:
                     if use_close_pos:
                         self.logger.debug(
@@ -1383,32 +1398,66 @@ class BinanceBroker(BaseBroker):
             self.logger.error(f"update_sl_order: cancel failed: {e}")
             return False
 
-        # Place new SL order
-        try:
-            sl_side = SIDE_BUY if not is_long else SIDE_SELL
-            rounded_sl = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
-            self.client.futures_create_order(  # type: ignore[attr-defined]
-                symbol=sym,
-                side=sl_side,
-                type=FUTURE_ORDER_TYPE_STOP_MARKET,
-                stopPrice=rounded_sl,
-                closePosition=True,
-            )
-            self.logger.info(
-                f"[SL UPDATED] Symbol: {sym}, "
-                f"Old SL: {current_sl:.2f}, New SL: {rounded_sl:.2f}, "
-                f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
-                f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
+        # Place new SL order with fallback for testnet (error -4509)
+        sl_side = SIDE_BUY if not is_long else SIDE_SELL
+        rounded_sl = round(new_sl_price, 1) if new_sl_price >= 1000 else round(new_sl_price, 2)
+
+        updated = False
+        for use_close_pos in (True, False):
+            try:
+                kwargs: dict = dict(
+                    symbol=sym,
+                    side=sl_side,
+                    type=FUTURE_ORDER_TYPE_STOP_MARKET,
+                    stopPrice=rounded_sl,
+                )
+                if use_close_pos:
+                    kwargs["closePosition"] = True
+                else:
+                    kwargs["quantity"] = abs(pos.amount)
+                self.client.futures_create_order(  # type: ignore[attr-defined]
+                    **kwargs
+                )
+                self.logger.info(
+                    f"[SL UPDATED] Symbol: {sym}, "
+                    f"Old SL: {current_sl:.2f}, New SL: {rounded_sl:.2f}, "
+                    f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                    f"ClosePos: {use_close_pos}, "
+                    f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                updated = True
+                break
+            except BinanceAPIException as e:
+                if use_close_pos and e.code == -4509:
+                    self.logger.debug(
+                        f"[SL UPDATE closePos=False fallback] Symbol: {sym}, "
+                        f"Error: {e}"
+                    )
+                    continue
+                self.logger.error(
+                    f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                    f"Target SL: {new_sl_price:.6f}, Rounded: {rounded_sl:.2f}, "
+                    f"Old SL: {current_sl:.2f}, Position: {pos.amount}, "
+                    f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return False
+            except Exception as e:
+                if use_close_pos:
+                    self.logger.debug(
+                        f"[SL UPDATE closePos=False fallback] Symbol: {sym}, "
+                        f"Error: {e}"
+                    )
+                    continue
+                self.logger.error(
+                    f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                    f"Target SL: {new_sl_price:.6f}, Rounded: {rounded_sl:.2f}, "
+                    f"Old SL: {current_sl:.2f}, Position: {pos.amount}, "
+                    f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return False
+        if updated:
             return True
-        except Exception as e:
-            self.logger.error(
-                f"[SL ORDER FAILED TO BE PLACED] Symbol: {sym}, "
-                f"Target SL: {new_sl_price:.6f}, Rounded: {rounded_sl:.2f}, "
-                f"Old SL: {current_sl:.2f}, Position: {pos.amount}, "
-                f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-            )
-            return False
+        return False
 
     def update_tp_order(self, symbol: str, new_tp_price: float, threshold: float = 0.005) -> bool:
         """Update the TP order to a new price on the exchange.
@@ -1444,6 +1493,7 @@ class BinanceBroker(BaseBroker):
         # No orders found or no matching TP order — likely the algo orders
         # haven't propagated on testnet.  Create one so the position is
         # protected from the start.
+        tp_order = None
         if not open_orders or tp_order is None:
             try:
                 tp_side = SIDE_SELL if not is_long else SIDE_BUY
@@ -1472,6 +1522,20 @@ class BinanceBroker(BaseBroker):
                         )
                         created = True
                         break
+                    except BinanceAPIException as e:
+                        if use_close_pos and e.code == -4509:
+                            self.logger.debug(
+                                f"[TP CREATE closePos=False fallback] Symbol: {sym}, "
+                                f"Error: {e}"
+                            )
+                            continue
+                        self.logger.error(
+                            f"[TP ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                            f"Target TP: {new_tp_price:.6f}, Rounded: {rounded_tp:.2f}, "
+                            f"Position Amount: {pos.amount}, Is Long: {is_long}, "
+                            f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
+                        return False
                     except Exception as e:
                         if use_close_pos:
                             self.logger.debug(
@@ -1502,8 +1566,6 @@ class BinanceBroker(BaseBroker):
 
         # tp_order is guaranteed non-None here because the early-return block
         # above already handled the missing-order case.
-        current_tp = float(tp_order.get("stopPrice", "0"))
-
         current_tp = float(tp_order.get("stopPrice", "0"))
         if current_tp <= 0:
             return False
@@ -1561,6 +1623,20 @@ class BinanceBroker(BaseBroker):
                 )
                 updated = True
                 break
+            except BinanceAPIException as e:
+                if use_close_pos and e.code == -4509:
+                    self.logger.debug(
+                        f"[TP UPDATE closePos=False fallback] Symbol: {sym}, "
+                        f"Error: {e}"
+                    )
+                    continue
+                self.logger.error(
+                    f"[TP ORDER FAILED TO BE PLACED] Symbol: {sym}, "
+                    f"Target TP: {new_tp_price:.6f}, Rounded: {rounded_tp:.2f}, "
+                    f"Old TP: {current_tp:.2f}, Position: {pos.amount}, "
+                    f"Error: {e}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                )
+                return False
             except Exception as e:
                 if use_close_pos:
                     self.logger.debug(
