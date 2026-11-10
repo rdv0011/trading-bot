@@ -435,6 +435,52 @@ def log_trade_exit(
     return trade
 
 
+
+def _estimate_trading_costs(
+    entry_price: float,
+    exit_price: float,
+    qty: float,
+    entry_time_str: str = "",
+) -> Dict[str, float]:
+    """
+    Estimate trading costs when exchange doesn't provide them.
+    Uses Binance Futures typical fee structure.
+    """
+    notional = abs(qty) * exit_price
+    
+    # Binance Futures typical fees (taker)
+    commission_rate = 0.0004  # 0.04% taker fee
+    commission = notional * commission_rate
+    
+    # Spread estimate: assume 1-2 bps for BTCUSDT on testnet
+    spread_bps = 1.5  # basis points
+    spread = notional * (spread_bps / 10000)
+    
+    # Slippage estimate: assume 1-2 bps
+    slippage_bps = 1.0
+    slippage = notional * (slippage_bps / 10000)
+    
+    # Financing (funding) estimate for the hold period
+    # Rough approximation: funding rate * notional * hours_held / 8 (8h funding interval)
+    financing = 0.0
+    if entry_time_str:
+        try:
+            from datetime import datetime
+            entry_time = datetime.fromisoformat(entry_time_str.replace('Z', '+00:00'))
+            exit_time = datetime.now()
+            hours_held = (exit_time - entry_time).total_seconds() / 3600
+            funding_rate = 0.0001  # 0.01% per 8h typical
+            financing = notional * funding_rate * (hours_held / 8)
+        except Exception:
+            financing = notional * 0.0001  # fallback
+    
+    return {
+        "commission": round(commission, 6),
+        "spread": round(spread, 6),
+        "slippage": round(slippage, 6),
+        "financing": round(financing, 6),
+    }
+
 # ── Cost Tracking Dashboard (Improvement 4) ────────────────────────────
 COST_CSV_PATH = LOG_DIR / "cost_summary.csv"
 _COST_CSV_FIELDS = [
