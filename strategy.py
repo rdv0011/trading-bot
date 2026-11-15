@@ -1052,16 +1052,14 @@ class DualMLStrategy:
         if self.trail_extreme <= 0:
             self.trail_extreme = self.entry_price
 
-        # Calculate trailing SL
+        # Calculate trailing SL — always compute trailing level, but only use it
+        # if it improves over the initial bracket SL. This avoids the "breakeven
+        # threshold" problem where SL stays at initial level until 1R profit.
         if self.position > 0:  # Long
             self.trail_extreme = max(self.trail_extreme, current_price)
-            breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
-            if self.trail_extreme >= breakeven_price:
-                base_sl = self.entry_price * (1 - sl_frac)
-                trail_sl = self.trail_extreme - atr_mult * atr14
-                new_sl = max(base_sl, trail_sl)
-            else:
-                new_sl = self.entry_price * (1 - sl_frac)
+            base_sl = self.entry_price * (1 - sl_frac)          # Initial bracket SL
+            trail_sl = self.trail_extreme - atr_mult * atr14    # Trailing SL from peak
+            new_sl = max(base_sl, trail_sl)                     # Use the better (higher) SL
 
             # Calculate trailing TP (trail upward once 2x initial risk gained)
             initial_risk = self.entry_price * sl_frac
@@ -1077,13 +1075,9 @@ class DualMLStrategy:
 
         else:  # Short
             self.trail_extreme = min(self.trail_extreme, current_price)
-            breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
-            if self.trail_extreme <= breakeven_price:
-                base_sl = self.entry_price * (1 + sl_frac)
-                trail_sl = self.trail_extreme + atr_mult * atr14
-                new_sl = min(base_sl, trail_sl)
-            else:
-                new_sl = self.entry_price * (1 + sl_frac)
+            base_sl = self.entry_price * (1 + sl_frac)          # Initial bracket SL
+            trail_sl = self.trail_extreme + atr_mult * atr14    # Trailing SL from trough
+            new_sl = min(base_sl, trail_sl)                     # Use the better (lower) SL
 
             initial_risk = self.entry_price * sl_frac
             current_gain = self.entry_price - self.trail_extreme
@@ -1108,8 +1102,16 @@ class DualMLStrategy:
                     f"Position: {self.position}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
 
-        # Sync SL to exchange if moved meaningfully
-        if self._last_synced_sl_price is None or abs(new_sl - self._last_synced_sl_price) / self._last_synced_sl_price >= threshold:
+        # Compute initial bracket SL for comparison (trailing only improves on this)
+        base_sl = self.entry_price * (1 - sl_frac) if self.position > 0 else self.entry_price * (1 + sl_frac)
+
+        # Only attempt SL update if trailing has actually improved the SL beyond initial bracket level
+        # For long: new_sl > base_sl (trailing moved SL up)
+        # For short: new_sl < base_sl (trailing moved SL down)
+        sl_improved = (self.position > 0 and new_sl > base_sl) or (self.position < 0 and new_sl < base_sl)
+
+        # Sync SL to exchange if trailing improved it and moved meaningfully from last synced
+        if sl_improved and (self._last_synced_sl_price is None or abs(new_sl - self._last_synced_sl_price) / self._last_synced_sl_price >= threshold):
             now = time.time()
             if now - self._last_sl_update_ts >= 60:  # 1-min cooldown between updates
                 success = self.broker.update_sl_order(self.broker.symbol, new_sl, threshold)
@@ -1124,14 +1126,22 @@ class DualMLStrategy:
                         f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                     )
                 else:
-                    logger.error(
-                        f"[SL ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
-                        f"Target SL: {new_sl:.6f}, "
-                        f"Entry: {self.entry_price}, Current Price: {current_price}, "
-                        f"Position: {self.position}, ATR: {atr14:.6f}, "
-                        f"Trail Extreme: {self.trail_extreme:.6f}, "
-                        f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                    )
+                    # On testnet, False often means "threshold not met" — not an error
+                    if is_testnet_env():
+                        logger.debug(
+                            f"[SL SIMULATED - NO CHANGE] Symbol: {self.broker.symbol}, "
+                            f"Target SL: {new_sl:.6f}, Last Synced: {self._last_synced_sl_price}, "
+                            f"Threshold not met or directional guard failed (testnet)"
+                        )
+                    else:
+                        logger.error(
+                            f"[SL ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
+                            f"Target SL: {new_sl:.6f}, "
+                            f"Entry: {self.entry_price}, Current Price: {current_price}, "
+                            f"Position: {self.position}, ATR: {atr14:.6f}, "
+                            f"Trail Extreme: {self.trail_extreme:.6f}, "
+                            f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        )
             else:
                 logger.debug(
                     f"[SL UPDATE SKIPPED - COOLDOWN] Symbol: {self.broker.symbol}, "
@@ -1139,6 +1149,12 @@ class DualMLStrategy:
                     f"Last Update: {now - self._last_sl_update_ts:.1f}s ago, "
                     f"Cooldown: 60s"
                 )
+        elif not sl_improved:
+            logger.debug(
+                f"[SL TRAILING NOT ACTIVE] Symbol: {self.broker.symbol}, "
+                f"Trailing SL: {new_sl:.6f} not better than initial SL: {base_sl:.6f}, "
+                f"Trail Extreme: {self.trail_extreme:.6f}, ATR: {atr14:.6f}"
+            )
         else:
             logger.debug(
                 f"[SL NO CHANGE NEEDED] Symbol: {self.broker.symbol}, "
@@ -1148,7 +1164,15 @@ class DualMLStrategy:
             )
 
         # Sync TP to exchange if moved meaningfully
-        if self._last_synced_tp_price is None or abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price >= threshold:
+        # Compute initial bracket TP for comparison (trailing only improves on this)
+        base_tp = self.entry_price * (1 + tp_frac) if self.position > 0 else self.entry_price * (1 - tp_frac)
+
+        # Only attempt TP update if trailing has actually improved the TP beyond initial bracket level
+        # For long: new_tp > base_tp (trailing moved TP up)
+        # For short: new_tp < base_tp (trailing moved TP down)
+        tp_improved = (self.position > 0 and new_tp > base_tp) or (self.position < 0 and new_tp < base_tp)
+
+        if tp_improved and (self._last_synced_tp_price is None or abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price >= threshold):
             success = self.broker.update_tp_order(self.broker.symbol, new_tp, threshold)
             if success:
                 self._last_synced_tp_price = new_tp
@@ -1160,12 +1184,26 @@ class DualMLStrategy:
                     f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
             else:
-                logger.error(
-                    f"[TP ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
-                    f"Target TP: {new_tp:.6f}, "
-                    f"Entry: {self.entry_price}, Current Price: {current_price}, "
-                    f"Position: {self.position}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
-                )
+                # On testnet, False often means "threshold not met" — not an error
+                if is_testnet_env():
+                    logger.debug(
+                        f"[TP SIMULATED - NO CHANGE] Symbol: {self.broker.symbol}, "
+                        f"Target TP: {new_tp:.6f}, Last Synced: {self._last_synced_tp_price}, "
+                        f"Threshold not met or directional guard failed (testnet)"
+                    )
+                else:
+                    logger.error(
+                        f"[TP ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
+                        f"Target TP: {new_tp:.6f}, "
+                        f"Entry: {self.entry_price}, Current Price: {current_price}, "
+                        f"Position: {self.position}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                    )
+        elif not tp_improved:
+            logger.debug(
+                f"[TP TRAILING NOT ACTIVE] Symbol: {self.broker.symbol}, "
+                f"Trailing TP: {new_tp:.6f} not better than initial TP: {base_tp:.6f}, "
+                f"Trail Extreme: {self.trail_extreme:.6f}"
+            )
         else:
             logger.debug(
                 f"[TP NO CHANGE NEEDED] Symbol: {self.broker.symbol}, "
@@ -1211,6 +1249,32 @@ class DualMLStrategy:
         if result is None or not getattr(result, "success", False):
             log_warning(f"Entry {side.upper()} FAILED: {getattr(result, 'error', 'no result')}")
             return
+
+        # Initialize trailing sync state from bracket result
+        data = getattr(result, "data", {}) or {}
+        self._last_synced_sl_price = data.get("sl_price")
+        self._last_synced_tp_price = data.get("tp_price")
+
+        # Fallback: calculate from entry_price and meta if not provided by broker
+        sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+        tp_frac = self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)
+        entry_price = self.entry_price  # Will be set from actual_pos below, but use price for now
+        if self._last_synced_sl_price is None:
+            if side == "long":
+                self._last_synced_sl_price = round(price * (1 - sl_frac), 2)
+            else:
+                self._last_synced_sl_price = round(price * (1 + sl_frac), 2)
+        if self._last_synced_tp_price is None:
+            if side == "long":
+                self._last_synced_tp_price = round(price * (1 + tp_frac), 2)
+            else:
+                self._last_synced_tp_price = round(price * (1 - tp_frac), 2)
+
+        # Also sync to broker for testnet simulation
+        if hasattr(self.broker, "_last_synced_sl_price"):
+            self.broker._last_synced_sl_price = self._last_synced_sl_price
+        if hasattr(self.broker, "_last_synced_tp_price"):
+            self.broker._last_synced_tp_price = self._last_synced_tp_price
 
         # Reconcile from broker's actual fill (source of truth)
         actual_pos = self.broker.get_position()
@@ -1318,6 +1382,21 @@ class DualMLStrategy:
                 tp_frac=self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT),
                 sl_frac=self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT),
             )
+            # Sync trailing state after bracket replacement
+            pos = self.broker.get_position()
+            if pos and pos.entry_price:
+                entry_price = pos.entry_price
+                if self.position > 0:
+                    self._last_synced_tp_price = round(entry_price * (1 + self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)), 2)
+                    self._last_synced_sl_price = round(entry_price * (1 - self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)), 2)
+                else:
+                    self._last_synced_tp_price = round(entry_price * (1 - self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)), 2)
+                    self._last_synced_sl_price = round(entry_price * (1 + self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)), 2)
+                # Also sync to broker
+                if hasattr(self.broker, "_last_synced_sl_price"):
+                    self.broker._last_synced_sl_price = self._last_synced_sl_price
+                if hasattr(self.broker, "_last_synced_tp_price"):
+                    self.broker._last_synced_tp_price = self._last_synced_tp_price
         except Exception as e:
             log_warning(f"replace_bracket_order after scale-in failed: {e}")
 

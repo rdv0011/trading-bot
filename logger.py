@@ -263,7 +263,7 @@ def log_trade(trade: Dict[str, Any]) -> None:
 
     # Also log to file logger
     logger = logging.getLogger(__name__)
-    entry = float(trade.get('entry_price')) if trade.get('entry_price') else 'N/A'
+    entry = float(trade.get('fill_price')) if trade.get('fill_price') else 'N/A'
     exit_p = float(trade.get('exit_price')) if trade.get('exit_price') else 'N/A'
     pnl = float(trade.get('pnl')) if trade.get('pnl') else 'N/A'
     pnl_pct = float(trade.get('pnl_pct')) if trade.get('pnl_pct') else 'N/A'

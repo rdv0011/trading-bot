@@ -449,6 +449,10 @@ class BinanceBroker(BaseBroker):
         # Position tracking for financing calculation
         self.entry_time: Optional[datetime] = None
 
+        # Hybrid trailing state: last synced SL/TP prices (for testnet simulation)
+        self._last_synced_sl_price: Optional[float] = None
+        self._last_synced_tp_price: Optional[float] = None
+
     def setup_client(self):
         self.client = Client(
             api_key=self.api_key,
@@ -908,6 +912,10 @@ class BinanceBroker(BaseBroker):
                     self.close_position(symbol, position.amount)
                 return BracketResult(success=False, error="TP/SL placement failed; position closed")
 
+            # Initialize hybrid sync state for testnet trailing simulation
+            self._last_synced_sl_price = sl_price
+            self._last_synced_tp_price = tp_price
+
             return BracketResult(
                 success=True,
                 data={
@@ -1244,7 +1252,12 @@ class BinanceBroker(BaseBroker):
             tp_price = round(entry_price * (1 - tp_frac), 2)
             sl_price = round(entry_price * (1 + sl_frac), 2)
 
-        return self._create_bracket_order(sym, amount, side, tp_price, sl_price)
+        result = self._create_bracket_order(sym, amount, side, tp_price, sl_price)
+        if result:
+            # Update hybrid sync state for testnet trailing simulation
+            self._last_synced_sl_price = sl_price
+            self._last_synced_tp_price = tp_price
+        return result
 
     def update_sl_order(self, symbol: str, new_sl_price: float, threshold: float = 0.005) -> bool:
         """Update the SL order to a new price on the exchange.
@@ -1254,14 +1267,18 @@ class BinanceBroker(BaseBroker):
         (default 0.5 %).  This minimises API calls while keeping the exchange
         order meaningfully aligned with the strategy's trailing calculation.
 
+        On testnet, the algoOrder endpoint has known issues with closePosition=True
+        for order updates (error -4509). This method simulates the update on testnet
+        while keeping the strategy's internal state in sync.
+
         Args:
             symbol: Trading symbol (defaults to broker's symbol).
             new_sl_price: New stop-loss price.
             threshold: Minimum price change ratio to trigger an update.
 
         Returns:
-            True if the order was updated, False if no change was needed or
-            the update failed.
+            True if the order was updated (or simulated on testnet), False if no
+            change was needed or the update failed.
         """
         sym = symbol or self.symbol
 
@@ -1278,6 +1295,36 @@ class BinanceBroker(BaseBroker):
                 return False
         except Exception:
             return False
+
+        # On testnet: simulate trailing SL updates to avoid API errors.
+        # The algoOrder endpoint on testnet has known issues with closePosition=True
+        # for order updates (error -4130 / -4509 / -2021).  Since we already have
+        # the position info, just simulate the trailing without querying the exchange.
+        if is_testnet_env():
+            # Hybrid threshold check
+            if self._last_synced_sl_price is not None:
+                price_diff = abs(new_sl_price - self._last_synced_sl_price) / self._last_synced_sl_price
+                if price_diff >= threshold:
+                    # Directional guard
+                    if is_long and new_sl_price >= self._last_synced_sl_price:
+                        self.logger.info(
+                            f"[SL SIMULATED] Symbol: {sym}, "
+                            f"Old SL: {self._last_synced_sl_price:.2f}, New SL: {new_sl_price:.2f}, "
+                            f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                            f"(testnet simulation - no API call)"
+                        )
+                        self._last_synced_sl_price = new_sl_price
+                        return True
+                    elif not is_long and new_sl_price <= self._last_synced_sl_price:
+                        self.logger.info(
+                            f"[SL SIMULATED] Symbol: {sym}, "
+                            f"Old SL: {self._last_synced_sl_price:.2f}, New SL: {new_sl_price:.2f}, "
+                            f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                            f"(testnet simulation - no API call)"
+                        )
+                        self._last_synced_sl_price = new_sl_price
+                        return True
+            return False  # Threshold not met — no API call
 
         # Fetch current conditional orders
         try:
@@ -1464,13 +1511,17 @@ class BinanceBroker(BaseBroker):
 
         Same hybrid logic as *update_sl_order*.
 
+        On testnet, the algoOrder endpoint has known issues with closePosition=True
+        for order updates (error -4509). This method simulates the update on testnet
+        while keeping the strategy's internal state in sync.
+
         Args:
             symbol: Trading symbol (defaults to broker's symbol).
             new_tp_price: New take-profit price.
             threshold: Minimum price change ratio to trigger an update.
 
         Returns:
-            True if the order was updated, False otherwise.
+            True if the order was updated (or simulated on testnet), False otherwise.
         """
         sym = symbol or self.symbol
 
@@ -1484,6 +1535,37 @@ class BinanceBroker(BaseBroker):
         except Exception:
             return False
 
+        # On testnet: simulate trailing TP updates to avoid API errors.
+        # The algoOrder endpoint on testnet has known issues with closePosition=True
+        # for order updates (error -4130 / -4509 / -2021).  Since we already have
+        # the position info, just simulate the trailing without querying the exchange.
+        if is_testnet_env():
+            # Hybrid threshold check
+            if self._last_synced_tp_price is not None:
+                price_diff = abs(new_tp_price - self._last_synced_tp_price) / self._last_synced_tp_price
+                if price_diff >= threshold:
+                    # Directional guard: for long, TP should only move UP.
+                    # For short, TP should only move DOWN.
+                    if is_long and new_tp_price >= self._last_synced_tp_price:
+                        self.logger.info(
+                            f"[TP SIMULATED] Symbol: {sym}, "
+                            f"Old TP: {self._last_synced_tp_price:.2f}, New TP: {new_tp_price:.2f}, "
+                            f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                            f"(testnet simulation - no API call)"
+                        )
+                        self._last_synced_tp_price = new_tp_price
+                        return True
+                    elif not is_long and new_tp_price <= self._last_synced_tp_price:
+                        self.logger.info(
+                            f"[TP SIMULATED] Symbol: {sym}, "
+                            f"Old TP: {self._last_synced_tp_price:.2f}, New TP: {new_tp_price:.2f}, "
+                            f"Diff: {price_diff:.4%}, Position: {pos.amount}, "
+                            f"(testnet simulation - no API call)"
+                        )
+                        self._last_synced_tp_price = new_tp_price
+                        return True
+            return False  # Threshold not met — no API call
+
         try:
             open_orders = self.client.futures_get_open_orders(symbol=sym, conditional=True)  # type: ignore[attr-defined]
         except Exception as e:
@@ -1496,7 +1578,7 @@ class BinanceBroker(BaseBroker):
         tp_order = None
         if not open_orders or tp_order is None:
             try:
-                tp_side = SIDE_SELL if not is_long else SIDE_BUY
+                tp_side = SIDE_SELL if is_long else SIDE_BUY
                 rounded_tp = round(new_tp_price, 1) if new_tp_price >= 1000 else round(new_tp_price, 2)
 
                 created = False
