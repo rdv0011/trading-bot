@@ -40,6 +40,12 @@ EMA_SPANS = [5, 10, 20, 50, 100]          # EMAs for trend detection
 ATR_PERIOD = 14                                          # Average True Range
 
 # ── Model Parameters ───────────────────────────────────────────────────
+# Minimum trees a CatBoost model must have to be considered non-degenerate.
+# Early stopping can stop at iteration 0 (1 tree) when the validation metric
+# is noisy or the dataset is small.  Models below this threshold predict
+# ~constant values and never cross the signal threshold.
+MIN_TREES = 5
+
 # Tactical ML (15m, retrained every candle)
 TACTICAL_MODEL_PARAMS = {
     "iterations": 500,      # Fast for walk-forward

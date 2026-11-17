@@ -250,6 +250,7 @@ class DualMLStrategy:
         """Retrain the tactical model on the recent window (mirrors walk-forward)."""
         from catboost import CatBoostRegressor
         from model import TARGET_COLUMN
+        from config import MIN_TREES
         df_feat = make_features_df(df_raw, timeframe=TACTICAL_TF)
         df_lbl = make_labels_df(df_feat, timeframe=TACTICAL_TF).dropna()
         if len(df_lbl) < 100 or not self.feature_cols:
@@ -261,8 +262,22 @@ class DualMLStrategy:
             df_lbl[TARGET_COLUMN].fillna(0),
             verbose=False,
         )
+        n_trees = getattr(base, "tree_count_", 0)
+        if n_trees < MIN_TREES:
+            log_warning(
+                f"Tactical retrain produced only {n_trees} tree(s) "
+                f"(< {MIN_TREES}); retraining without early stopping..."
+            )
+            base2 = CatBoostRegressor(**self.tactical_model.params)
+            base2.fit(
+                df_lbl[feats].fillna(0),
+                df_lbl[TARGET_COLUMN].fillna(0),
+                verbose=False,
+            )
+            n_trees = getattr(base2, "tree_count_", 0)
+            base = base2
         self.tactical_model.model = base
-        log_debug(f"Tactical model retrained on {len(df_lbl)} recent candles")
+        log_debug(f"Tactical model retrained on {len(df_lbl)} recent candles ({n_trees} trees)")
 
     def _tactical_model_is_degenerate(self) -> bool:
         """True when the loaded tactical model is a degenerate artifact.
@@ -278,7 +293,7 @@ class DualMLStrategy:
         n_trees = getattr(model, "tree_count_", None)
         if n_trees is None:
             return False  # attribute unavailable -> assume healthy
-        return n_trees < 2
+        return n_trees < MIN_TREES
 
     # ── Live Trading Mode ──────────────────────────────────────────────
     def sync_exchange_position(self, symbol: Optional[str] = None) -> bool:

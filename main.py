@@ -21,6 +21,7 @@ from config import (
     HISTORY_DAYS, TRAIN_FRACTION,
     FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
     TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
+    MIN_TREES,
     INITIAL_EQUITY, FEE, SLIPPAGE,
     WALKFORWARD_RETRAIN_EVERY_CANDLES, ABSOLUTE_THRESHOLD,
     LIQUIDITY_RECORDER_ENABLED,
@@ -126,7 +127,7 @@ def simulate_mode(args):
     # Pre-flight validation: reject underfit models
     tree_count = getattr(tactical_model.model, "tree_count_", None)
     if tree_count is not None and tree_count < 10:
-        log_error(f"Model underfit: only {tree_count} trees. Minimum 10 required. Retrain required.")
+        log_error(f"Model underfit: only {tree_count} trees. Minimum {MIN_TREES} required. Retrain required.")
         sys.exit(1)
     elif tree_count is not None:
         log_info(f"Tactical model tree count: {tree_count}")
@@ -247,7 +248,7 @@ def live_mode(args):
     # Pre-flight validation: reject underfit models
     tree_count = getattr(tactical_model.model, "tree_count_", None)
     if tree_count is not None and tree_count < 10:
-        log_error(f"Model underfit: only {tree_count} trees. Minimum 10 required. Retrain required.")
+        log_error(f"Model underfit: only {tree_count} trees. Minimum {MIN_TREES} required. Retrain required.")
         sys.exit(1)
     elif tree_count is not None:
         log_info(f"Tactical model tree count: {tree_count}")

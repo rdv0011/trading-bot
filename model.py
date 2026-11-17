@@ -18,6 +18,7 @@ from catboost import CatBoostRegressor, Pool
 from config import (
     MODEL_DIR, TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
     WALKFORWARD_RETRAIN_EVERY_CANDLES, TACTICAL_TF, STRATEGIC_TARGET_COLS,
+    MIN_TREES,
 )
 
 # ── Constants ───────────────────────────────────────────────────────────
@@ -111,12 +112,24 @@ class CatBoostModel:
 
         If target_cols is given, trains a multi-output regressor on those
         target columns (used by the strategic model for trade parameters).
+
+        Validation: requires at least ``MIN_TREES * 10`` rows of data.
+        If early stopping produces fewer than ``MIN_TREES`` trees, retrains
+        without early stopping as a fallback.
         """
         print(f"\n{'='*60}")
         print(f"TRAINING {self.model_type.upper()} MODEL")
         print(f"{'='*60}")
         print(f"  Rows: {len(df)}, Features: {len(feature_cols)}")
         print(f"  Params: {self.params}")
+
+        # Data quality gate: need enough rows for a meaningful split + training
+        min_rows = MIN_TREES * 10
+        if len(df) < min_rows:
+            raise ValueError(
+                f"TRAINING DATA TOO SMALL: {len(df)} rows < {min_rows} "
+                f"(MIN_TREES={MIN_TREES} × 10). Download more historical data."
+            )
 
         # Prepare data
         X = df[feature_cols].fillna(0)
@@ -137,6 +150,26 @@ class CatBoostModel:
         base = CatBoostRegressor(**self.params)
 
         print(f"\n  Training with {n_train} train, {n - n_train} val samples...")
+
+        def _fit_with_fallback(X_tr, y_tr, X_v, y_v, verbose=100):
+            """Fit with early stopping; retrain without it if too few trees."""
+            cb = CatBoostRegressor(**self.params)
+            cb.fit(
+                X_tr, y_tr,
+                eval_set=(X_v, y_v),
+                early_stopping_rounds=500,
+                verbose=verbose,
+            )
+            n_trees = getattr(cb, "tree_count_", 0)
+            if n_trees < MIN_TREES:
+                print(f"\n  WARNING: Early stopping produced only {n_trees} "
+                      f"tree(s) (< {MIN_TREES}). Retraining without early "
+                      f"stopping...")
+                cb2 = CatBoostRegressor(**self.params)
+                cb2.fit(X_tr, y_tr, verbose=verbose)
+                return cb2
+            return cb
+
         if multi:
             # Train each target independently with early stopping
             base_models = []
@@ -145,13 +178,7 @@ class CatBoostModel:
                 y_target = y[target_col].fillna(0)
                 y_t_train = y_target.iloc[:n_train]
                 y_t_val = y_target.iloc[n_train:]
-                cb = CatBoostRegressor(**self.params)
-                cb.fit(
-                    X_train, y_t_train,
-                    eval_set=[(X_val, y_t_val)],
-                    early_stopping_rounds=500,
-                    verbose=0,
-                )
+                cb = _fit_with_fallback(X_train, y_t_train, X_val, y_t_val, verbose=0)
                 base_models.append(cb)
                 # Extract best validation RMSE for this target
                 bs = getattr(cb, 'best_score_', None)
@@ -167,13 +194,7 @@ class CatBoostModel:
             self.model = MultiOutputCatBoost(base_models, target_cols)
             best_score_val = float(np.mean(best_scores)) if best_scores else None
         else:
-            self.model = base
-            self.model.fit(
-                X_train, y_train,
-                eval_set=(X_val, y_val),
-                early_stopping_rounds=500,
-                verbose=100,
-            )
+            self.model = _fit_with_fallback(X_train, y_train, X_val, y_val, verbose=100)
             best_score_val = None
             if hasattr(self.model, 'best_score_'):
                 bs = self.model.best_score_
@@ -198,6 +219,14 @@ class CatBoostModel:
         }
         if multi:
             self.metadata["target_cols"] = target_cols
+
+        # Final tree count validation
+        n_trees = getattr(self.model, "tree_count_", 0)
+        if not multi:
+            print(f"  Tree count: {n_trees}")
+        elif hasattr(self.model, "models"):
+            counts = [getattr(m, "tree_count_", 0) for m in self.model.models]
+            print(f"  Tree counts (per target): {counts}")
 
         # Save if requested
         if save:
@@ -575,7 +604,7 @@ def fit_tactical_regressor(
 
     Used by walk-forward retraining (live + backtest). Intersects
     `feature_cols` with the columns actually present in df, fills NaN with 0,
-    and fits verbose=False.
+    and fits verbose=False.  No early stopping — runs all iterations.
 
     Raises:
         ValueError: If df is empty or no usable feature columns remain.
