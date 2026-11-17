@@ -30,6 +30,7 @@ from config import (
     SCALING_ENABLED, MAX_SCALE_COUNT, SCALE_CONFIRM_BARS, SCALE_STAKE_FRAC,
     PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION, REVERSAL_FULL_CLOSE_STREAK,
     TRADE_COOLDOWN_ENABLED, TRADE_COOLDOWN_MINUTES,
+    MIN_TREES,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
@@ -250,7 +251,6 @@ class DualMLStrategy:
         """Retrain the tactical model on the recent window (mirrors walk-forward)."""
         from catboost import CatBoostRegressor
         from model import TARGET_COLUMN
-        from config import MIN_TREES
         df_feat = make_features_df(df_raw, timeframe=TACTICAL_TF)
         df_lbl = make_labels_df(df_feat, timeframe=TACTICAL_TF).dropna()
         if len(df_lbl) < 100 or not self.feature_cols:
