@@ -108,6 +108,7 @@ class OrderBookRecorder(threading.Thread):
         self._vanish_cur: Optional[Set[float]] = None
         self._vanish_prev: Optional[Set[float]] = None
         self._vanish_mark_ts: float = 0.0
+        self._snapshot_counter: int = 0
         self._reconnects: int = 0
         self._connected: bool = False
 
@@ -274,6 +275,21 @@ class OrderBookRecorder(threading.Thread):
             trade_count_ps = len(tape) / span_sec
         else:
             trade_intensity, trade_count_ps = 0.0, 0.0
+
+        # Periodic debug logging for liquidity metrics (every 100 snapshots ~ 10 min at 60s cadence)
+        self._snapshot_counter += 1
+        if self._snapshot_counter % 100 == 0:
+            log_info(
+                f"[LIQUIDITY SNAPSHOT] Symbol: {self.symbol}, "
+                f"Trade Intensity: {trade_intensity:.0f} USD/s, "
+                f"Trade Count: {trade_count_ps:.1f}/s, "
+                f"Depth: {depth_bid + depth_ask:.0f} USD, "
+                f"Spread: {spread_bps:.2f} bps, "
+                f"Vanish: {vanished:.1f}%, "
+                f"Tape Trades: {len(tape)}, "
+                f"Span: {span_sec:.1f}s"
+            )
+
         return {
             "ts": now,
             "fresh": bool(last_msg) and (now - last_msg) <= self.stale_after_s,

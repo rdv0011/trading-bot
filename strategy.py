@@ -898,26 +898,44 @@ class DualMLStrategy:
         if snap is None or not snap["fresh"]:
             return None
         intensity = snap.get("trade_intensity_usd_s", float('inf'))
-        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 50000.0, self.config))
+        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 25000.0, self.config))
+        spread_bps = snap.get("spread_bps", 0)
+        depth = snap.get("depth_total_usd", 0)
+        vanish = snap.get("vanish_pct", 0)
+        tape_trades = snap.get("trade_count_ps", 0) * snap.get("window_sec", 60) if "window_sec" in snap else 0
+        
+        # Always log liquidity state when in position (for debugging)
+        if self.position != 0 and hasattr(self, '_liq_log_counter'):
+            self._liq_log_counter += 1
+        else:
+            self._liq_log_counter = 1
+        
+        if self.position != 0 and self._liq_log_counter % 10 == 0:  # every 10 iterations (~10 min)
+            log_info(
+                f"[LIQ STATE] pos={self.position} intensity={intensity:.0f}/{min_intensity:.0f} "
+                f"spread={spread_bps:.1f}/{100.0} depth={depth:.0f}/{500000.0} "
+                f"vanish={vanish:.1f}% tape={tape_trades:.0f}"
+            )
+        
         if intensity < min_intensity:
             log_warning(
                 f"LIQ_EXIT triggered: trade_intensity={intensity:.0f} "
                 f"< threshold={min_intensity:.0f} USD/s "
-                f"(spread={snap.get('spread_bps', 0):.1f}bps, "
-                f"depth={snap.get('depth_total_usd', 0):.0f}USD)"
+                f"(spread={spread_bps:.1f}bps, "
+                f"depth={depth:.0f}USD, "
+                f"vanish={vanish:.1f}%, "
+                f"tape_trades={tape_trades:.0f}/min)"
             )
             return "liq_exit"
-        spread_bps = snap["spread_bps"]
         max_spread = float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 100.0, self.config))
         if spread_bps > max_spread:
             log_warning(
                 f"LIQ_EXIT triggered: spread={spread_bps:.1f}bps "
                 f"> threshold={max_spread:.1f}bps "
                 f"(intensity={intensity:.0f}USD/s, "
-                f"depth={snap.get('depth_total_usd', 0):.0f}USD)"
+                f"depth={depth:.0f}USD)"
             )
             return "liq_exit"
-        depth = snap["depth_total_usd"]
         min_depth = float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 500000.0, self.config))
         if depth < min_depth:
             log_warning(
@@ -1388,30 +1406,76 @@ class DualMLStrategy:
         self.scale_count += 1
         self.same_dir_streak = 0
 
+        # Preserve trailing progress before bracket replacement
+        # Calculate current trailing SL/TP to compare with new initial bracket
+        atr14 = self._last_atr14
+        sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+        tp_frac = self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)
+        atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.2, self.config))
+        
+        preserved_sl = None
+        preserved_tp = None
+        if atr14 and atr14 > 0 and self.trail_extreme > 0:
+            if self.position > 0:  # Long
+                trail_sl = self.trail_extreme - atr_mult * atr14
+                initial_risk = self.entry_price * sl_frac
+                current_gain = self.trail_extreme - self.entry_price
+                if current_gain >= 2 * initial_risk:
+                    tp_trail = self.entry_price + current_gain * 0.5
+                    trail_tp = max(self.entry_price * (1 + tp_frac), tp_trail)
+                else:
+                    trail_tp = self.entry_price * (1 + tp_frac)
+            else:  # Short
+                trail_sl = self.trail_extreme + atr_mult * atr14
+                initial_risk = self.entry_price * sl_frac
+                current_gain = self.entry_price - self.trail_extreme
+                if current_gain >= 2 * initial_risk:
+                    tp_trail = self.entry_price - current_gain * 0.5
+                    trail_tp = min(self.entry_price * (1 - tp_frac), tp_trail)
+                else:
+                    trail_tp = self.entry_price * (1 - tp_frac)
+            preserved_sl = trail_sl
+            preserved_tp = trail_tp
+
         # Re-place TP/SL bracket on the enlarged position
         try:
             self.broker.replace_bracket_order(
                 self.broker.symbol,
                 self._initial_qty,
                 broker_side,
-                tp_frac=self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT),
-                sl_frac=self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT),
+                tp_frac=tp_frac,
+                sl_frac=sl_frac,
             )
             # Sync trailing state after bracket replacement
+            # Use the better of (new initial bracket, preserved trailing) to avoid losing progress
             pos = self.broker.get_position()
             if pos and pos.entry_price:
                 entry_price = pos.entry_price
                 if self.position > 0:
-                    self._last_synced_tp_price = round(entry_price * (1 + self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)), 2)
-                    self._last_synced_sl_price = round(entry_price * (1 - self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)), 2)
+                    initial_tp = round(entry_price * (1 + tp_frac), 2)
+                    initial_sl = round(entry_price * (1 - sl_frac), 2)
+                    # Use better (higher) SL and (higher) TP
+                    self._last_synced_tp_price = max(initial_tp, round(preserved_tp, 2)) if preserved_tp else initial_tp
+                    self._last_synced_sl_price = max(initial_sl, round(preserved_sl, 2)) if preserved_sl else initial_sl
                 else:
-                    self._last_synced_tp_price = round(entry_price * (1 - self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)), 2)
-                    self._last_synced_sl_price = round(entry_price * (1 + self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)), 2)
+                    initial_tp = round(entry_price * (1 - tp_frac), 2)
+                    initial_sl = round(entry_price * (1 + sl_frac), 2)
+                    # Use better (lower) SL and (lower) TP
+                    self._last_synced_tp_price = min(initial_tp, round(preserved_tp, 2)) if preserved_tp else initial_tp
+                    self._last_synced_sl_price = min(initial_sl, round(preserved_sl, 2)) if preserved_sl else initial_sl
                 # Also sync to broker
                 if hasattr(self.broker, "_last_synced_sl_price"):
                     self.broker._last_synced_sl_price = self._last_synced_sl_price
                 if hasattr(self.broker, "_last_synced_tp_price"):
                     self.broker._last_synced_tp_price = self._last_synced_tp_price
+                log_info(
+                    f"[SCALE-IN BRACKET] Symbol: {self.broker.symbol}, "
+                    f"Entry: {entry_price:.2f}, Initial SL: {initial_sl:.2f}, "
+                    f"Trailing SL: {preserved_sl:.2f if preserved_sl else 'N/A'}, "
+                    f"Synced SL: {self._last_synced_sl_price:.2f}, "
+                    f"Initial TP: {initial_tp:.2f}, Trailing TP: {preserved_tp:.2f if preserved_tp else 'N/A'}, "
+                    f"Synced TP: {self._last_synced_tp_price:.2f}"
+                )
         except Exception as e:
             log_warning(f"replace_bracket_order after scale-in failed: {e}")
 
