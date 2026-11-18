@@ -250,6 +250,80 @@ def adaptive_threshold(
     return round(thr, 6)
 
 
+def adaptive_liquidity_threshold(
+    intensities: pd.Series,
+    lookback: int = 200,
+    quantile: float = 0.25,          # use lower percentile (e.g., 25th) as floor
+    min_threshold: float = 10000.0,  # absolute floor
+    max_threshold: float = 100000.0, # absolute ceiling
+    fallback: float = 25000.0,
+) -> float:
+    """
+    Compute an adaptive LIQ_EXIT trade intensity threshold from recent values.
+
+    Uses the `quantile`-th percentile (default 25th) of recent trade_intensity
+    values as the minimum acceptable intensity. This ensures the threshold
+    adapts to market conditions (low volume periods get lower threshold).
+
+    Clamped into [min_threshold, max_threshold]. Falls back to `fallback`
+    when fewer than 20 valid samples are available.
+
+    Returns:
+        float: threshold value in USD/s.
+    """
+    if intensities is None or len(intensities) == 0:
+        return round(float(fallback), 1)
+
+    recent = pd.Series(intensities).tail(lookback).dropna()
+    if len(recent) < 20:
+        return round(float(fallback), 1)
+
+    # Use lower percentile as floor - we want to exit when intensity drops
+    # BELOW what's typical for this market regime
+    thr = float(np.percentile(recent.values, quantile * 100.0))
+    thr = float(np.clip(thr, min_threshold, max_threshold))
+    return round(thr, 1)
+
+
+def adaptive_trailing_threshold(
+    atr_values: pd.Series,
+    lookback: int = 50,
+    quantile: float = 0.5,          # median ATR as baseline
+    mult: float = 0.1,              # fraction of ATR for update threshold
+    min_threshold: float = 0.001,   # 0.1% floor
+    max_threshold: float = 0.01,    # 1% ceiling
+    fallback: float = 0.002,
+) -> float:
+    """
+    Compute an adaptive TRAILING_SL_UPDATE_THRESHOLD from recent ATR values.
+
+    Uses `mult` * `quantile`-th percentile of recent ATR (as fraction of price)
+    as the minimum price move to trigger an SL/TP update. This makes the
+    update threshold scale with volatility.
+
+    Clamped into [min_threshold, max_threshold]. Falls back to `fallback`
+    when fewer than 10 valid samples are available.
+
+    Returns:
+        float: threshold as fraction of price (e.g., 0.002 = 0.2%).
+    """
+    if atr_values is None or len(atr_values) == 0:
+        return round(float(fallback), 6)
+
+    recent = pd.Series(atr_values).tail(lookback).dropna()
+    if len(recent) < 10:
+        return round(float(fallback), 6)
+
+    # ATR as fraction of price (need price context - use median ATR * mult)
+    # For threshold we use ATR * mult directly as price fraction
+    median_atr = float(np.percentile(recent.values, quantile * 100.0))
+    # We need a price reference - the strategy will provide current price
+    # This function returns ATR-based threshold; caller divides by price
+    thr = median_atr * mult
+    thr = float(np.clip(thr, min_threshold, max_threshold))
+    return round(thr, 6)
+
+
 def classify_vol_state(vol_ratio: float, extreme_ratio: float = 1.8) -> str:
     """
     Classify the short/long volatility ratio into a vol state.

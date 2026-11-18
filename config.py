@@ -145,11 +145,26 @@ ADAPTIVE_QUANTILE = 0.95              # threshold = this percentile of |preds|
 ADAPTIVE_MIN_THRESHOLD = 0.002        # floor so threshold never goes too low
 ADAPTIVE_MAX_THRESHOLD = 0.02         # ceiling so threshold never goes too high
 
+# ── Adaptive Liquidity Threshold (Phase 2b) ──────────────────────────────
+ADAPTIVE_LIQ_ENABLED = _get_bool("ADAPTIVE_LIQ_ENABLED", True)
+ADAPTIVE_LIQ_LOOKBACK = 200           # rolling window of recent trade_intensity
+ADAPTIVE_LIQ_QUANTILE = 0.25          # use 25th percentile as floor (exit when below typical)
+ADAPTIVE_LIQ_MIN_USD = 10000.0        # absolute floor USD/s
+ADAPTIVE_LIQ_MAX_USD = 100000.0       # absolute ceiling USD/s
+
+# ── Adaptive Trailing SL Update Threshold (Phase 2b) ─────────────────────
+ADAPTIVE_TRAIL_UPDATE_ENABLED = _get_bool("ADAPTIVE_TRAIL_UPDATE_ENABLED", True)
+ADAPTIVE_TRAIL_UPDATE_LOOKBACK = 50   # rolling window of recent ATR values
+ADAPTIVE_TRAIL_UPDATE_QUANTILE = 0.5  # median ATR
+ADAPTIVE_TRAIL_UPDATE_MULT = 0.1      # fraction of ATR for update threshold (10% of ATR)
+ADAPTIVE_TRAIL_UPDATE_MIN = 0.001     # 0.1% floor
+ADAPTIVE_TRAIL_UPDATE_MAX = 0.01      # 1% ceiling
+
 # ── Trailing Stop (Phase 2) ────────────────────────────────────────────
 TRAILING_STOP_ENABLED = _get_bool("TRAILING_STOP_ENABLED", True)
 TRAILING_ATR_MULT = 1.5               # trail distance = mult * ATR14
 TRAILING_BREAKEVEN_MULT = 1.0         # move SL to breakeven after 1x initial risk
-TRAILING_SL_UPDATE_THRESHOLD = 0.002  # 0.2% min move to trigger exchange SL/TP update (hybrid) — more responsive
+TRAILING_SL_UPDATE_THRESHOLD = 0.002  # 0.2% min move to trigger exchange SL/TP update (hybrid) — fallback when adaptive disabled
 
 # ── Regime Gate Hardening (Phase 2) ────────────────────────────────────
 GATE_EXTREME_VOL = _get_bool("GATE_EXTREME_VOL", True)               # block entries when vol_state = extreme
@@ -169,11 +184,11 @@ LIQ_MIN_DEPTH_USD = 50000.0           # entry blocked when side depth below
 LIQ_MAX_VANISH_PCT = 60.0             # entry blocked when >60% of levels vanish
 LIQ_MIN_AGGRESSOR_RATIO = 0.35        # taker-buy share below this = sell-dominated
 LIQ_MAX_AGGRESSOR_RATIO = 0.65        # taker-buy share above this = buy-dominated
-LIQ_MIN_TRADE_INTENSITY_USD = 25000.0 # min notional traded per second (entry gate)
+LIQ_MIN_TRADE_INTENSITY_USD = 25000.0 # min notional traded per second (entry gate, fallback)
 GATE_LIQUIDITY_EXIT = _get_bool("GATE_LIQUIDITY_EXIT", True)  # liq_exit on thinning book
 LIQ_EXIT_SPREAD_BPS = 100.0            # exit when spread widens beyond this
 LIQ_EXIT_MIN_DEPTH_USD = 500000.0      # exit when total depth collapses below this
-LIQ_EXIT_MIN_TRADE_INTENSITY_USD = 25000.0      # exit when trade intensity collapses (lowered from 50k)
+LIQ_EXIT_MIN_TRADE_INTENSITY_USD = 25000.0      # exit when trade intensity collapses (fallback when adaptive disabled)
 LIQUIDITY_FAIL_OPEN_ON_STALE = _get_bool("LIQUIDITY_FAIL_OPEN_ON_STALE", True)
 
 # ── Cost-to-Edge Optimizations ─────────────────────────────────────────

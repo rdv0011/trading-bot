@@ -25,6 +25,11 @@ from config import (
     FEATURE_CACHE_TTL,
     ADAPTIVE_THRESHOLD_ENABLED, ADAPTIVE_LOOKBACK, ADAPTIVE_QUANTILE,
     ADAPTIVE_MIN_THRESHOLD, ADAPTIVE_MAX_THRESHOLD,
+    ADAPTIVE_LIQ_ENABLED, ADAPTIVE_LIQ_LOOKBACK, ADAPTIVE_LIQ_QUANTILE,
+    ADAPTIVE_LIQ_MIN_USD, ADAPTIVE_LIQ_MAX_USD,
+    ADAPTIVE_TRAIL_UPDATE_ENABLED, ADAPTIVE_TRAIL_UPDATE_LOOKBACK,
+    ADAPTIVE_TRAIL_UPDATE_QUANTILE, ADAPTIVE_TRAIL_UPDATE_MULT,
+    ADAPTIVE_TRAIL_UPDATE_MIN, ADAPTIVE_TRAIL_UPDATE_MAX,
     TRAILING_STOP_ENABLED, TRAILING_ATR_MULT, TRAILING_BREAKEVEN_MULT,
     GATE_EXTREME_VOL, EXTREME_VOL_RATIO,
     SCALING_ENABLED, MAX_SCALE_COUNT, SCALE_CONFIRM_BARS, SCALE_STAKE_FRAC,
@@ -34,7 +39,9 @@ from config import (
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
-from data import make_features_df, add_strategic_features_df, make_labels_df, adaptive_threshold, classify_vol_state, classify_abs_vol_state
+from data import (make_features_df, add_strategic_features_df, make_labels_df,
+                  adaptive_threshold, adaptive_liquidity_threshold, adaptive_trailing_threshold,
+                  classify_vol_state, classify_abs_vol_state)
 
 
 # ── Flag Reader (runtime overrides → injected cfg → module config) ─────
@@ -169,6 +176,12 @@ class DualMLStrategy:
         # Phase 2 adaptive threshold state
         self.pred_history: List[float] = []
         self._last_tactical_pred: float = 0.0
+
+        # Adaptive liquidity threshold state
+        self.trade_intensity_history: List[float] = []
+
+        # Adaptive trailing SL update threshold state
+        self.atr_history: List[float] = []
 
         # Phase 2/3 state (mirrors MockBroker in simulate.py)
         self.trail_extreme = 0.0
@@ -882,7 +895,26 @@ class DualMLStrategy:
             return "aggressor"
         if side == "short" and buy_ratio > float(_cfg_flag("LIQ_MAX_AGGRESSOR_RATIO", 0.65, self.config)):
             return "aggressor"
-        if snap["trade_intensity_usd_s"] < float(_cfg_flag("LIQ_MIN_TRADE_INTENSITY_USD", 50000.0, self.config)):
+        
+        # Adaptive or static trade intensity threshold
+        intensity = snap["trade_intensity_usd_s"]
+        if _cfg_flag("ADAPTIVE_LIQ_ENABLED", True, self.config):
+            # Add to history
+            self.trade_intensity_history.append(intensity)
+            lookback = int(_cfg_flag("ADAPTIVE_LIQ_LOOKBACK", 200, self.config))
+            if len(self.trade_intensity_history) > lookback:
+                self.trade_intensity_history = self.trade_intensity_history[-lookback:]
+            min_intensity = adaptive_liquidity_threshold(
+                pd.Series(self.trade_intensity_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_LIQ_QUANTILE", 0.25, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MIN_USD", 10000.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MAX_USD", 100000.0, self.config)),
+            )
+        else:
+            min_intensity = float(_cfg_flag("LIQ_MIN_TRADE_INTENSITY_USD", 25000.0, self.config))
+        
+        if intensity < min_intensity:
             return "intensity"
         return None
 
@@ -898,11 +930,27 @@ class DualMLStrategy:
         if snap is None or not snap["fresh"]:
             return None
         intensity = snap.get("trade_intensity_usd_s", float('inf'))
-        min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 25000.0, self.config))
         spread_bps = snap.get("spread_bps", 0)
         depth = snap.get("depth_total_usd", 0)
         vanish = snap.get("vanish_pct", 0)
         tape_trades = snap.get("trade_count_ps", 0) * snap.get("window_sec", 60) if "window_sec" in snap else 0
+        
+        # Adaptive or static trade intensity threshold for exit
+        if _cfg_flag("ADAPTIVE_LIQ_ENABLED", True, self.config):
+            # Add to history
+            self.trade_intensity_history.append(intensity)
+            lookback = int(_cfg_flag("ADAPTIVE_LIQ_LOOKBACK", 200, self.config))
+            if len(self.trade_intensity_history) > lookback:
+                self.trade_intensity_history = self.trade_intensity_history[-lookback:]
+            min_intensity = adaptive_liquidity_threshold(
+                pd.Series(self.trade_intensity_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_LIQ_QUANTILE", 0.25, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MIN_USD", 10000.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MAX_USD", 100000.0, self.config)),
+            )
+        else:
+            min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 25000.0, self.config))
         
         # Always log liquidity state when in position (for debugging)
         if self.position != 0 and hasattr(self, '_liq_log_counter'):
@@ -914,7 +962,8 @@ class DualMLStrategy:
             log_info(
                 f"[LIQ STATE] pos={self.position} intensity={intensity:.0f}/{min_intensity:.0f} "
                 f"spread={spread_bps:.1f}/{100.0} depth={depth:.0f}/{500000.0} "
-                f"vanish={vanish:.1f}% tape={tape_trades:.0f}"
+                f"vanish={vanish:.1f}% tape={tape_trades:.0f} "
+                f"adaptive={'on' if _cfg_flag('ADAPTIVE_LIQ_ENABLED', True, self.config) else 'off'}"
             )
         
         if intensity < min_intensity:
@@ -1080,7 +1129,28 @@ class DualMLStrategy:
         tp_frac = self.current_meta.get("take_profit_frac", TAKE_PROFIT_FRAC_DEFAULT)
         atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.2, self.config))
         be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
-        threshold = float(_cfg_flag("TRAILING_SL_UPDATE_THRESHOLD", 0.005, self.config))
+        
+        # Adaptive or static trailing SL update threshold
+        if _cfg_flag("ADAPTIVE_TRAIL_UPDATE_ENABLED", True, self.config):
+            # Add ATR to history
+            self.atr_history.append(atr14)
+            lookback = int(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_LOOKBACK", 50, self.config))
+            if len(self.atr_history) > lookback:
+                self.atr_history = self.atr_history[-lookback:]
+            # adaptive_trailing_threshold returns threshold as price fraction
+            # We need to divide ATR by current_price to get price fraction
+            atr_pct = atr14 / current_price if current_price > 0 else 0
+            threshold = adaptive_trailing_threshold(
+                pd.Series(self.atr_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_QUANTILE", 0.5, self.config)),
+                mult=float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MULT", 0.1, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MIN", 0.001, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MAX", 0.01, self.config)),
+            )
+            log_debug(f"[ADAPTIVE TRAIL THRESHOLD] ATR={atr14:.2f} ({atr_pct:.4%}) -> threshold={threshold:.4%} (lookback={lookback})")
+        else:
+            threshold = float(_cfg_flag("TRAILING_SL_UPDATE_THRESHOLD", 0.002, self.config))
 
         if self.trail_extreme <= 0:
             self.trail_extreme = self.entry_price
