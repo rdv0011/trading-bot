@@ -348,6 +348,80 @@ def classify_abs_vol_state(abs_vol_ratio: float, critical_ratio: float = 0.10) -
     return "abs_vol_dropped" if abs_vol_ratio < critical_ratio else "normal"
 
 
+def compute_atr_from_klines(
+    df: pd.DataFrame,
+    period: int = 14,
+    price_col: str = "close",
+    high_col: str = "high",
+    low_col: str = "low",
+) -> pd.Series:
+    """Compute ATR14 from OHLCV klines DataFrame.
+    
+    Uses True Range = max(high-low, abs(high-prev_close), abs(low-prev_close))
+    Then ATR = rolling mean of TR over `period`.
+    
+    Args:
+        df: DataFrame with OHLCV columns
+        period: ATR period (default 14)
+        price_col: Close price column name
+        high_col: High price column name
+        low_col: Low price column name
+    
+    Returns:
+        Series of ATR values (aligned with df index, first `period` values are NaN)
+    """
+    if df is None or len(df) < period + 1:
+        return pd.Series(dtype=float)
+    
+    high = df[high_col]
+    low = df[low_col]
+    close = df[price_col]
+    prev_close = close.shift(1)
+    
+    tr = pd.concat([
+        high - low,
+        (high - prev_close).abs(),
+        (low - prev_close).abs(),
+    ], axis=1).max(axis=1)
+    
+    atr = tr.rolling(period, min_periods=period).mean()
+    return atr
+
+
+def compute_vol_ratio_from_klines(
+    df: pd.DataFrame,
+    short_window: int = 12,
+    long_window: int = 48,
+    price_col: str = "close",
+) -> float:
+    """Compute volatility ratio (short_window / long_window) from klines.
+    
+    Uses rolling standard deviation of log returns.
+    
+    Args:
+        df: DataFrame with close prices
+        short_window: Short volatility window (default 12)
+        long_window: Long volatility window (default 48)
+        price_col: Close price column name
+    
+    Returns:
+        vol_ratio = vol_short / vol_long, or 1.0 if insufficient data
+    """
+    if df is None or len(df) < long_window + 1:
+        return 1.0
+    
+    close = df[price_col]
+    log_ret = np.log(close / close.shift(1))
+    
+    vol_short = log_ret.rolling(short_window).std().iloc[-1]
+    vol_long = log_ret.rolling(long_window).std().iloc[-1]
+    
+    if not np.isfinite(vol_long) or vol_long == 0:
+        return 1.0
+    
+    return float(vol_short / vol_long)
+
+
 # ── Strategic Feature & Label Engineering (1h) ─────────────────────────
 def add_strategic_features_df(
     df: pd.DataFrame,

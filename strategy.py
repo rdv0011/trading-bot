@@ -41,6 +41,7 @@ from logger import log_info, log_debug, log_warning, log_error, log_trade_entry,
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
 from data import (make_features_df, add_strategic_features_df, make_labels_df,
                   adaptive_threshold, adaptive_liquidity_threshold, adaptive_trailing_threshold,
+                  compute_atr_from_klines, compute_vol_ratio_from_klines,
                   classify_vol_state, classify_abs_vol_state)
 
 
@@ -241,6 +242,59 @@ class DualMLStrategy:
         log_info(
             f"[LIQUIDITY INIT] Seeded trade_intensity_history with {num_samples} samples "
             f"around {clamped:.0f} USD/s (raw={initial_intensity:.0f}, bounds=[{min_usd:.0f}, {max_usd:.0f}])"
+        )
+
+    def seed_atr_history(self, df_klines: pd.DataFrame, num_samples: int = 50) -> None:
+        """Seed the atr_history with ATR values computed from historical klines.
+        
+        This gives the adaptive trailing update threshold a realistic starting point
+        instead of using the hardcoded fallback during warmup.
+        
+        Args:
+            df_klines: DataFrame with OHLCV columns (high, low, close)
+            num_samples: Number of history samples to pre-populate (default 50)
+        """
+        if df_klines is None or len(df_klines) < 20:
+            log_warning("Insufficient klines data for ATR history seeding")
+            return
+        
+        # Compute ATR from klines
+        atr_series = compute_atr_from_klines(df_klines, period=14)
+        if atr_series is None or len(atr_series) == 0 or atr_series.dropna().empty:
+            log_warning("ATR computation failed, skipping history seeding")
+            return
+        
+        # Get recent valid ATR values
+        valid_atr = atr_series.dropna().tail(min(num_samples, len(atr_series.dropna())))
+        if len(valid_atr) < 5:
+            log_warning(f"Only {len(valid_atr)} valid ATR values, need at least 5")
+            return
+        
+        # Clamp to configured bounds (ATR as absolute price, not percentage)
+        min_thr = float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MIN", 0.001, self.config))
+        max_thr = float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MAX", 0.01, self.config))
+        mult = float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MULT", 0.1, self.config))
+        
+        # The adaptive_trailing_threshold function expects ATR values and computes
+        # threshold = median_atr * mult. We need to provide raw ATR values.
+        # Clamp ATR values to reasonable range for the asset
+        current_price = df_klines["close"].iloc[-1]
+        max_atr = current_price * max_thr / mult
+        min_atr = current_price * min_thr / mult
+        
+        clamped_atr = valid_atr.clip(lower=min_atr, upper=max_atr)
+        
+        # Add slight variation to avoid percentile edge cases
+        import random
+        self.atr_history = [
+            float(val * (1 + random.uniform(-0.02, 0.02))) 
+            for val in clamped_atr
+        ]
+        
+        log_info(
+            f"[ATR INIT] Seeded atr_history with {len(self.atr_history)} samples "
+            f"median={valid_atr.median():.2f} (raw median={atr_series.dropna().median():.2f}, "
+            f"bounds=[{min_atr:.2f}, {max_atr:.2f}])"
         )
 
     # ── Simulation Mode ────────────────────────────────────────────────
