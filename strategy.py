@@ -211,6 +211,38 @@ class DualMLStrategy:
         self.candles_since_retrain = 0
         self.model_refresh_every = getattr(config, 'MODEL_REFRESH_EVERY', 50) if config else 50
 
+    def seed_trade_intensity_history(self, initial_intensity: float, num_samples: int = 50) -> None:
+        """Seed the trade_intensity_history with an estimated initial value.
+        
+        This gives the adaptive liquidity threshold a sensible starting point
+        instead of using the hardcoded fallback during warmup.
+        
+        Args:
+            initial_intensity: Estimated trade intensity in USD/s from recent market data
+            num_samples: Number of history samples to pre-populate (default 50)
+        """
+        if initial_intensity is None or initial_intensity <= 0:
+            log_warning("Invalid initial trade intensity, skipping history seeding")
+            return
+        
+        # Clamp to configured bounds
+        min_usd = float(_cfg_flag("ADAPTIVE_LIQ_MIN_USD", 5000.0, self.config))
+        max_usd = float(_cfg_flag("ADAPTIVE_LIQ_MAX_USD", 50000.0, self.config))
+        clamped = max(min_usd, min(max_usd, initial_intensity))
+        
+        # Pre-populate history with the clamped value
+        # Use slightly varied values to avoid percentile calculation issues
+        import random
+        self.trade_intensity_history = [
+            clamped * (1 + random.uniform(-0.05, 0.05)) 
+            for _ in range(num_samples)
+        ]
+        
+        log_info(
+            f"[LIQUIDITY INIT] Seeded trade_intensity_history with {num_samples} samples "
+            f"around {clamped:.0f} USD/s (raw={initial_intensity:.0f}, bounds=[{min_usd:.0f}, {max_usd:.0f}])"
+        )
+
     # ── Simulation Mode ────────────────────────────────────────────────
     def run_simulation(
         self,

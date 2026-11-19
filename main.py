@@ -28,6 +28,7 @@ from config import (
 )
 
 from logger import setup_logging, log_info, log_error
+from orderbook import estimate_initial_trade_intensity
 from data import run_full_pipeline, load_featured_df
 from model import (
     CatBoostModel, rolling_tactical_predict,
@@ -311,6 +312,16 @@ def live_mode(args):
         model_dir=args.model_dir,
         liquidity_monitor=liquidity_monitor,
     )
+
+    # Estimate initial trade intensity from recent aggTrades and seed
+    # the adaptive liquidity threshold history. This gives the threshold
+    # a realistic starting value instead of using the hardcoded fallback.
+    if LIQUIDITY_RECORDER_ENABLED:
+        initial_intensity = estimate_initial_trade_intensity(limit=1000)
+        if initial_intensity is not None:
+            strategy.seed_trade_intensity_history(initial_intensity, num_samples=50)
+        else:
+            log_warning("Could not estimate initial trade intensity; adaptive threshold will use fallback")
 
     # Adopt any position left open by a previous process so exits manage it
     # instead of trading blindly beside it (refuse to start if disabled).

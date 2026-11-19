@@ -46,6 +46,7 @@ WS_URL_FALLBACK = (
 )
 REST_DEPTH_URL = "https://fapi.binance.com/fapi/v1/depth?symbol=BTCUSDT&limit=100"
 REST_TICKER_URL = "https://fapi.binance.com/fapi/v1/ticker/price?symbol=BTCUSDT"
+REST_AGGTRADES_URL = "https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit=1000"
 
 
 def _fetch_ticker_rest(timeout: float = 5.0) -> Optional[float]:
@@ -65,6 +66,64 @@ def _fetch_snapshot_rest(timeout: float = 5.0) -> Optional[Dict[str, Any]]:
             return json.loads(resp.read().decode())
     except Exception as exc:
         log_warning(f"OrderBook REST snapshot failed: {exc}")
+        return None
+
+
+def _fetch_recent_aggtrades(timeout: float = 10.0, limit: int = 1000) -> Optional[list]:
+    """Fetch recent aggregate trades from Binance REST API.
+    
+    Returns list of trades with 'p' (price), 'q' (quantity), 'T' (timestamp), 'm' (is_buyer_maker).
+    """
+    url = f"https://fapi.binance.com/fapi/v1/aggTrades?symbol=BTCUSDT&limit={limit}"
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            return json.loads(resp.read().decode())
+    except Exception as exc:
+        log_warning(f"AggTrades REST fetch failed: {exc}")
+        return None
+
+
+def estimate_initial_trade_intensity(limit: int = 1000) -> Optional[float]:
+    """Estimate initial trade_intensity_usd_s from recent aggTrades.
+    
+    Fetches recent aggregate trades, computes notional per second over the
+    time span of the fetched trades. Returns USD/s or None on failure.
+    
+    This provides a sensible starting value for the adaptive liquidity threshold
+    instead of using the hardcoded fallback.
+    """
+    trades = _fetch_recent_aggtrades(limit=limit)
+    if not trades:
+        return None
+    
+    try:
+        # Calculate total notional and time span
+        total_notional = 0.0
+        first_ts = None
+        last_ts = None
+        
+        for t in trades:
+            price = float(t['p'])
+            qty = float(t['q'])
+            ts = int(t['T'])  # timestamp in milliseconds
+            total_notional += price * qty
+            if first_ts is None or ts < first_ts:
+                first_ts = ts
+            if last_ts is None or ts > last_ts:
+                last_ts = ts
+        
+        if first_ts is None or last_ts is None or last_ts <= first_ts:
+            return None
+        
+        span_sec = (last_ts - first_ts) / 1000.0
+        if span_sec <= 0:
+            return None
+        
+        trade_intensity = total_notional / span_sec
+        return trade_intensity
+        
+    except Exception as exc:
+        log_warning(f"Failed to estimate initial trade intensity: {exc}")
         return None
 
 
