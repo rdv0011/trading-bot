@@ -287,6 +287,7 @@ def adaptive_liquidity_threshold(
 
 def adaptive_trailing_threshold(
     atr_values: pd.Series,
+    price: float,
     lookback: int = 50,
     quantile: float = 0.5,          # median ATR as baseline
     mult: float = 0.1,              # fraction of ATR for update threshold
@@ -304,22 +305,32 @@ def adaptive_trailing_threshold(
     Clamped into [min_threshold, max_threshold]. Falls back to `fallback`
     when fewer than 10 valid samples are available.
 
+    Args:
+        atr_values: Series of ATR values (absolute price units)
+        price: Current price to convert ATR to fraction
+        lookback: Rolling window size
+        quantile: Percentile to use (default 0.5 = median)
+        mult: Fraction of ATR to use as threshold (default 0.1 = 10%)
+        min_threshold: Minimum threshold as price fraction (default 0.1%)
+        max_threshold: Maximum threshold as price fraction (default 1%)
+        fallback: Fallback value when insufficient data
+
     Returns:
         float: threshold as fraction of price (e.g., 0.002 = 0.2%).
     """
     if atr_values is None or len(atr_values) == 0:
         return round(float(fallback), 6)
 
+    if price is None or price <= 0:
+        return round(float(fallback), 6)
+
     recent = pd.Series(atr_values).tail(lookback).dropna()
     if len(recent) < 10:
         return round(float(fallback), 6)
 
-    # ATR as fraction of price (need price context - use median ATR * mult)
-    # For threshold we use ATR * mult directly as price fraction
     median_atr = float(np.percentile(recent.values, quantile * 100.0))
-    # We need a price reference - the strategy will provide current price
-    # This function returns ATR-based threshold; caller divides by price
-    thr = median_atr * mult
+    # Convert ATR to fraction of price: (median_atr * mult) / price
+    thr = (median_atr * mult) / price
     thr = float(np.clip(thr, min_threshold, max_threshold))
     return round(thr, 6)
 

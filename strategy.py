@@ -270,31 +270,17 @@ class DualMLStrategy:
             log_warning(f"Only {len(valid_atr)} valid ATR values, need at least 5")
             return
         
-        # Clamp to configured bounds (ATR as absolute price, not percentage)
-        min_thr = float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MIN", 0.001, self.config))
-        max_thr = float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MAX", 0.01, self.config))
-        mult = float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MULT", 0.1, self.config))
-        
-        # The adaptive_trailing_threshold function expects ATR values and computes
-        # threshold = median_atr * mult. We need to provide raw ATR values.
-        # Clamp ATR values to reasonable range for the asset
-        current_price = df_klines["close"].iloc[-1]
-        max_atr = current_price * max_thr / mult
-        min_atr = current_price * min_thr / mult
-        
-        clamped_atr = valid_atr.clip(lower=min_atr, upper=max_atr)
-        
+        # Store raw ATR values (adaptive_trailing_threshold handles min/max internally)
         # Add slight variation to avoid percentile edge cases
         import random
         self.atr_history = [
             float(val * (1 + random.uniform(-0.02, 0.02))) 
-            for val in clamped_atr
+            for val in valid_atr
         ]
         
         log_info(
             f"[ATR INIT] Seeded atr_history with {len(self.atr_history)} samples "
-            f"median={valid_atr.median():.2f} (raw median={atr_series.dropna().median():.2f}, "
-            f"bounds=[{min_atr:.2f}, {max_atr:.2f}])"
+            f"median={valid_atr.median():.2f} (raw median={atr_series.dropna().median():.2f})"
         )
 
     # ── Simulation Mode ────────────────────────────────────────────────
@@ -1237,10 +1223,10 @@ class DualMLStrategy:
             if len(self.atr_history) > lookback:
                 self.atr_history = self.atr_history[-lookback:]
             # adaptive_trailing_threshold returns threshold as price fraction
-            # We need to divide ATR by current_price to get price fraction
-            atr_pct = atr14 / current_price if current_price > 0 else 0
+            # Now accepts price parameter to convert ATR to fraction
             threshold = adaptive_trailing_threshold(
                 pd.Series(self.atr_history),
+                current_price,
                 lookback=lookback,
                 quantile=float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_QUANTILE", 0.5, self.config)),
                 mult=float(_cfg_flag("ADAPTIVE_TRAIL_UPDATE_MULT", 0.1, self.config)),
