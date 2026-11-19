@@ -305,6 +305,7 @@ class OrderBookRecorder(threading.Thread):
             "aggressor_buy_ratio": (buy_notional / total_notional) if total_notional > 0 else 0.5,
             "trade_intensity_usd_s": trade_intensity,
             "trade_count_ps": trade_count_ps,
+            "window_sec": self.window_sec,
             "n_levels_bid": len(bids),
             "n_levels_ask": len(asks),
         }

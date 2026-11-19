@@ -179,6 +179,7 @@ class DualMLStrategy:
 
         # Adaptive liquidity threshold state
         self.trade_intensity_history: List[float] = []
+        self._last_liq_exit_time: Optional[datetime] = None
 
         # Adaptive trailing SL update threshold state
         self.atr_history: List[float] = []
@@ -918,7 +919,7 @@ class DualMLStrategy:
             return "intensity"
         return None
 
-    def _liquidity_exit_gate(self) -> Optional[str]:
+    def _liquidity_exit_gate(self, current_time: datetime) -> Optional[str]:
         """Return 'liq_exit' when the book thins dangerously while holding.
 
         Logs which specific metric triggered the exit for debugging.
@@ -933,7 +934,7 @@ class DualMLStrategy:
         spread_bps = snap.get("spread_bps", 0)
         depth = snap.get("depth_total_usd", 0)
         vanish = snap.get("vanish_pct", 0)
-        tape_trades = snap.get("trade_count_ps", 0) * snap.get("window_sec", 60) if "window_sec" in snap else 0
+        tape_trades = snap.get("trade_count_ps", 0) * 60  # default window_sec = 60s
         
         # Adaptive or static trade intensity threshold for exit
         if _cfg_flag("ADAPTIVE_LIQ_ENABLED", True, self.config):
@@ -967,6 +968,18 @@ class DualMLStrategy:
             )
         
         if intensity < min_intensity:
+            # Cooldown: prevent repeated LIQ_EXIT triggers in short succession
+            cooldown_min = float(_cfg_flag("ADAPTIVE_LIQ_COOLDOWN_MIN", 15, self.config))
+            if self._last_liq_exit_time is not None:
+                elapsed_min = (current_time - self._last_liq_exit_time).total_seconds() / 60.0
+                if elapsed_min < cooldown_min:
+                    log_debug(
+                        f"Skipping LIQ_EXIT: {cooldown_min:.0f}min cooldown "
+                        f"(elapsed={elapsed_min:.1f}min)"
+                    )
+                    return None
+            self._last_liq_exit_time = current_time
+            
             log_warning(
                 f"LIQ_EXIT triggered: trade_intensity={intensity:.0f} "
                 f"< threshold={min_intensity:.0f} USD/s "
@@ -1092,7 +1105,7 @@ class DualMLStrategy:
         # to exit at reasonable prices. Fail-open: stale or missing book data
         # never forces an exit.
         if _cfg_flag("GATE_LIQUIDITY_EXIT", True, self.config):
-            liq_reason = self._liquidity_exit_gate()
+            liq_reason = self._liquidity_exit_gate(current_time)
             if liq_reason is not None:
                 # Grace period: suppress liq_exit shortly after entry to avoid
                 # "entry shock" - the book may be thin at entry but recover.
