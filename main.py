@@ -280,9 +280,11 @@ def live_mode(args):
 
     # Probe connectivity; the initial fetch may transiently fail (e.g. rate
     # limit / network), so retry with backoff before giving up on startup.
+    # 7 days of 15m candles = 7 * 24 * 4 = 672 candles
+    candles_7d = 7 * 24 * 4
     df_sample = None
     for _attempt in range(5):
-        df_sample = broker.get_historical_prices(SYMBOL, 7, TIMEFRAME)
+        df_sample = broker.get_historical_prices(SYMBOL, candles_7d, TIMEFRAME)
         if df_sample is not None and len(df_sample) > 0:
             break
         log_error(
@@ -324,11 +326,8 @@ def live_mode(args):
             log_warning("Could not estimate initial trade intensity; adaptive threshold will use fallback")
 
     # Seed ATR history from the initial klines fetch for adaptive trailing threshold
-    log_info(f"[INIT DEBUG] df_sample is None: {df_sample is None}, len: {len(df_sample) if df_sample is not None else 'N/A'}")
     if df_sample is not None and len(df_sample) > 50:
-        log_info("[INIT DEBUG] Calling seed_atr_history...")
         strategy.seed_atr_history(df_sample, num_samples=50)
-        log_info("[INIT DEBUG] seed_atr_history returned")
     else:
         log_warning("Insufficient klines data for ATR history seeding")
 
