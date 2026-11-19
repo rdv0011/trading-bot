@@ -324,8 +324,11 @@ def live_mode(args):
             log_warning("Could not estimate initial trade intensity; adaptive threshold will use fallback")
 
     # Seed ATR history from the initial klines fetch for adaptive trailing threshold
+    log_info(f"[INIT DEBUG] df_sample is None: {df_sample is None}, len: {len(df_sample) if df_sample is not None else 'N/A'}")
     if df_sample is not None and len(df_sample) > 50:
+        log_info("[INIT DEBUG] Calling seed_atr_history...")
         strategy.seed_atr_history(df_sample, num_samples=50)
+        log_info("[INIT DEBUG] seed_atr_history returned")
     else:
         log_warning("Insufficient klines data for ATR history seeding")
 
