@@ -1127,6 +1127,17 @@ class DualMLStrategy:
             max_hold = self.current_meta.get("max_hold_hours", MAX_HOLD_HOURS_DEFAULT)
             if hours_held >= max_hold * 0.5:
                 sl_frac_tightened = sl_frac * 0.5  # Tighten SL to half
+
+        # DEBUG: Log SL check details
+        if self.position != 0:
+            log_debug(
+                f"[SL CHECK] pos={self.position:+.6f} entry={self.entry_price:.2f} "
+                f"sl_frac={sl_frac:.6f} sl_frac_tightened={sl_frac_tightened:.6f} "
+                f"hours_held={hours_held:.2f} max_hold*0.5={max_hold * 0.5:.2f} "
+                f"sl_price={sl_price:.2f} current={current_price:.2f} "
+                f"trigger={current_price <= sl_price}"
+            )
+
         if self.position > 0:  # Long
             sl_price = self.entry_price * (1 - sl_frac_tightened)
             if current_price <= sl_price:
@@ -1158,6 +1169,24 @@ class DualMLStrategy:
                     self.trail_extreme = self.entry_price
                 if self.position > 0:
                     self.trail_extreme = max(self.trail_extreme, current_price)
+
+                    # DEBUG: Log trailing SL check details
+                    profit_dist = current_price - self.entry_price
+                    breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
+                    base_sl = self.entry_price * (1 - sl_frac)
+                    trail_sl = self.trail_extreme - atr_mult * atr14
+                    eff_sl = max(base_sl, trail_sl)
+                    log_debug(
+                        f"[TRAIL CHECK] pos=long trail_extreme={self.trail_extreme:.2f} "
+                        f"atr14={atr14:.2f} profit_dist={profit_dist:.2f} "
+                        f"breakeven={breakeven_price:.2f} base_sl={base_sl:.2f} "
+                        f"trail_sl={trail_sl:.2f} eff_sl={eff_sl:.2f} "
+                        f"current={current_price:.2f} "
+                        f"profit>=1R={profit_dist >= sl_frac * self.entry_price} "
+                        f"trail_active={self.trail_extreme >= breakeven_price} "
+                        f"below_eff={current_price <= eff_sl} "
+                        f"eff>base={eff_sl > base_sl}"
+                    )
                     # Profit-lock: once profit >= 1x SL distance, lock SL at breakeven
                     profit_dist = current_price - self.entry_price
                     if profit_dist >= sl_frac * self.entry_price:
@@ -1178,6 +1207,26 @@ class DualMLStrategy:
                                 return "trailing_sl"
                 else:
                     self.trail_extreme = min(self.trail_extreme, current_price)
+                    # Profit-lock: once profit >= 1x SL distance, lock SL at breakeven
+                    profit_dist = self.entry_price - current_price
+
+                    # DEBUG: Log trailing SL check details for short
+                    breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
+                    base_sl = self.entry_price * (1 + sl_frac)
+                    trail_sl = self.trail_extreme + atr_mult * atr14
+                    eff_sl = min(base_sl, trail_sl)
+                    log_debug(
+                        f"[TRAIL CHECK] pos=short trail_extreme={self.trail_extreme:.2f} "
+                        f"atr14={atr14:.2f} profit_dist={profit_dist:.2f} "
+                        f"breakeven={breakeven_price:.2f} base_sl={base_sl:.2f} "
+                        f"trail_sl={trail_sl:.2f} eff_sl={eff_sl:.2f} "
+                        f"current={current_price:.2f} "
+                        f"profit>=1R={profit_dist >= sl_frac * self.entry_price} "
+                        f"trail_active={self.trail_extreme <= breakeven_price} "
+                        f"above_eff={current_price >= eff_sl} "
+                        f"eff<base={eff_sl < base_sl}"
+                    )
+
                     # Profit-lock: once profit >= 1x SL distance, lock SL at breakeven
                     profit_dist = self.entry_price - current_price
                     if profit_dist >= sl_frac * self.entry_price:
