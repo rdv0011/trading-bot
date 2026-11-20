@@ -257,18 +257,35 @@ class TestTrailingStopActivation:
         # Should not trigger trailing SL (profit < 1R)
         assert exit_reason is None, f"Expected None (no trailing before 1R), got {exit_reason}"
 
-    def test_trailing_sl_activates_after_1R_profit(self, strategy):
-        """Trailing SL activates after 1R profit is reached."""
+    def test_trailing_sl_activates_after_1R_profit_at_entry(self, strategy):
+        """Trailing SL activates when current profit >= 1R AND price drops to entry."""
         now = setup_long_position(strategy, entry_price=50000.0, qty=0.1)
         strategy.trail_extreme = 51000.0  # 1000 profit = 1R (SL=2% of 50000 = 1000)
         strategy._last_atr14 = 1000.0
 
-        # Price drops to 50000 (at breakeven)
+        # Price drops to 50000 (at entry/breakeven)
+        # Current profit = 0, NOT >= 1R, so trailing SL from profit lock doesn't trigger
+        # But trail_extreme (51000) >= breakeven (51000), so check eff_sl
+        # base_sl = 49000, trail_sl = 51000 - 1200 = 49800, eff_sl = 49800
+        # current_price (50000) > eff_sl (49800), so NO trigger
         strategy.broker.get_last_price.return_value = 50000.0
 
         exit_reason = strategy._check_exits(50000.0, datetime.now())
 
-        # Should trigger trailing SL at breakeven
+        # At breakeven with trail_extreme >= breakeven, but price > eff_sl, no trigger
+        assert exit_reason is None, f"Expected None (above eff_sl), got {exit_reason}"
+
+    def test_trailing_sl_activates_below_eff_sl_after_1R(self, strategy):
+        """Trailing SL activates when price drops below effective SL after 1R profit."""
+        now = setup_long_position(strategy, entry_price=50000.0, qty=0.1)
+        strategy.trail_extreme = 51000.0  # 1R profit
+        strategy._last_atr14 = 1000.0
+
+        # Price drops to 49700 - below eff_sl (49800)
+        strategy.broker.get_last_price.return_value = 49700.0
+
+        exit_reason = strategy._check_exits(49700.0, datetime.now())
+
         assert exit_reason == "trailing_sl", f"Expected 'trailing_sl', got {exit_reason}"
 
     def test_trailing_sl_tracks_from_breakeven(self, strategy):
