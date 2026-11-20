@@ -170,6 +170,9 @@ TRAILING_SL_UPDATE_THRESHOLD = 0.002  # 0.2% min move to trigger exchange SL/TP 
 # ── Regime Gate Hardening (Phase 2) ────────────────────────────────────
 GATE_EXTREME_VOL = _get_bool("GATE_EXTREME_VOL", True)               # block entries when vol_state = extreme
 EXTREME_VOL_RATIO = 1.8               # vol_12 / vol_48 above this = extreme
+GATE_ABS_VOL_ENABLED = _get_bool("GATE_ABS_VOL_ENABLED", True)       # block entries when absolute volume drops
+ABS_VOL_RATIO_CRITICAL = 0.10             # ratio below this = absolute volume drop (10% of median)
+ABS_VOL_RATIO_ROLLING_WINDOW = 48          # rolling window for median (candles)
 
 # ── Liquidity Recorder + Gates (Phase 1-2, Option B) ───────────────────
 LIQUIDITY_RECORDER_ENABLED = _get_bool("LIQUIDITY_RECORDER_ENABLED", True)

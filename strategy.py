@@ -778,6 +778,22 @@ class DualMLStrategy:
                     f"blocked {pred:+.6f} entry"
                 )
 
+        # Phase 2b: absolute volume gate blocks ENTRIES when market activity
+        # is too low (e.g., weekend, overnight, volume vacuum).
+        # abs_vol_ratio = actual_volume / rolling_median_volume
+        # Low abs_vol means unreliable price discovery → higher slippage risk.
+        abs_vol_blocked = False
+        if (signal in ("long", "short")
+                and _cfg_flag("GATE_ABS_VOL_ENABLED", True, self.config)):
+            abs_vol_critical = float(_cfg_flag("ABS_VOL_RATIO_CRITICAL", 0.10, self.config))
+            if abs_vol_ratio < abs_vol_critical:
+                abs_vol_blocked = True
+                signal = "hold"
+                log_warning(
+                    f"GATE abs_vol: abs_vol_ratio={abs_vol_ratio:.3f} "
+                    f"(<{abs_vol_critical:.3f}) blocked {pred:+.6f} entry"
+                )
+
         # Phase 1-2: liquidity gate blocks ENTRIES only (exits ran above).
         # Fail-open: stale/missing book data does NOT block (LIQUIDITY_FAIL_OPEN_ON_STALE).
         liq_blocked = None
@@ -800,7 +816,8 @@ class DualMLStrategy:
                     f"(pred={pred:+.6f} thr={thr:.6f})"
                 )
             reason = (
-                "vol_gate" if vol_blocked
+                "abs_vol_gate" if abs_vol_blocked
+                else "vol_gate" if vol_blocked
                 else "liq_gate" if liq_blocked
                 else "halt_regime" if self.current_meta.get("regime") == "halt"
                 else "chop_gate" if self.current_meta.get("regime") == "chop"
@@ -849,8 +866,8 @@ class DualMLStrategy:
                     bid, ask, mid = self.broker.get_market_snapshot()
                     if mid > 0:
                         spread_bps = (ask - bid) / mid * 10000
-                except Exception:
-                    pass  # fail-open: missing snapshot does NOT block
+                except Exception as e:
+                    log_debug(f"Spread gate: failed to get market snapshot: {e}")
             spread_threshold = float(_cfg_flag("SPREAD_ENTRY_GATE_BPS", 20, self.config))
             if spread_bps > spread_threshold:
                 signal = "hold"
@@ -886,13 +903,13 @@ class DualMLStrategy:
         price = 0.0
         try:
             price = self.broker.get_last_price()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug(f"_log_state_summary: get_last_price failed: {e}")
         equity = 0.0
         try:
             equity = self.broker.get_equity()
-        except Exception:
-            pass
+        except Exception as e:
+            log_debug(f"_log_state_summary: get_equity failed: {e}")
         hist = [abs(p) for p in self.pred_history if p == p]
         recent = hist[-200:]
         pred_stats = {
@@ -1102,21 +1119,23 @@ class DualMLStrategy:
 
         # Stop loss / Take profit with time-weighted tightening
         # After 50% of max_hold_hours, tighten SL to half distance to limit prolonged losses
+        # Use a separate variable to avoid mutating the original SL fraction used by trailing stop
         sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+        sl_frac_tightened = sl_frac
         if self.entry_time is not None and self.position != 0:
             hours_held = (current_time - self.entry_time).total_seconds() / 3600
             max_hold = self.current_meta.get("max_hold_hours", MAX_HOLD_HOURS_DEFAULT)
             if hours_held >= max_hold * 0.5:
-                sl_frac = sl_frac * 0.5  # Tighten SL to half
+                sl_frac_tightened = sl_frac * 0.5  # Tighten SL to half
         if self.position > 0:  # Long
-            sl_price = self.entry_price * (1 - sl_frac)
+            sl_price = self.entry_price * (1 - sl_frac_tightened)
             if current_price <= sl_price:
                 return "sl"
             tp_price = self.entry_price * (1 + self.current_meta["take_profit_frac"])
             if current_price >= tp_price:
                 return "tp"
         else:  # Short
-            sl_price = self.entry_price * (1 + sl_frac)
+            sl_price = self.entry_price * (1 + sl_frac_tightened)
             if current_price >= sl_price:
                 return "sl"
             tp_price = self.entry_price * (1 - self.current_meta["take_profit_frac"])
@@ -1130,6 +1149,8 @@ class DualMLStrategy:
         if _cfg_flag("TRAILING_STOP_ENABLED", True, self.config) and self.position != 0:
             atr14 = self._last_atr14
             if atr14 and atr14 > 0:
+                # Use original (untightened) SL fraction for trailing stop calculations
+                # This ensures breakeven and trailing levels are based on initial risk
                 sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
                 atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.2, self.config))
                 be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
