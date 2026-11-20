@@ -1216,6 +1216,7 @@ class DualMLStrategy:
         be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
         
         # Adaptive or static trailing SL update threshold
+        atr_pct = atr14 / current_price if current_price > 0 else 0
         if _cfg_flag("ADAPTIVE_TRAIL_UPDATE_ENABLED", True, self.config):
             # Add ATR to history
             self.atr_history.append(atr14)
