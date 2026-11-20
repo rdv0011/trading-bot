@@ -1128,6 +1128,14 @@ class DualMLStrategy:
             if hours_held >= max_hold * 0.5:
                 sl_frac_tightened = sl_frac * 0.5  # Tighten SL to half
 
+        # Calculate SL/TP prices based on position direction
+        if self.position > 0:  # Long
+            sl_price = self.entry_price * (1 - sl_frac_tightened)
+            tp_price = self.entry_price * (1 + self.current_meta["take_profit_frac"])
+        else:  # Short
+            sl_price = self.entry_price * (1 + sl_frac_tightened)
+            tp_price = self.entry_price * (1 - self.current_meta["take_profit_frac"])
+
         # DEBUG: Log SL check details
         if self.position != 0:
             log_debug(
@@ -1139,17 +1147,13 @@ class DualMLStrategy:
             )
 
         if self.position > 0:  # Long
-            sl_price = self.entry_price * (1 - sl_frac_tightened)
             if current_price <= sl_price:
                 return "sl"
-            tp_price = self.entry_price * (1 + self.current_meta["take_profit_frac"])
             if current_price >= tp_price:
                 return "tp"
         else:  # Short
-            sl_price = self.entry_price * (1 + sl_frac_tightened)
             if current_price >= sl_price:
                 return "sl"
-            tp_price = self.entry_price * (1 - self.current_meta["take_profit_frac"])
             if current_price <= tp_price:
                 return "tp"
 
