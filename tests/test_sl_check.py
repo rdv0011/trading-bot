@@ -288,34 +288,51 @@ class TestTrailingStopActivation:
 
         assert exit_reason == "trailing_sl", f"Expected 'trailing_sl', got {exit_reason}"
 
-    def test_trailing_sl_tracks_from_breakeven(self, strategy):
-        """After 1R profit, trailing SL should trail from breakeven."""
+    def test_trailing_sl_eff_sl_tracks_trail_extreme(self, strategy):
+        """Effective SL tracks trail_extreme when profit >= 1R."""
         now = setup_long_position(strategy, entry_price=50000.0, qty=0.1)
         strategy.trail_extreme = 51500.0  # 1500 profit > 1R
         strategy._last_atr14 = 1000.0
 
-        # Price drops to 50200 - below breakeven but above trail from breakeven
-        # trail_sl from breakeven = 50000 - 1.2*1000 = 48800
-        # At 50200, should NOT trigger
+        # At 50200: trail_sl = 51500 - 1200 = 50300, eff_sl = 50300
+        # current_price (50200) <= eff_sl (50300) -> should trigger
         strategy.broker.get_last_price.return_value = 50200.0
 
         exit_reason = strategy._check_exits(50200.0, datetime.now())
 
-        assert exit_reason is None, f"Expected None (above trail from breakeven), got {exit_reason}"
+        assert exit_reason == "trailing_sl", f"Expected 'trailing_sl' (below eff_sl), got {exit_reason}"
 
-    def test_trailing_sl_triggers_after_breakeven_trail(self, strategy):
-        """Trailing SL triggers when price drops below trail from breakeven."""
+    def test_trailing_sl_triggers_below_eff_sl_after_1R(self, strategy):
+        """Trailing SL triggers when price drops below effective SL after 1R profit."""
         now = setup_long_position(strategy, entry_price=50000.0, qty=0.1)
-        strategy.trail_extreme = 51500.0
+        strategy.trail_extreme = 51500.0  # 1500 profit > 1R
         strategy._last_atr14 = 1000.0
 
-        # trail_sl from breakeven = 50000 - 1.2*1000 = 48800
-        # Drop below 48800
-        strategy.broker.get_last_price.return_value = 48700.0
+        # trail_sl = 51500 - 1200 = 50300, eff_sl = 50300
+        # Drop below 50300
+        strategy.broker.get_last_price.return_value = 50200.0
 
-        exit_reason = strategy._check_exits(48700.0, datetime.now())
+        exit_reason = strategy._check_exits(50200.0, datetime.now())
 
         assert exit_reason == "trailing_sl", f"Expected 'trailing_sl', got {exit_reason}"
+
+    def test_trailing_sl_at_breakeven_requires_current_profit_1R(self, strategy):
+        """Trailing SL at breakeven only activates when current profit >= 1R."""
+        now = setup_long_position(strategy, entry_price=50000.0, qty=0.1)
+        strategy.trail_extreme = 51000.0  # 1R profit reached earlier
+        strategy._last_atr14 = 1000.0
+
+        # Price drops to 50000 (breakeven) - current profit = 0, NOT >= 1R
+        # profit_dist = 0, not >= 1000
+        # trail_extreme (51000) >= breakeven (51000) -> True
+        # base_sl = 49000, trail_sl = 49800, eff_sl = 49800
+        # current (50000) > eff_sl (49800) -> no trigger
+        strategy.broker.get_last_price.return_value = 50000.0
+
+        exit_reason = strategy._check_exits(50000.0, datetime.now())
+
+        # At breakeven with trail_extreme >= breakeven, but price > eff_sl, no trigger
+        assert exit_reason is None, f"Expected None (above eff_sl), got {exit_reason}"
 
 
 class TestEdgeCases:
