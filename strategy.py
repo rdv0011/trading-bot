@@ -27,6 +27,7 @@ from config import (
     ADAPTIVE_MIN_THRESHOLD, ADAPTIVE_MAX_THRESHOLD,
     ADAPTIVE_LIQ_ENABLED, ADAPTIVE_LIQ_LOOKBACK, ADAPTIVE_LIQ_QUANTILE,
     ADAPTIVE_LIQ_MIN_USD, ADAPTIVE_LIQ_MAX_USD,
+    ADAPTIVE_LIQ_COOLDOWN_MIN,
     ADAPTIVE_TRAIL_UPDATE_ENABLED, ADAPTIVE_TRAIL_UPDATE_LOOKBACK,
     ADAPTIVE_TRAIL_UPDATE_QUANTILE, ADAPTIVE_TRAIL_UPDATE_MULT,
     ADAPTIVE_TRAIL_UPDATE_MIN, ADAPTIVE_TRAIL_UPDATE_MAX,
@@ -36,6 +37,7 @@ from config import (
     PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION, REVERSAL_FULL_CLOSE_STREAK,
     TRADE_COOLDOWN_ENABLED, TRADE_COOLDOWN_MINUTES,
     MIN_TREES,
+    is_testnet_env,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params

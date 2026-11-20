@@ -95,3 +95,37 @@
 | Nov 19 | Fix 7-day klines fetch (672 candles) | `ed2e6d8` |
 | Nov 19 | Fix adaptive trailing: pass price parameter | `25b155f` |
 | Nov 20 | Fix atr_pct undefined bug | `fd24a78` |
+
+---
+
+## Code Review Findings (Nov 20)
+
+### Critical Issues
+
+| # | Issue | Location | Severity | Status |
+|---|-------|----------|----------|--------|
+| 1 | **Missing import**: `is_testnet_env()` not imported in `strategy.py` | `strategy.py` lines 1319, 1377 | **CRITICAL** | 🔴 Not Fixed |
+| 2 | **Variable mutation bug**: `sl_frac` modified in-place affects trailing stop | `strategy.py` line 1108 | **HIGH** | 🔴 Not Fixed |
+
+### High Severity Issues
+
+| # | Issue | Location | Severity | Status |
+|---|-------|----------|----------|--------|
+| 3 | **SL fraction mutation**: Time-weighted SL tightening modifies `sl_frac` which is then reused for trailing stop calculations, causing incorrect base_sl | `strategy.py` `_check_exits()` lines 1103-1108, 1131 | **HIGH** | 🔴 Not Fixed |
+| 4 | **Missing error logging**: Several bare `except Exception:` blocks without logging | `strategy.py` lines 850, 887, 892 | **MEDIUM** | 🟡 Reviewed |
+
+### Medium Severity Issues
+
+| # | Issue | Location | Severity | Status |
+|---|-------|----------|----------|--------|
+| 5 | **Testnet vs Mainnet logic**: Multiple `if is_testnet_env():` branches with different behavior | `strategy.py`, `broker.py`, `main.py` | **MEDIUM** | 🟡 Reviewed |
+| 6 | **Position sync on startup**: `sync_exchange_position()` may not handle all edge cases | `strategy.py` | **MEDIUM** | 🟡 Reviewed |
+| 7 | **No circuit breaker**: No max daily loss limit or consecutive loss halt | `strategy.py` | **MEDIUM** | 🟡 Planned |
+
+### Low Severity / Code Quality
+
+| # | Issue | Location | Severity | Status |
+|---|-------|----------|----------|--------|
+| 8 | **Magic numbers**: Hardcoded values (0.5 for SL tightening, 1.2 for ATR mult) | `strategy.py`, `config.py` | **LOW** | 🟢 Configurable |
+| 9 | **Large functions**: `_check_exits()` >100 lines, `_sync_trailing_orders()` >100 lines | `strategy.py` | **LOW** | 🟢 Refactor later |
+| 10 | **Inconsistent naming**: Mix of `snake_case` and `camelCase` in some variables | Various | **LOW** | 🟢 Style only |
