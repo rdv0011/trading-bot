@@ -12,11 +12,11 @@
 - **File**: `strategy.py` `_check_exits()` method
 - **Rationale**: Last trade hit tightened SL exactly at 50% mark (3.87h / 7.55h = 51%)
 
-### 3. Add Volatility Filter for Entries 🔄 PENDING
-- **Current**: No abs_vol filter on entries
-- **Proposed**: Block entries when `abs_vol > 0.8` (elevated volatility)
-- **File**: `strategy.py` `_check_entries()` or `_liquidity_entry_gate()`
-- **Rationale**: Last trade entered with `abs_vol=0.84` in declining market
+### 3. Add Volatility Filter for Entries ✅ DONE
+- **Commit `b1fb2f4`**: Added abs_vol entry gate (GATE_ABS_VOL_ENABLED)
+- Blocks entries when `abs_vol_ratio < 0.10` (10% of median volume)
+- Added config: `GATE_ABS_VOL_ENABLED`, `ABS_VOL_RATIO_CRITICAL`
+- Added `abs_vol_blocked` to decision logging
 
 ---
 
@@ -95,6 +95,10 @@
 | Nov 19 | Fix 7-day klines fetch (672 candles) | `ed2e6d8` |
 | Nov 19 | Fix adaptive trailing: pass price parameter | `25b155f` |
 | Nov 20 | Fix atr_pct undefined bug | `fd24a78` |
+| Nov 20 | Fix missing imports (is_testnet_env, ADAPTIVE_LIQ_COOLDOWN_MIN) | `74f08b0` |
+| Nov 20 | Fix SL fraction mutation bug | `b1fb2f4` |
+| Nov 20 | Add abs_vol entry gate | `b1fb2f4` |
+| Nov 20 | Add error logging for bare except blocks | `b1fb2f4` |
 
 ---
 
@@ -104,15 +108,15 @@
 
 | # | Issue | Location | Severity | Status |
 |---|-------|----------|----------|--------|
-| 1 | **Missing import**: `is_testnet_env()` not imported in `strategy.py` | `strategy.py` lines 1319, 1377 | **CRITICAL** | 🔴 Not Fixed |
-| 2 | **Variable mutation bug**: `sl_frac` modified in-place affects trailing stop | `strategy.py` line 1108 | **HIGH** | 🔴 Not Fixed |
+| 1 | **Missing import**: `is_testnet_env()` not imported in `strategy.py` | `strategy.py` lines 1319, 1377 | **CRITICAL** | ✅ Fixed in `74f08b0` |
+| 2 | **Variable mutation bug**: `sl_frac` modified in-place affects trailing stop | `strategy.py` line 1108 | **HIGH** | ✅ Fixed in `b1fb2f4` |
 
 ### High Severity Issues
 
 | # | Issue | Location | Severity | Status |
 |---|-------|----------|----------|--------|
-| 3 | **SL fraction mutation**: Time-weighted SL tightening modifies `sl_frac` which is then reused for trailing stop calculations, causing incorrect base_sl | `strategy.py` `_check_exits()` lines 1103-1108, 1131 | **HIGH** | 🔴 Not Fixed |
-| 4 | **Missing error logging**: Several bare `except Exception:` blocks without logging | `strategy.py` lines 850, 887, 892 | **MEDIUM** | 🟡 Reviewed |
+| 3 | **SL fraction mutation**: Time-weighted SL tightening modifies `sl_frac` which is then reused for trailing stop calculations, causing incorrect base_sl | `strategy.py` `_check_exits()` lines 1103-1108, 1131 | **HIGH** | ✅ Fixed in `b1fb2f4` (separate `sl_frac_tightened` variable) |
+| 4 | **Missing error logging**: Several bare `except Exception:` blocks without logging | `strategy.py` lines 850, 887, 892 | **MEDIUM** | ✅ Fixed in `b1fb2f4` (added log_debug) |
 
 ### Medium Severity Issues
 
