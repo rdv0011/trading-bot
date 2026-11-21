@@ -1455,15 +1455,21 @@ class DualMLStrategy:
         """
         Check and execute partial exits at R-multiple levels.
         
-        Profit-taking schedule:
-        - 1R: Close 33% (lock 1R profit)
-        - 2R: Close 33% (lock 2R profit)  
-        - 3R: Close 34% (lock 3R profit)
+        Profit-taking schedule (configurable):
+        - 1R: Close R_PARTIAL_FRACTIONS[0] (default 33%)
+        - 2R: Close R_PARTIAL_FRACTIONS[1] (default 33%)  
+        - 3R: Close R_PARTIAL_FRACTIONS[2] (default 34%)
         - Remaining: Let trailing SL protect
         
         Returns True if a partial exit was executed.
         """
-        if self.position == 0 or self._partial_exits_hit >= 3:
+        if not _cfg_flag("R_PARTIAL_EXITS_ENABLED", True, self.config):
+            return False
+            
+        max_levels = int(_cfg_flag("R_PARTIAL_LEVELS", 3, self.config))
+        fractions = _cfg_flag("R_PARTIAL_FRACTIONS", [0.33, 0.33, 0.34], self.config)
+        
+        if self.position == 0 or self._partial_exits_hit >= max_levels:
             return False
 
         sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
@@ -1474,20 +1480,21 @@ class DualMLStrategy:
         target_gain = self._next_partial_r_level * initial_risk
         if current_gain >= target_gain:
             # Execute partial exit
-            fraction = 0.33 if self._partial_exits_hit < 2 else 0.34
+            fraction = fractions[self._partial_exits_hit] if self._partial_exits_hit < len(fractions) else fractions[-1]
             fill_price = self.broker.close_position_fraction(fraction=fraction)
             
             if fill_price is not None:
                 self._partial_exits_hit += 1
                 self._next_partial_r_level += 1
                 
+                remaining = 1.0 - sum(fractions[:self._partial_exits_hit])
                 logger.info(
-                    f"[PARTIAL EXIT {self._partial_exits_hit}/3 @ {self._partial_exits_hit}R] "
+                    f"[PARTIAL EXIT {self._partial_exits_hit}/{max_levels} @ {self._partial_exits_hit}R] "
                     f"Symbol: {self.broker.symbol}, "
                     f"Side: {'LONG' if self.position > 0 else 'SHORT'}, "
                     f"Fraction: {fraction:.0%}, Fill: {fill_price:.2f}, "
                     f"Entry: {self.entry_price:.2f}, Gain: {current_gain/initial_risk:.2f}R, "
-                    f"Remaining position: {1.0 - self._partial_exits_hit * 0.33:.0%}"
+                    f"Remaining position: {remaining:.0%}"
                 )
                 return True
         
