@@ -1793,8 +1793,33 @@ class DualMLStrategy:
             commission = close_result.commission if close_result else 0.0
             financing = close_result.financing if close_result else 0.0
 
-            # Average expected trade profit (from config or heuristic)
-            avg_expected_profit = equity_before * self.current_meta.get("take_profit_frac", 0.02)
+            # Average expected trade profit: use probability-weighted expectation
+            # based on model prediction magnitude and historical win rate for the regime
+            take_profit_frac = self.current_meta.get("take_profit_frac", 0.02)
+            stop_loss_frac = self.current_meta.get("stop_loss_frac", 0.02)
+            regime = self.current_meta.get("regime", "trend")
+            
+            # Heuristic win rate by regime (could be enhanced with historical tracking)
+            regime_win_rates = {
+                "trend": 0.45,
+                "mean_reversion": 0.55,
+                "chop": 0.40,
+                "unknown": 0.42,
+            }
+            win_rate = regime_win_rates.get(regime, 0.42)
+            
+            # Model prediction confidence scales the win rate
+            pred_confidence = min(abs(self._last_tactical_pred or 0.0) / 0.02, 1.0)  # normalize to ~2%
+            win_rate_adj = win_rate * (0.8 + 0.4 * pred_confidence)  # 80%-120% of base
+            
+            # Probability-weighted expected profit per trade
+            avg_win = take_profit_frac
+            avg_loss = stop_loss_frac
+            expected_profit_frac = win_rate_adj * avg_win - (1 - win_rate_adj) * avg_loss
+            
+            # Floor at 0 (don't log negative expectation for risk management)
+            expected_profit_frac = max(expected_profit_frac, 0.0)
+            avg_expected_profit = equity_before * expected_profit_frac
 
             log_trade_exit(
                 trade=self.current_trade,
