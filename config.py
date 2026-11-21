@@ -217,6 +217,11 @@ PARTIAL_EXIT_ENABLED = _get_bool("PARTIAL_EXIT_ENABLED", True)
 PARTIAL_EXIT_FRACTION = 0.33          # fraction closed on first reversal signal
 REVERSAL_FULL_CLOSE_STREAK = 2        # reversal signals before full close
 
+# ── R-Multiple Partial Exits (Profit Taking) ───────────────────────────
+R_PARTIAL_EXITS_ENABLED = _get_bool("R_PARTIAL_EXITS_ENABLED", True)   # enable R-multiple profit taking
+R_PARTIAL_LEVELS = 3                     # number of R-levels (1R, 2R, 3R)
+R_PARTIAL_FRACTIONS = [0.33, 0.33, 0.34]  # fractions at each level (must sum to ~1.0)
+
 # ── Trade Cooldown (Phase 3) ───────────────────────────────────────────
 TRADE_COOLDOWN_ENABLED = _get_bool("TRADE_COOLDOWN_ENABLED", True)
 TRADE_COOLDOWN_MINUTES = 30           # minimum gap between new entries

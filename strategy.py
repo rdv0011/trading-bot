@@ -194,6 +194,10 @@ class DualMLStrategy:
         self.reversal_streak = 0
         self.last_entry_time: Optional[datetime] = None
 
+        # Partial exit tracking (R-multiple based profit taking)
+        self._partial_exits_hit: int = 0           # Number of R-levels taken (0, 1, 2, 3)
+        self._next_partial_r_level: int = 1        # Next R-level to target (1, 2, 3)
+
         # Phase 1 feature-frame cache: {timeframe_key: (cached_at, df_feat, last_ts)}
         self._feature_cache: Dict[str, Tuple[float, Any, Any]] = {}
         self._last_atr14: float = 0.0
@@ -1321,6 +1325,9 @@ class DualMLStrategy:
         if self.trail_extreme <= 0:
             self.trail_extreme = self.entry_price
 
+        # Check for R-multiple partial exits (profit taking)
+        self._check_partial_exits(current_price)
+
         # Calculate trailing SL — always compute trailing level, but only use it
         # if it improves over the initial bracket SL. This avoids the "breakeven
         # threshold" problem where SL stays at initial level until 1R profit.
@@ -1330,17 +1337,9 @@ class DualMLStrategy:
             trail_sl = self.trail_extreme - atr_mult * atr14    # Trailing SL from peak
             new_sl = max(base_sl, trail_sl)                     # Use the better (higher) SL
 
-            # Calculate trailing TP (trail upward once 2x initial risk gained)
-            initial_risk = self.entry_price * sl_frac
-            current_gain = self.trail_extreme - self.entry_price
-            if current_gain >= 2 * initial_risk:
-                tp_trail = self.entry_price + current_gain * 0.5
-                new_tp = max(
-                    self.entry_price * (1 + tp_frac),
-                    tp_trail,
-                )
-            else:
-                new_tp = self.entry_price * (1 + tp_frac)
+            # TP: Use initial bracket TP as wide safety net (not trailed)
+            # Profit taking is handled by partial exits at 1R/2R/3R
+            new_tp = self.entry_price * (1 + tp_frac)
 
         else:  # Short
             self.trail_extreme = min(self.trail_extreme, current_price)
@@ -1348,16 +1347,8 @@ class DualMLStrategy:
             trail_sl = self.trail_extreme + atr_mult * atr14    # Trailing SL from trough
             new_sl = min(base_sl, trail_sl)                     # Use the better (lower) SL
 
-            initial_risk = self.entry_price * sl_frac
-            current_gain = self.entry_price - self.trail_extreme
-            if current_gain >= 2 * initial_risk:
-                tp_trail = self.entry_price - current_gain * 0.5
-                new_tp = min(
-                    self.entry_price * (1 - tp_frac),
-                    tp_trail,
-                )
-            else:
-                new_tp = self.entry_price * (1 - tp_frac)
+            # TP: Use initial bracket TP as wide safety net
+            new_tp = self.entry_price * (1 - tp_frac)
 
         # Log significant loss detection before syncing
         if self._last_synced_sl_price is not None:
@@ -1432,54 +1423,75 @@ class DualMLStrategy:
                 f"Threshold: {threshold:.4%}"
             )
 
-        # Sync TP to exchange if moved meaningfully
-        # Compute initial bracket TP for comparison (trailing only improves on this)
-        base_tp = self.entry_price * (1 + tp_frac) if self.position > 0 else self.entry_price * (1 - tp_frac)
-
-        # Only attempt TP update if trailing has actually improved the TP beyond initial bracket level
-        # For long: new_tp > base_tp (trailing moved TP up)
-        # For short: new_tp < base_tp (trailing moved TP down)
-        tp_improved = (self.position > 0 and new_tp > base_tp) or (self.position < 0 and new_tp < base_tp)
-
-        if tp_improved and (self._last_synced_tp_price is None or abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price >= threshold):
+        # Sync TP to exchange (initial bracket TP only - profit taking via partial exits)
+        # Only sync once on entry; TP is a wide safety net, not trailed
+        if self._last_synced_tp_price is None:
+            base_tp = self.entry_price * (1 + tp_frac) if self.position > 0 else self.entry_price * (1 - tp_frac)
+            new_tp = base_tp
             success = self.broker.update_tp_order(self.broker.symbol, new_tp, threshold)
             if success:
                 self._last_synced_tp_price = new_tp
                 logger.info(
-                    f"[TP MOVED] Symbol: {self.broker.symbol}, "
-                    f"New TP: {new_tp:.6f}, "
-                    f"Previous TP: {self._last_synced_tp_price or 'N/A'}, "
-                    f"Change: {abs(new_tp - (self._last_synced_tp_price or new_tp)) / new_tp:.4%}, "
+                    f"[TP SET] Symbol: {self.broker.symbol}, "
+                    f"Initial TP: {new_tp:.6f}, "
+                    f"Entry: {self.entry_price:.2f}, "
+                    f"Distance: {abs(new_tp - self.entry_price) / self.entry_price:.2%}, "
                     f"Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                 )
             else:
-                # On testnet, False often means "threshold not met" — not an error
                 if is_testnet_env():
                     logger.debug(
-                        f"[TP SIMULATED - NO CHANGE] Symbol: {self.broker.symbol}, "
-                        f"Target TP: {new_tp:.6f}, Last Synced: {self._last_synced_tp_price}, "
-                        f"Threshold not met or directional guard failed (testnet)"
+                        f"[TP SIMULATED] Symbol: {self.broker.symbol}, "
+                        f"Initial TP: {new_tp:.6f} (testnet simulation)"
                     )
                 else:
                     logger.error(
-                        f"[TP ORDER FAILED TO BE PLACED] Symbol: {self.broker.symbol}, "
+                        f"[TP ORDER FAILED] Symbol: {self.broker.symbol}, "
                         f"Target TP: {new_tp:.6f}, "
-                        f"Entry: {self.entry_price}, Current Price: {current_price}, "
-                        f"Position: {self.position}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
+                        f"Entry: {self.entry_price:.2f}, Time: {time.strftime('%Y-%m-%d %H:%M:%S')}"
                     )
-        elif not tp_improved:
-            logger.debug(
-                f"[TP TRAILING NOT ACTIVE] Symbol: {self.broker.symbol}, "
-                f"Trailing TP: {new_tp:.6f} not better than initial TP: {base_tp:.6f}, "
-                f"Trail Extreme: {self.trail_extreme:.6f}"
-            )
-        else:
-            logger.debug(
-                f"[TP NO CHANGE NEEDED] Symbol: {self.broker.symbol}, "
-                f"New TP: {new_tp:.6f}, Last Synced: {self._last_synced_tp_price:.6f}, "
-                f"Change: {abs(new_tp - self._last_synced_tp_price) / self._last_synced_tp_price:.4%}, "
-                f"Threshold: {threshold:.4%}"
-            )
+
+    def _check_partial_exits(self, current_price: float) -> bool:
+        """
+        Check and execute partial exits at R-multiple levels.
+        
+        Profit-taking schedule:
+        - 1R: Close 33% (lock 1R profit)
+        - 2R: Close 33% (lock 2R profit)  
+        - 3R: Close 34% (lock 3R profit)
+        - Remaining: Let trailing SL protect
+        
+        Returns True if a partial exit was executed.
+        """
+        if self.position == 0 or self._partial_exits_hit >= 3:
+            return False
+
+        sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+        initial_risk = self.entry_price * sl_frac
+        current_gain = (current_price - self.entry_price) if self.position > 0 else (self.entry_price - current_price)
+
+        # Check if we've hit the next R-level
+        target_gain = self._next_partial_r_level * initial_risk
+        if current_gain >= target_gain:
+            # Execute partial exit
+            fraction = 0.33 if self._partial_exits_hit < 2 else 0.34
+            fill_price = self.broker.close_position_fraction(fraction=fraction)
+            
+            if fill_price is not None:
+                self._partial_exits_hit += 1
+                self._next_partial_r_level += 1
+                
+                logger.info(
+                    f"[PARTIAL EXIT {self._partial_exits_hit}/3 @ {self._partial_exits_hit}R] "
+                    f"Symbol: {self.broker.symbol}, "
+                    f"Side: {'LONG' if self.position > 0 else 'SHORT'}, "
+                    f"Fraction: {fraction:.0%}, Fill: {fill_price:.2f}, "
+                    f"Entry: {self.entry_price:.2f}, Gain: {current_gain/initial_risk:.2f}R, "
+                    f"Remaining position: {1.0 - self._partial_exits_hit * 0.33:.0%}"
+                )
+                return True
+        
+        return False
 
     def _execute_signal(self, signal: str, current_price: float, current_time: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
         """Execute trading signal."""
@@ -1559,6 +1571,8 @@ class DualMLStrategy:
         self.scale_count = 0
         self.same_dir_streak = 0
         self.reversal_streak = 0
+        self._partial_exits_hit = 0
+        self._next_partial_r_level = 1
 
         # Market snapshot at signal time
         bid, ask, mid = 0.0, 0.0, 0.0
@@ -1870,6 +1884,8 @@ class DualMLStrategy:
         self.same_dir_streak = 0
         self.reversal_streak = 0
         self._initial_qty = 0.0
+        self._partial_exits_hit = 0
+        self._next_partial_r_level = 1
 
         # Reset hybrid sync state
         self._last_synced_sl_price = None
