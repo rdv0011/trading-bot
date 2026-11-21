@@ -1138,12 +1138,16 @@ class DualMLStrategy:
 
         # DEBUG: Log SL check details
         if self.position != 0:
+            if self.position > 0:  # Long: trigger when price <= SL
+                sl_trigger = current_price <= sl_price
+            else:  # Short: trigger when price >= SL
+                sl_trigger = current_price >= sl_price
             log_debug(
                 f"[SL CHECK] pos={self.position:+.6f} entry={self.entry_price:.2f} "
                 f"sl_frac={sl_frac:.6f} sl_frac_tightened={sl_frac_tightened:.6f} "
                 f"hours_held={hours_held:.2f} max_hold*0.5={max_hold * 0.5:.2f} "
                 f"sl_price={sl_price:.2f} current={current_price:.2f} "
-                f"trigger={current_price <= sl_price}"
+                f"trigger={sl_trigger}"
             )
 
         if self.position > 0:  # Long
