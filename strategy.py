@@ -1725,12 +1725,15 @@ class DualMLStrategy:
                     self.broker._last_synced_sl_price = self._last_synced_sl_price
                 if hasattr(self.broker, "_last_synced_tp_price"):
                     self.broker._last_synced_tp_price = self._last_synced_tp_price
+                # Pre-compute trailing values for logging (avoids f-string format specifier bug)
+                trailing_sl_str = f"{preserved_sl:.2f}" if preserved_sl is not None else "N/A"
+                trailing_tp_str = f"{preserved_tp:.2f}" if preserved_tp is not None else "N/A"
                 log_info(
                     f"[SCALE-IN BRACKET] Symbol: {self.broker.symbol}, "
                     f"Entry: {entry_price:.2f}, Initial SL: {initial_sl:.2f}, "
-                    f"Trailing SL: {preserved_sl:.2f if preserved_sl else 'N/A'}, "
+                    f"Trailing SL: {trailing_sl_str}, "
                     f"Synced SL: {self._last_synced_sl_price:.2f}, "
-                    f"Initial TP: {initial_tp:.2f}, Trailing TP: {preserved_tp:.2f if preserved_tp else 'N/A'}, "
+                    f"Initial TP: {initial_tp:.2f}, Trailing TP: {trailing_tp_str}, "
                     f"Synced TP: {self._last_synced_tp_price:.2f}"
                 )
         except Exception as e:
