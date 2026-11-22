@@ -148,10 +148,10 @@ ADAPTIVE_MAX_THRESHOLD = 0.02         # ceiling so threshold never goes too high
 # ── Adaptive Liquidity Threshold (Phase 2b) ──────────────────────────────
 ADAPTIVE_LIQ_ENABLED = _get_bool("ADAPTIVE_LIQ_ENABLED", True)
 ADAPTIVE_LIQ_LOOKBACK = 100           # rolling window of recent trade_intensity (reduced for faster adaptation)
-ADAPTIVE_LIQ_QUANTILE = 0.15          # use 15th percentile as floor (more conservative)
+ADAPTIVE_LIQ_QUANTILE = 0.10          # use 10th percentile as floor (more conservative, allows more time)
 ADAPTIVE_LIQ_MIN_USD = 5000.0         # absolute floor USD/s
-ADAPTIVE_LIQ_MAX_USD = 50000.0        # absolute ceiling USD/s (reduced from 100k)
-ADAPTIVE_LIQ_COOLDOWN_MIN = 15        # minutes to wait before allowing another LIQ_EXIT
+ADAPTIVE_LIQ_MAX_USD = 25000.0        # absolute ceiling USD/s (lowered from 50k - market is quieter)
+ADAPTIVE_LIQ_COOLDOWN_MIN = 30        # minutes to wait before allowing another LIQ_EXIT (increased from 15)
 
 # ── Adaptive Trailing SL Update Threshold (Phase 2b) ─────────────────────
 ADAPTIVE_TRAIL_UPDATE_ENABLED = _get_bool("ADAPTIVE_TRAIL_UPDATE_ENABLED", True)
