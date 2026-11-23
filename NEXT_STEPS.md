@@ -124,6 +124,8 @@
 | Nov 23 | **Trailing SL improvements** (min distance, chandelier exit) | `86897e5` |
 | Nov 23 | **Liquidity gate refinements** (separate entry/exit, imbalance, funding) | `86897e5` |
 | Nov 23 | **Cost-to-edge optimization** (cost tracking, stake power adjust, TOD model) | `86897e5` |
+| Nov 23 | **Circuit breaker** (daily loss %, consecutive losses, drawdown, cooldown) | `362b33f` |
+| Nov 23 | **Position sync improvements** (existing SL/TP detection, dust validation, trailing sync) | `362b33f` |
 
 ---
 
@@ -147,14 +149,31 @@
 
 | # | Issue | Location | Severity | Status |
 |---|-------|----------|----------|--------|
-| 5 | **Testnet vs Mainnet logic**: Multiple `if is_testnet_env():` branches with different behavior | `strategy.py`, `broker.py`, `main.py` | **MEDIUM** | 🟡 Reviewed |
-| 6 | **Position sync on startup**: `sync_exchange_position()` may not handle all edge cases | `strategy.py` | **MEDIUM** | 🟡 Reviewed |
-| 7 | **No circuit breaker**: No max daily loss limit or consecutive loss halt | `strategy.py` | **MEDIUM** | 🟡 Planned |
+| 5 | **Testnet vs Mainnet logic**: Multiple `if is_testnet_env():` branches with different behavior | `strategy.py`, `broker.py`, `main.py` | **MEDIUM** | ✅ Reviewed - testnet simulates orders due to API limitations |
+| 6 | **Position sync on startup**: `sync_exchange_position()` may not handle all edge cases | `strategy.py` | **MEDIUM** | ✅ Fixed in `362b33f` - detects existing SL/TP, validates size, syncs trailing state |
+| 7 | **No circuit breaker**: No max daily loss limit or consecutive loss halt | `strategy.py` | **MEDIUM** | ✅ Fixed in `362b33f` - daily loss %, consecutive losses, drawdown, cooldown |
 
 ### Low Severity / Code Quality
 
 | # | Issue | Location | Severity | Status |
 |---|-------|----------|----------|--------|
-| 8 | **Magic numbers**: Hardcoded values (0.5 for SL tightening, 1.2 for ATR mult) | `strategy.py`, `config.py` | **LOW** | 🟢 Configurable |
-| 9 | **Large functions**: `_check_exits()` >100 lines, `_sync_trailing_orders()` >100 lines | `strategy.py` | **LOW** | 🟢 Refactor later |
-| 10 | **Inconsistent naming**: Mix of `snake_case` and `camelCase` in some variables | Various | **LOW** | 🟢 Style only |
+| 8 | **Magic numbers**: Hardcoded values (0.5 for SL tightening, 1.2 for ATR mult) | `strategy.py`, `config.py` | **LOW** | 🟢 Configurable - most moved to config.py |
+| 9 | **Large functions**: `_check_exits()` >100 lines, `_sync_trailing_orders()` >100 lines | `strategy.py` | **LOW** | 🟢 Functional - refactor optional |
+| 10 | **Inconsistent naming**: Mix of `snake_case` and `camelCase` in some variables | Various | **LOW** | 🟢 Style only - no functional impact |
+
+---
+
+## Remaining Items (Optional / Nice-to-Have)
+
+### Code Quality Improvements
+- **Refactor large functions**: Split `_check_exits()` and `_sync_trailing_orders()` into smaller helpers
+- **Naming consistency**: Standardize all variables to `snake_case`
+- **Type hints**: Add more comprehensive type annotations
+
+### Infrastructure
+- **Monitoring & Alerting**: Health check endpoint, LIQ_EXIT frequency alerts, daily PnL summary
+- **Automated Retraining Pipeline**: Weekly retraining schedule, A/B testing, rollback mechanism
+
+### Testing
+- **Integration tests**: End-to-end test coverage for all exit paths
+- **Load testing**: Verify performance under high-frequency market data
