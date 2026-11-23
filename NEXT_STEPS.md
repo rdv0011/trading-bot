@@ -6,10 +6,11 @@
 - **Commit `fd24a78`**: Fixed `atr_pct` undefined error in `_sync_trailing_orders`
 - Trailing SL now functional from iteration 1
 
-### 2. Relax Time-Weighted SL Tightening 🔄 PENDING
-- **Current**: SL tightens to 50% at 50% of `max_hold_hours`
-- **Proposed**: Move trigger from 50% → 75% of `max_hold_hours`
-- **File**: `strategy.py` `_check_exits()` method
+### 2. Relax Time-Weighted SL Tightening ✅ DONE
+- **Commit `221b753`**: Trigger moved from 50% → 75% of `max_hold_hours`
+- **Added**: Progressive tightening option (TIME_WEIGHTED_SL_PROGRESSIVE)
+- **Config**: `TIME_WEIGHTED_SL_TRIGGER=0.75`, `TIME_WEIGHTED_SL_PROGRESSIVE=True`
+- **File**: `strategy.py` `_check_exits()` method, `config.py`
 - **Rationale**: Last trade hit tightened SL exactly at 50% mark (3.87h / 7.55h = 51%)
 
 ### 3. Add Volatility Filter for Entries ✅ DONE
@@ -47,10 +48,11 @@
 - Scale stake fraction by `1 / abs_vol` when abs_vol > threshold
 - Reduces exposure during elevated volatility
 
-### 8. Trailing SL Improvements
-- Add minimum trailing distance (prevent too-tight trails)
-- Add "profit lock" at 1R/2R/3R milestones
-- Consider chandelier exit variant
+### 8. Trailing SL Improvements ✅ PARTIAL (221b753)
+- ✅ **Done**: Trail from entry immediately (TRAILING_START_IMMEDIATE=True)
+- ✅ **Done**: Floor at initial SL until 1R, then breakeven
+- ⏳ Minimum trailing distance (prevent too-tight trails)
+- ⏳ Chandelier exit variant
 
 ### 9. Liquidity Gate Refinements
 - Separate entry vs exit thresholds
@@ -61,6 +63,11 @@
 - Track realized vs expected costs per trade
 - Adjust confidence stake power based on recent cost_ratio
 - Add slippage model per time-of-day
+
+### 11. Profit Taking / Partial Exits ✅ DONE (221b753)
+- ✅ **Done**: R-multiple partial exits at 1R/2R/3R (33%/33%/34%)
+- ✅ **Done**: 5% buffer triggers at 0.95R/1.95R/2.95R
+- ✅ **Done**: Remaining position protected by trailing SL
 
 ---
 
@@ -99,6 +106,13 @@
 | Nov 20 | Fix SL fraction mutation bug | `b1fb2f4` |
 | Nov 20 | Add abs_vol entry gate | `b1fb2f4` |
 | Nov 20 | Add error logging for bare except blocks | `b1fb2f4` |
+| Nov 20 | Fix f-string format specifier bug in SCALE-IN logging | `8106e28` |
+| Nov 23 | **Partial exit buffer** (5% at 0.95R/1.95R/2.95R) | `221b753` |
+| Nov 23 | **Scale-in minimum profit** (0.5R required) | `221b753` |
+| Nov 23 | **Scale-in stake reduced** (33% from 50%) | `221b753` |
+| Nov 23 | **Trailing SL from entry** (immediate, floor at init SL → breakeven at 1R) | `221b753` |
+| Nov 23 | **Time-weighted SL** (trigger 75%, progressive tightening) | `221b753` |
+| Nov 23 | **Fix trailing SL logic** (correct floor behavior) | `221b753` |
 
 ---
 
