@@ -283,6 +283,13 @@ COST_SLIPPAGE_TOD_WINDOWS = {"00-06": 1.5, "06-12": 1.0, "12-18": 0.8, "18-24": 
 TRADE_COOLDOWN_ENABLED = _get_bool("TRADE_COOLDOWN_ENABLED", True)
 TRADE_COOLDOWN_MINUTES = 30           # minimum gap between new entries
 
+# ── Circuit Breaker (Risk Management) ────────────────────────────────────
+CIRCUIT_BREAKER_ENABLED = _get_bool("CIRCUIT_BREAKER_ENABLED", True)      # enable circuit breaker
+CIRCUIT_BREAKER_MAX_DAILY_LOSS_PCT = 5.0     # max daily loss % of equity before halt (e.g., 5%)
+CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES = 3   # max consecutive losing trades before halt
+CIRCUIT_BREAKER_COOLDOWN_HOURS = 4           # hours to wait before resuming after trigger
+CIRCUIT_BREAKER_MAX_DRAWDOWN_PCT = 10.0      # max total drawdown % before hard halt
+
 # ── Startup Position Adoption ──────────────────────────────────────────
 # Adopt an exchange position left open by a previous process (crash / killed
 # session) so exits manage it instead of trading blindly beside it. When

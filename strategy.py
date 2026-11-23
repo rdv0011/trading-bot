@@ -45,6 +45,9 @@ from config import (
     LIQ_FUNDING_ENABLED, LIQ_FUNDING_THRESHOLD_BPS,
     COST_TRACKING_ENABLED, COST_STAKE_POWER_ADJUST, COST_STAKE_POWER_MIN,
     COST_STAKE_POWER_MAX, COST_SLIPPAGE_TOD_ENABLED, COST_SLIPPAGE_TOD_WINDOWS,
+    CIRCUIT_BREAKER_ENABLED, CIRCUIT_BREAKER_MAX_DAILY_LOSS_PCT,
+    CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES, CIRCUIT_BREAKER_COOLDOWN_HOURS,
+    CIRCUIT_BREAKER_MAX_DRAWDOWN_PCT,
     is_testnet_env,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
@@ -228,6 +231,16 @@ class DualMLStrategy:
         self._cost_history: List[Dict] = []           # Track realized costs per trade
         self._recent_cost_ratios: List[float] = []    # Track cost/edge ratios
         self._slippage_tod_history: Dict[str, List[float]] = {}  # slippage by time window
+
+        # Circuit breaker state
+        self._daily_pnl: float = 0.0                  # Track daily PnL
+        self._daily_start_equity: float = 0.0         # Equity at start of day
+        self._last_day: int = 0                       # Track day rollover
+        self._consecutive_losses: int = 0             # Track consecutive losing trades
+        self._circuit_breaker_triggered: bool = False # Whether circuit breaker is active
+        self._circuit_breaker_trigger_time: Optional[datetime] = None  # When triggered
+        self._circuit_breaker_reason: str = ""        # Reason for trigger
+        self._max_equity_seen: float = 0.0            # Track peak equity for drawdown
 
         # Phase 2: rolling raw prediction history (for retrain cadence only)
 
@@ -485,6 +498,16 @@ class DualMLStrategy:
         self._last_synced_tp_price = None
         self._last_sl_update_ts = 0.0
 
+        # Circuit breaker state (preserve across simulations, but reset on live restart)
+        # self._daily_pnl = 0.0
+        # self._daily_start_equity = 0.0
+        # self._last_day = 0
+        # self._consecutive_losses = 0
+        # self._circuit_breaker_triggered = False
+        # self._circuit_breaker_trigger_time = None
+        # self._circuit_breaker_reason = ""
+        # self._max_equity_seen = 0.0
+
     def _retrain_tactical(self, df_raw: pd.DataFrame) -> None:
         """Retrain the tactical model on the recent window (mirrors walk-forward)."""
         from catboost import CatBoostRegressor
@@ -601,6 +624,29 @@ class DualMLStrategy:
         self.scale_count = 0
         self.same_dir_streak = 0
         self.reversal_streak = 0
+        self._partial_exits_hit = 0
+        self._next_partial_r_level = 1
+
+        # Try to detect existing SL/TP from exchange (best effort)
+        existing_sl = None
+        existing_tp = None
+        if hasattr(self.broker, "get_open_algo_orders"):
+            try:
+                open_orders = self.broker.get_open_algo_orders(symbol)
+                for order in open_orders:
+                    if order.get("type") == "STOP_MARKET" and order.get("side") == ("SELL" if side == "long" else "BUY"):
+                        existing_sl = float(order.get("stopPrice", 0))
+                    elif order.get("type") == "TAKE_PROFIT_MARKET" and order.get("side") == ("SELL" if side == "long" else "BUY"):
+                        existing_tp = float(order.get("stopPrice", 0))
+            except Exception as e:
+                log_debug(f"Position sync: could not fetch open algo orders: {e}")
+
+        # Validate position size is reasonable (not dust)
+        min_qty = 1e-8
+        if abs(amount) < min_qty:
+            log_warning(f"Position sync: position size {abs(amount)} too small (dust), starting flat")
+            self.position = 0.0
+            return True
 
         # Rebuild a trade record so exit accounting/PnL logging works normally.
         meta = self.current_meta or DEFAULT_META.copy()
@@ -626,6 +672,18 @@ class DualMLStrategy:
             strategic_params=meta.copy(),
             equity_before=self.broker.get_equity(),
         )
+
+        # Sync trailing state if we found existing SL/TP
+        if existing_sl is not None:
+            self._last_synced_sl_price = existing_sl
+            if hasattr(self.broker, "_last_synced_sl_price"):
+                self.broker._last_synced_sl_price = existing_sl
+            log_info(f"Position sync: adopted existing SL={existing_sl:.2f}")
+        if existing_tp is not None:
+            self._last_synced_tp_price = existing_tp
+            if hasattr(self.broker, "_last_synced_tp_price"):
+                self.broker._last_synced_tp_price = existing_tp
+            log_info(f"Position sync: adopted existing TP={existing_tp:.2f}")
 
         log_info(
             f"ADOPTED existing {side.upper()} qty={abs(amount):.6f} "
@@ -800,11 +858,100 @@ class DualMLStrategy:
             fallback=self.threshold,
         )
 
+    def _check_circuit_breaker(self, now: datetime) -> bool:
+        """Check circuit breaker conditions. Returns True if trading should continue, False if halted."""
+        if not _cfg_flag("CIRCUIT_BREAKER_ENABLED", True, self.config):
+            return True
+
+        # Initialize daily tracking on first run
+        current_day = now.timetuple().tm_yday
+        if self._last_day == 0:
+            self._last_day = current_day
+            self._daily_start_equity = self.broker.get_equity()
+            self._max_equity_seen = self._daily_start_equity
+            self._daily_pnl = 0.0
+
+        # Day rollover: reset daily PnL
+        if current_day != self._last_day:
+            self._last_day = current_day
+            self._daily_start_equity = self.broker.get_equity()
+            self._max_equity_seen = self._daily_start_equity
+            self._daily_pnl = 0.0
+            log_info(f"[CIRCUIT BREAKER] New day: reset daily PnL tracking, start_equity={self._daily_start_equity:.2f}")
+
+        # Check cooldown period after trigger
+        if self._circuit_breaker_triggered:
+            if self._circuit_breaker_trigger_time is not None:
+                elapsed_hours = (now - self._circuit_breaker_trigger_time).total_seconds() / 3600.0
+                cooldown_hours = float(_cfg_flag("CIRCUIT_BREAKER_COOLDOWN_HOURS", 4, self.config))
+                if elapsed_hours >= cooldown_hours:
+                    # Cooldown expired, reset circuit breaker
+                    self._circuit_breaker_triggered = False
+                    self._circuit_breaker_trigger_time = None
+                    self._consecutive_losses = 0
+                    self._daily_pnl = 0.0
+                    self._daily_start_equity = self.broker.get_equity()
+                    self._max_equity_seen = self._daily_start_equity
+                    log_info(f"[CIRCUIT BREAKER] Cooldown expired ({cooldown_hours:.0f}h), resuming trading")
+                else:
+                    log_info(f"[CIRCUIT BREAKER] Trading halted: {self._circuit_breaker_reason} (cooldown: {cooldown_hours - elapsed_hours:.1f}h remaining)")
+                    return False
+            else:
+                return False
+
+        # Get current equity
+        current_equity = self.broker.get_equity()
+
+        # Update max equity seen (for drawdown calculation)
+        if current_equity > self._max_equity_seen:
+            self._max_equity_seen = current_equity
+
+        # 1. Max daily loss check
+        max_daily_loss_pct = float(_cfg_flag("CIRCUIT_BREAKER_MAX_DAILY_LOSS_PCT", 5.0, self.config))
+        if self._daily_start_equity > 0:
+            daily_loss_pct = (self._daily_start_equity - current_equity) / self._daily_start_equity * 100.0
+            if daily_loss_pct >= max_daily_loss_pct:
+                self._trigger_circuit_breaker(f"Daily loss {daily_loss_pct:.2f}% >= {max_daily_loss_pct:.1f}%")
+                return False
+
+        # 2. Max drawdown check (from peak equity)
+        max_drawdown_pct = float(_cfg_flag("CIRCUIT_BREAKER_MAX_DRAWDOWN_PCT", 10.0, self.config))
+        if self._max_equity_seen > 0:
+            drawdown_pct = (self._max_equity_seen - current_equity) / self._max_equity_seen * 100.0
+            if drawdown_pct >= max_drawdown_pct:
+                self._trigger_circuit_breaker(f"Max drawdown {drawdown_pct:.2f}% >= {max_drawdown_pct:.1f}%")
+                return False
+
+        # 3. Consecutive losses check
+        max_consecutive = int(_cfg_flag("CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES", 3, self.config))
+        if self._consecutive_losses >= max_consecutive:
+            self._trigger_circuit_breaker(f"Consecutive losses {self._consecutive_losses} >= {max_consecutive}")
+            return False
+
+        return True
+
+    def _trigger_circuit_breaker(self, reason: str) -> None:
+        """Trigger the circuit breaker, halting all trading."""
+        self._circuit_breaker_triggered = True
+        self._circuit_breaker_trigger_time = datetime.now()
+        self._circuit_breaker_reason = reason
+        log_warning(f"[CIRCUIT BREAKER TRIGGERED] {reason} - Trading halted for {_cfg_flag('CIRCUIT_BREAKER_COOLDOWN_HOURS', 4, self.config)} hours")
+
+        # Close any open position immediately
+        if self.position != 0:
+            current_price = self.broker.get_last_price()
+            if current_price > 0:
+                self._exit_position("circuit_breaker", current_price, datetime.now())
+
     def _live_iteration(self) -> None:
         """Fetch data, predict, and act on the latest candle."""
         now = datetime.now()
         iteration = getattr(self, "_iteration", 0)
         self._iteration = iteration + 1
+
+        # Circuit breaker check (run first, before any trading logic)
+        if not self._check_circuit_breaker(now):
+            return
 
         # Tactical (15m) data + feature frame (Phase 1: TTL cache)
         df_tactical = self.broker.get_historical_prices(
@@ -2393,6 +2540,15 @@ class DualMLStrategy:
                 f"slippage={slippage:.4f} spread={spread:.4f} commission={commission:.4f} "
                 f"financing={financing:.4f} expected_profit={avg_expected_profit:.4f}"
             )
+
+        # Circuit breaker: track daily PnL and consecutive losses
+        self._daily_pnl += raw_pnl
+        if raw_pnl < 0:
+            self._consecutive_losses += 1
+            log_debug(f"[CIRCUIT BREAKER] Consecutive losses: {self._consecutive_losses}")
+        else:
+            self._consecutive_losses = 0
+            log_debug(f"[CIRCUIT BREAKER] Winning trade, consecutive losses reset to 0")
 
         log_info(f"LIVE EXIT {reason.upper()} @ {actual_fill:.2f}")
 
