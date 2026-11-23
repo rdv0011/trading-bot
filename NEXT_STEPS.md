@@ -23,17 +23,17 @@
 
 ## Medium Term: Initialization Enhancements
 
-### 4. Seed Volatility Regime History 📋 PLANNED
-- **Function exists**: `compute_vol_ratio_from_klines()` in `data.py`
-- **Use for**: `vol_ratio` (extreme vol gate) adaptive threshold
-- **Source**: 7-day klines already fetched at startup
-- **Integration**: Add `seed_vol_history()` method in `strategy.py`
+### 4. Seed Volatility Regime History ✅ DONE
+- **Commit `8ee481d`**: Added `seed_vol_history()` in `strategy.py` using `compute_vol_ratio_from_klines()` on startup klines
+- **Config**: `ADAPTIVE_VOL_ENABLED`, `ADAPTIVE_VOL_LOOKBACK=200`, `ADAPTIVE_VOL_QUANTILE=0.95`, `ADAPTIVE_VOL_MIN=1.2`, `ADAPTIVE_VOL_MAX=3.0`
+- **Integration**: Extreme vol gate now uses adaptive threshold (95th percentile of recent vol_ratio) when history available
+- **Log**: `[VOL INIT] Seeded vol_ratio_history with 50 samples median=0.985`
 
-### 5. Seed Spread/Depth Metrics 📋 PLANNED
-- **Source**: REST depth endpoint (`https://fapi.binance.com/fapi/v1/depth`)
-- **Function exists**: `_fetch_snapshot_rest()` in `orderbook.py`
-- **Use for**: Adaptive spread/depth thresholds in liquidity gates
-- **Integration**: Add `estimate_initial_spread_depth()` in `orderbook.py`
+### 5. Seed Spread/Depth Metrics ✅ DONE
+- **Commit `8ee481d`**: Added `seed_spread_depth_history()` in `strategy.py` fetching orderbook snapshots via REST
+- **Config**: `ADAPTIVE_BOOK_ENABLED`, `ADAPTIVE_BOOK_LOOKBACK=200`, `ADAPTIVE_SPREAD_QUANTILE=0.75`, `ADAPTIVE_SPREAD_MIN=2.0`, `ADAPTIVE_SPREAD_MAX=20.0`, `ADAPTIVE_DEPTH_QUANTILE=0.25`, `ADAPTIVE_DEPTH_MIN=20000`, `ADAPTIVE_DEPTH_MAX=500000`
+- **Integration**: Liquidity entry/exit gates now use adaptive spread/depth thresholds when history available
+- **Log**: `[BOOK INIT] Seeded spread_history (20 samples, median=0.02 bps) and depth_history (20 samples, median=15355747 USD)`
 
 ### 6. Prediction History Pre-seeding 📋 BLOCKED
 - **Status**: Cannot pre-seed — requires model inference
@@ -113,6 +113,8 @@
 | Nov 23 | **Trailing SL from entry** (immediate, floor at init SL → breakeven at 1R) | `221b753` |
 | Nov 23 | **Time-weighted SL** (trigger 75%, progressive tightening) | `221b753` |
 | Nov 23 | **Fix trailing SL logic** (correct floor behavior) | `221b753` |
+| Nov 23 | **Seed vol_ratio history** (adaptive extreme vol threshold) | `8ee481d` |
+| Nov 23 | **Seed spread/depth history** (adaptive liquidity gates) | `8ee481d` |
 
 ---
 
