@@ -331,6 +331,15 @@ def live_mode(args):
     else:
         log_warning("Insufficient klines data for ATR history seeding")
 
+    # Seed vol_ratio history from the initial klines fetch for adaptive extreme vol threshold
+    if df_sample is not None and len(df_sample) > 60:
+        strategy.seed_vol_history(df_sample, num_samples=50)
+    else:
+        log_warning("Insufficient klines data for vol_ratio history seeding")
+
+    # Seed spread/depth history from REST snapshots for adaptive liquidity gates
+    strategy.seed_spread_depth_history(num_samples=20)
+
     # Adopt any position left open by a previous process so exits manage it
     # instead of trading blindly beside it (refuse to start if disabled).
     if not strategy.sync_exchange_position():

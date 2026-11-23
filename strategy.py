@@ -43,6 +43,7 @@ from logger import log_info, log_debug, log_warning, log_error, log_trade_entry,
 from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
 from data import (make_features_df, add_strategic_features_df, make_labels_df,
                   adaptive_threshold, adaptive_liquidity_threshold, adaptive_trailing_threshold,
+                  adaptive_vol_threshold, adaptive_spread_threshold, adaptive_depth_threshold,
                   compute_atr_from_klines, compute_vol_ratio_from_klines,
                   classify_vol_state, classify_abs_vol_state)
 
@@ -187,6 +188,13 @@ class DualMLStrategy:
         # Adaptive trailing SL update threshold state
         self.atr_history: List[float] = []
 
+        # Adaptive extreme volatility threshold state
+        self.vol_ratio_history: List[float] = []
+
+        # Adaptive spread/depth threshold state
+        self.spread_history: List[float] = []
+        self.depth_history: List[float] = []
+
         # Phase 2/3 state (mirrors MockBroker in simulate.py)
         self.trail_extreme = 0.0
         self.scale_count = 0
@@ -289,6 +297,124 @@ class DualMLStrategy:
             f"median={valid_atr.median():.2f} (raw median={atr_series.dropna().median():.2f})"
         )
 
+    def seed_vol_history(self, df_klines: pd.DataFrame, num_samples: int = 50) -> None:
+        """Seed the vol_ratio_history with values computed from historical klines.
+        
+        This gives the adaptive extreme volatility threshold a realistic starting point
+        instead of using the hardcoded fallback during warmup.
+        
+        Args:
+            df_klines: DataFrame with OHLCV columns (high, low, close)
+            num_samples: Number of history samples to pre-populate (default 50)
+        """
+        if df_klines is None or len(df_klines) < 60:  # Need at least long_window (48) + 1
+            log_warning("Insufficient klines data for vol_ratio history seeding")
+            return
+        
+        # Compute vol_ratio from klines using sliding windows
+        close = df_klines["close"]
+        log_ret = np.log(close / close.shift(1))
+        
+        short_window = 12
+        long_window = 48
+        
+        # Calculate rolling vol_ratio for each point
+        vol_short = log_ret.rolling(short_window).std()
+        vol_long = log_ret.rolling(long_window).std()
+        vol_ratio_series = vol_short / vol_long.replace(0, np.nan)
+        
+        # Get recent valid values
+        valid_ratios = vol_ratio_series.dropna().tail(min(num_samples, len(vol_ratio_series.dropna())))
+        if len(valid_ratios) < 5:
+            log_warning(f"Only {len(valid_ratios)} valid vol_ratio values, need at least 5")
+            return
+        
+        # Store with slight variation to avoid percentile edge cases
+        import random
+        self.vol_ratio_history = [
+            float(val * (1 + random.uniform(-0.02, 0.02))) 
+            for val in valid_ratios
+        ]
+        
+        log_info(
+            f"[VOL INIT] Seeded vol_ratio_history with {len(self.vol_ratio_history)} samples "
+            f"median={valid_ratios.median():.3f} (raw median={vol_ratio_series.dropna().median():.3f})"
+        )
+
+    def seed_spread_depth_history(self, num_samples: int = 20) -> None:
+        """Seed spread/depth history by fetching orderbook snapshots via REST.
+        
+        This gives the adaptive liquidity gate thresholds realistic starting points
+        instead of using hardcoded fallbacks during warmup.
+        
+        Args:
+            num_samples: Number of snapshots to fetch (default 20)
+        """
+        try:
+            from orderbook import _fetch_snapshot_rest
+        except ImportError:
+            log_warning("Orderbook module not available, skipping spread/depth seeding")
+            return
+        
+        spreads = []
+        depths = []
+        
+        for i in range(num_samples):
+            snap = _fetch_snapshot_rest(timeout=5.0)
+            if snap is None:
+                continue
+            
+            try:
+                bids = snap.get("bids", [])
+                asks = snap.get("asks", [])
+                if not bids or not asks:
+                    continue
+                
+                best_bid = float(bids[0][0])
+                best_ask = float(asks[0][0])
+                mid = (best_bid + best_ask) / 2.0
+                spread_bps = (best_ask - best_bid) / mid * 10000.0
+                
+                # Calculate depth within 50 bps
+                depth_span = mid * 50.0 / 10000.0
+                depth_bid = sum(float(p) * float(q) for p, q in bids if float(p) >= mid - depth_span)
+                depth_ask = sum(float(p) * float(q) for p, q in asks if float(p) <= mid + depth_span)
+                depth_total = depth_bid + depth_ask
+                
+                if spread_bps > 0 and depth_total > 0:
+                    spreads.append(spread_bps)
+                    depths.append(depth_total)
+                    
+            except Exception as e:
+                log_debug(f"Failed to parse snapshot {i}: {e}")
+                continue
+            
+            # Small delay between requests
+            import time
+            time.sleep(0.1)
+        
+        if len(spreads) < 5 or len(depths) < 5:
+            log_warning(f"Only {len(spreads)} spread / {len(depths)} depth samples, need at least 5 each")
+            return
+        
+        # Store with slight variation
+        import random
+        self.spread_history = [
+            float(val * (1 + random.uniform(-0.01, 0.01))) 
+            for val in spreads
+        ]
+        self.depth_history = [
+            float(val * (1 + random.uniform(-0.02, 0.02))) 
+            for val in depths
+        ]
+        
+        log_info(
+            f"[BOOK INIT] Seeded spread_history ({len(self.spread_history)} samples, "
+            f"median={np.median(spreads):.2f} bps) and "
+            f"depth_history ({len(self.depth_history)} samples, "
+            f"median={np.median(depths):.0f} USD)"
+        )
+
     # ── Simulation Mode ────────────────────────────────────────────────
     def run_simulation(
         self,
@@ -333,6 +459,13 @@ class DualMLStrategy:
         self._feature_cache = {}
         self._last_atr14 = 0.0
         self._initial_qty = 0.0
+
+        # Adaptive threshold histories (seeded at startup, not reset on simulation)
+        # self.trade_intensity_history = []  # Keep seeded values
+        # self.atr_history = []              # Keep seeded values
+        # self.vol_ratio_history = []        # Keep seeded values
+        # self.spread_history = []           # Keep seeded values
+        # self.depth_history = []            # Keep seeded values
 
         # Hybrid trailing sync state
         self._last_synced_sl_price = None
@@ -752,9 +885,31 @@ class DualMLStrategy:
         vol_12 = last_row.get("vol_12", 0.0)
         vol_48 = last_row.get("vol_48", 0.0)
         vol_ratio = vol_12 / max(vol_48, 1e-8)
-        vol_state = classify_vol_state(
-            vol_ratio, float(_cfg_flag("EXTREME_VOL_RATIO", 1.8, self.config))
-        )
+        
+        # Update vol_ratio history for adaptive extreme vol threshold
+        if np.isfinite(vol_ratio) and vol_ratio > 0:
+            self.vol_ratio_history.append(float(vol_ratio))
+            lookback = int(_cfg_flag("ADAPTIVE_VOL_LOOKBACK", 200, self.config))
+            if len(self.vol_ratio_history) > lookback:
+                self.vol_ratio_history = self.vol_ratio_history[-lookback:]
+        
+        # Use adaptive threshold if history is available, else fallback to static
+        if _cfg_flag("ADAPTIVE_VOL_ENABLED", True, self.config) and len(self.vol_ratio_history) >= 20:
+            extreme_vol_threshold = adaptive_vol_threshold(
+                pd.Series(self.vol_ratio_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_VOL_QUANTILE", 0.95, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_VOL_MIN", 1.2, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_VOL_MAX", 3.0, self.config)),
+                fallback=float(_cfg_flag("EXTREME_VOL_RATIO", 1.8, self.config)),
+            )
+            vol_mode = "adapt"
+        else:
+            extreme_vol_threshold = float(_cfg_flag("EXTREME_VOL_RATIO", 1.8, self.config))
+            vol_mode = "static"
+        
+        vol_state = classify_vol_state(vol_ratio, extreme_vol_threshold)
+        
         # Absolute volume ratio (Oct 5 post-mortem: relative vol_ratio masks volume vacuums)
         abs_vol_ratio = last_row.get("abs_vol_ratio", 1.0)
         abs_vol_state = classify_abs_vol_state(
@@ -778,7 +933,7 @@ class DualMLStrategy:
                 signal = "hold"
                 log_warning(
                     f"GATE vol: extreme vol_ratio={vol_ratio:.2f} "
-                    f"(>={_cfg_flag('EXTREME_VOL_RATIO', 1.8, self.config)}) "
+                    f"(>={extreme_vol_threshold:.2f} {vol_mode}) "
                     f"blocked {pred:+.6f} entry"
                 )
 
@@ -829,13 +984,18 @@ class DualMLStrategy:
                 else "nan_pred"
             )
             thr_detail = ""
+            vol_detail = ""
             if thr_mode == "adapt":
                 q95 = int(_cfg_flag("ADAPTIVE_QUANTILE", 0.95, self.config) * 100)
                 lookback = _cfg_flag("ADAPTIVE_LOOKBACK", 200, self.config)
                 thr_detail = f" q95={q95} lookback={lookback} preds={len(self.pred_history)}"
+            if vol_mode == "adapt":
+                vq = int(_cfg_flag("ADAPTIVE_VOL_QUANTILE", 0.95, self.config) * 100)
+                vlookback = _cfg_flag("ADAPTIVE_VOL_LOOKBACK", 200, self.config)
+                vol_detail = f" q{vq} lookback={vlookback} hist={len(self.vol_ratio_history)}"
             log_info(
                 f"DECISION iter={self._iteration} pred={pred:+.6f} "
-                f"thr={thr:.6f}({thr_mode}{thr_detail}) regime={regime} vol={vol_ratio:.2f}({vol_state}) "
+                f"thr={thr:.6f}({thr_mode}{thr_detail}) regime={regime} vol={vol_ratio:.2f}({vol_state}{vol_detail}) "
                 f"abs_vol={abs_vol_ratio:.3f}({abs_vol_state}) "
                 f"pos={self.position:+.6f} price={current_price:.2f} "
                 f"atr14={self._last_atr14:.4f} cooldown_left={cooldown_left:.1f}m "
@@ -979,11 +1139,59 @@ class DualMLStrategy:
         snap = health["snap"]
         if not snap["fresh"] and not _cfg_flag("LIQUIDITY_FAIL_OPEN_ON_STALE", True, self.config):
             return "stale_book"
-        if snap["spread_bps"] > float(_cfg_flag("LIQ_MAX_SPREAD_BPS", 10.0, self.config)):
+        
+        # Update spread/depth history for adaptive thresholds
+        spread_bps = snap.get("spread_bps", 0)
+        depth_total = snap.get("depth_total_usd", 0)
+        if spread_bps > 0:
+            self.spread_history.append(float(spread_bps))
+            lookback = int(_cfg_flag("ADAPTIVE_BOOK_LOOKBACK", 200, self.config))
+            if len(self.spread_history) > lookback:
+                self.spread_history = self.spread_history[-lookback:]
+        if depth_total > 0:
+            self.depth_history.append(float(depth_total))
+            if len(self.depth_history) > lookback:
+                self.depth_history = self.depth_history[-lookback:]
+        
+        # Adaptive or static spread threshold
+        if _cfg_flag("ADAPTIVE_BOOK_ENABLED", True, self.config) and len(self.spread_history) >= 20:
+            max_spread = adaptive_spread_threshold(
+                pd.Series(self.spread_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_SPREAD_QUANTILE", 0.75, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_SPREAD_MIN", 2.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_SPREAD_MAX", 20.0, self.config)),
+                fallback=float(_cfg_flag("LIQ_MAX_SPREAD_BPS", 10.0, self.config)),
+            )
+            spread_mode = "adapt"
+        else:
+            max_spread = float(_cfg_flag("LIQ_MAX_SPREAD_BPS", 10.0, self.config))
+            spread_mode = "static"
+        
+        if spread_bps > max_spread:
+            log_debug(f"GATE spread: {spread_bps:.1f}bps > {max_spread:.1f}bps ({spread_mode})")
             return "spread"
+        
+        # Adaptive or static depth threshold
         side_depth = snap["depth_ask_usd"] if side == "long" else snap["depth_bid_usd"]
-        if side_depth < float(_cfg_flag("LIQ_MIN_DEPTH_USD", 50000.0, self.config)):
+        if _cfg_flag("ADAPTIVE_BOOK_ENABLED", True, self.config) and len(self.depth_history) >= 20:
+            min_depth = adaptive_depth_threshold(
+                pd.Series(self.depth_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_DEPTH_QUANTILE", 0.25, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_DEPTH_MIN", 20000.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_DEPTH_MAX", 500000.0, self.config)),
+                fallback=float(_cfg_flag("LIQ_MIN_DEPTH_USD", 50000.0, self.config)),
+            )
+            depth_mode = "adapt"
+        else:
+            min_depth = float(_cfg_flag("LIQ_MIN_DEPTH_USD", 50000.0, self.config))
+            depth_mode = "static"
+        
+        if side_depth < min_depth:
+            log_debug(f"GATE depth: {side_depth:.0f} < {min_depth:.0f} ({depth_mode})")
             return "depth"
+        
         if snap["vanish_pct"] > float(_cfg_flag("LIQ_MAX_VANISH_PCT", 60.0, self.config)):
             return "vanish"
         buy_ratio = snap["aggressor_buy_ratio"]
@@ -1048,16 +1256,56 @@ class DualMLStrategy:
         else:
             min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 25000.0, self.config))
         
+        # Update spread/depth history for adaptive thresholds
+        if spread_bps > 0:
+            self.spread_history.append(float(spread_bps))
+            lookback = int(_cfg_flag("ADAPTIVE_BOOK_LOOKBACK", 200, self.config))
+            if len(self.spread_history) > lookback:
+                self.spread_history = self.spread_history[-lookback:]
+        if depth > 0:
+            self.depth_history.append(float(depth))
+            if len(self.depth_history) > lookback:
+                self.depth_history = self.depth_history[-lookback:]
+        
         # Always log liquidity state when in position (for debugging)
         if self.position != 0 and hasattr(self, '_liq_log_counter'):
             self._liq_log_counter += 1
         else:
             self._liq_log_counter = 1
         
+        # Adaptive spread/depth thresholds for exit
+        if _cfg_flag("ADAPTIVE_BOOK_ENABLED", True, self.config) and len(self.spread_history) >= 20:
+            max_spread = adaptive_spread_threshold(
+                pd.Series(self.spread_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_SPREAD_QUANTILE", 0.75, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_SPREAD_MIN", 2.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_SPREAD_MAX", 20.0, self.config)),
+                fallback=float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 100.0, self.config)),
+            )
+            spread_mode = "adapt"
+        else:
+            max_spread = float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 100.0, self.config))
+            spread_mode = "static"
+        
+        if _cfg_flag("ADAPTIVE_BOOK_ENABLED", True, self.config) and len(self.depth_history) >= 20:
+            min_depth = adaptive_depth_threshold(
+                pd.Series(self.depth_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_DEPTH_QUANTILE", 0.25, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_DEPTH_MIN", 20000.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_DEPTH_MAX", 500000.0, self.config)),
+                fallback=float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 500000.0, self.config)),
+            )
+            depth_mode = "adapt"
+        else:
+            min_depth = float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 500000.0, self.config))
+            depth_mode = "static"
+        
         if self.position != 0 and self._liq_log_counter % 10 == 0:  # every 10 iterations (~10 min)
             log_info(
                 f"[LIQ STATE] pos={self.position} intensity={intensity:.0f}/{min_intensity:.0f} "
-                f"spread={spread_bps:.1f}/{100.0} depth={depth:.0f}/{500000.0} "
+                f"spread={spread_bps:.1f}/{max_spread:.1f}({spread_mode}) depth={depth:.0f}/{min_depth:.0f}({depth_mode}) "
                 f"vanish={vanish:.1f}% tape={tape_trades:.0f} "
                 f"adaptive={'on' if _cfg_flag('ADAPTIVE_LIQ_ENABLED', True, self.config) else 'off'}"
             )
@@ -1084,20 +1332,18 @@ class DualMLStrategy:
                 f"tape_trades={tape_trades:.0f}/min)"
             )
             return "liq_exit"
-        max_spread = float(_cfg_flag("LIQ_EXIT_SPREAD_BPS", 100.0, self.config))
         if spread_bps > max_spread:
             log_warning(
                 f"LIQ_EXIT triggered: spread={spread_bps:.1f}bps "
-                f"> threshold={max_spread:.1f}bps "
+                f"> threshold={max_spread:.1f}bps ({spread_mode}) "
                 f"(intensity={intensity:.0f}USD/s, "
                 f"depth={depth:.0f}USD)"
             )
             return "liq_exit"
-        min_depth = float(_cfg_flag("LIQ_EXIT_MIN_DEPTH_USD", 500000.0, self.config))
         if depth < min_depth:
             log_warning(
                 f"LIQ_EXIT triggered: depth={depth:.0f}USD "
-                f"< threshold={min_depth:.0f}USD "
+                f"< threshold={min_depth:.0f}USD ({depth_mode}) "
                 f"(intensity={intensity:.0f}USD/s, "
                 f"spread={spread_bps:.1f}bps)"
             )

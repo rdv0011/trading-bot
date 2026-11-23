@@ -161,6 +161,23 @@ ADAPTIVE_TRAIL_UPDATE_MULT = 0.1      # fraction of ATR for update threshold (10
 ADAPTIVE_TRAIL_UPDATE_MIN = 0.001     # 0.1% floor
 ADAPTIVE_TRAIL_UPDATE_MAX = 0.01      # 1% ceiling
 
+# ── Adaptive Extreme Volatility Threshold (Phase 2b) ─────────────────────
+ADAPTIVE_VOL_ENABLED = _get_bool("ADAPTIVE_VOL_ENABLED", True)
+ADAPTIVE_VOL_LOOKBACK = 200           # rolling window of recent vol_ratio values
+ADAPTIVE_VOL_QUANTILE = 0.95          # use 95th percentile as extreme threshold
+ADAPTIVE_VOL_MIN = 1.2                # absolute floor
+ADAPTIVE_VOL_MAX = 3.0                # absolute ceiling
+
+# ── Adaptive Spread/Depth Thresholds (Phase 2b) ──────────────────────────
+ADAPTIVE_BOOK_ENABLED = _get_bool("ADAPTIVE_BOOK_ENABLED", True)
+ADAPTIVE_BOOK_LOOKBACK = 200          # rolling window of recent spread/depth values
+ADAPTIVE_SPREAD_QUANTILE = 0.75       # 75th percentile as max spread
+ADAPTIVE_SPREAD_MIN = 2.0             # absolute floor (bps)
+ADAPTIVE_SPREAD_MAX = 20.0            # absolute ceiling (bps)
+ADAPTIVE_DEPTH_QUANTILE = 0.25        # 25th percentile as min depth
+ADAPTIVE_DEPTH_MIN = 20000.0          # absolute floor (USD)
+ADAPTIVE_DEPTH_MAX = 500000.0         # absolute ceiling (USD)
+
 # ── Trailing Stop (Phase 2) ────────────────────────────────────────────
 TRAILING_STOP_ENABLED = _get_bool("TRAILING_STOP_ENABLED", True)
 TRAILING_ATR_MULT = 1.5               # trail distance = mult * ATR14
@@ -169,7 +186,7 @@ TRAILING_SL_UPDATE_THRESHOLD = 0.002  # 0.2% min move to trigger exchange SL/TP 
 
 # ── Regime Gate Hardening (Phase 2) ────────────────────────────────────
 GATE_EXTREME_VOL = _get_bool("GATE_EXTREME_VOL", True)               # block entries when vol_state = extreme
-EXTREME_VOL_RATIO = 1.8               # vol_12 / vol_48 above this = extreme
+EXTREME_VOL_RATIO = 1.8               # vol_12 / vol_48 above this = extreme (fallback when adaptive disabled)
 GATE_ABS_VOL_ENABLED = _get_bool("GATE_ABS_VOL_ENABLED", True)       # block entries when absolute volume drops
 ABS_VOL_RATIO_CRITICAL = 0.10             # ratio below this = absolute volume drop (10% of median)
 ABS_VOL_RATIO_ROLLING_WINDOW = 48          # rolling window for median (candles)

@@ -335,6 +335,102 @@ def adaptive_trailing_threshold(
     return round(thr, 6)
 
 
+def adaptive_vol_threshold(
+    vol_ratios: pd.Series,
+    lookback: int = 200,
+    quantile: float = 0.95,          # 95th percentile as extreme threshold
+    min_threshold: float = 1.2,      # absolute floor
+    max_threshold: float = 3.0,      # absolute ceiling
+    fallback: float = 1.8,
+) -> float:
+    """
+    Compute an adaptive extreme volatility threshold from recent vol_ratio values.
+    
+    Uses the `quantile`-th percentile of recent vol_ratio values as the
+    threshold for "extreme" volatility. This adapts to market conditions.
+    
+    Clamped into [min_threshold, max_threshold]. Falls back to `fallback`
+    when fewer than 20 valid samples are available.
+    
+    Returns:
+        float: vol_ratio threshold for extreme classification.
+    """
+    if vol_ratios is None or len(vol_ratios) == 0:
+        return round(float(fallback), 3)
+    
+    recent = pd.Series(vol_ratios).tail(lookback).dropna()
+    if len(recent) < 20:
+        return round(float(fallback), 3)
+    
+    thr = float(np.percentile(recent.values, quantile * 100.0))
+    thr = float(np.clip(thr, min_threshold, max_threshold))
+    return round(thr, 3)
+
+
+def adaptive_spread_threshold(
+    spreads: pd.Series,
+    lookback: int = 200,
+    quantile: float = 0.75,          # 75th percentile as max spread
+    min_threshold: float = 2.0,      # absolute floor (bps)
+    max_threshold: float = 20.0,     # absolute ceiling (bps)
+    fallback: float = 10.0,
+) -> float:
+    """
+    Compute an adaptive max spread threshold from recent spread values.
+    
+    Uses the `quantile`-th percentile of recent spread_bps values as the
+    maximum allowed spread for entries.
+    
+    Clamped into [min_threshold, max_threshold]. Falls back to `fallback`
+    when fewer than 20 valid samples are available.
+    
+    Returns:
+        float: max spread threshold in bps.
+    """
+    if spreads is None or len(spreads) == 0:
+        return round(float(fallback), 2)
+    
+    recent = pd.Series(spreads).tail(lookback).dropna()
+    if len(recent) < 20:
+        return round(float(fallback), 2)
+    
+    thr = float(np.percentile(recent.values, quantile * 100.0))
+    thr = float(np.clip(thr, min_threshold, max_threshold))
+    return round(thr, 2)
+
+
+def adaptive_depth_threshold(
+    depths: pd.Series,
+    lookback: int = 200,
+    quantile: float = 0.25,          # 25th percentile as min depth
+    min_threshold: float = 20000.0,  # absolute floor (USD)
+    max_threshold: float = 500000.0, # absolute ceiling (USD)
+    fallback: float = 50000.0,
+) -> float:
+    """
+    Compute an adaptive min depth threshold from recent depth values.
+    
+    Uses the `quantile`-th percentile of recent depth_total_usd values as the
+    minimum required depth for entries.
+    
+    Clamped into [min_threshold, max_threshold]. Falls back to `fallback`
+    when fewer than 20 valid samples are available.
+    
+    Returns:
+        float: min depth threshold in USD.
+    """
+    if depths is None or len(depths) == 0:
+        return round(float(fallback), 1)
+    
+    recent = pd.Series(depths).tail(lookback).dropna()
+    if len(recent) < 20:
+        return round(float(fallback), 1)
+    
+    thr = float(np.percentile(recent.values, quantile * 100.0))
+    thr = float(np.clip(thr, min_threshold, max_threshold))
+    return round(thr, 1)
+
+
 def classify_vol_state(vol_ratio: float, extreme_ratio: float = 1.8) -> str:
     """
     Classify the short/long volatility ratio into a vol state.
