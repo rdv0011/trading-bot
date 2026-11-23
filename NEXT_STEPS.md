@@ -44,25 +44,30 @@
 
 ## Longer Term: Risk Management
 
-### 7. Dynamic Position Sizing Based on Volatility
-- Scale stake fraction by `1 / abs_vol` when abs_vol > threshold
-- Reduces exposure during elevated volatility
+### 7. Dynamic Position Sizing Based on Volatility ✅ DONE (86897e5)
+- ✅ **Done**: Scale stake fraction by `1 / abs_vol` when abs_vol > threshold (DYNAMIC_SIZING_ABS_VOL_THRESHOLD=1.5)
+- ✅ **Done**: Min/max stake fraction caps (DYNAMIC_SIZING_MIN_FRAC=0.25, MAX_FRAC=2.0)
+- ✅ **Done**: Applied to both initial entry and scale-ins
+- Config: DYNAMIC_SIZING_ENABLED, DYNAMIC_SIZING_ABS_VOL_THRESHOLD, MIN_FRAC, MAX_FRAC
 
-### 8. Trailing SL Improvements ✅ PARTIAL (221b753)
+### 8. Trailing SL Improvements ✅ DONE (86897e5)
 - ✅ **Done**: Trail from entry immediately (TRAILING_START_IMMEDIATE=True)
 - ✅ **Done**: Floor at initial SL until 1R, then breakeven
-- ⏳ Minimum trailing distance (prevent too-tight trails)
-- ⏳ Chandelier exit variant
+- ✅ **Done**: Minimum trailing distance (TRAILING_MIN_DISTANCE_ATR_MULT=0.5)
+- ✅ **Done**: Chandelier exit variant (TRAILING_CHANDELIER_ENABLED, TRAILING_CHANDELIER_MULT=3.0)
+- Applied in both _check_exits (live) and _sync_trailing_orders (exchange sync)
 
-### 9. Liquidity Gate Refinements
-- Separate entry vs exit thresholds
-- Add orderbook imbalance metric (bid/ask depth ratio)
-- Consider funding rate in liquidity assessment
+### 9. Liquidity Gate Refinements ✅ DONE (86897e5)
+- ✅ **Done**: Separate entry vs exit thresholds (LIQ_ENTRY_SPREAD_BPS=15, LIQ_ENTRY_MIN_DEPTH_USD=75000, LIQ_ENTRY_MAX_VANISH_PCT=50, LIQ_ENTRY_MIN_INTENSITY_USD=30000)
+- ✅ **Done**: Orderbook imbalance metric (LIQ_IMBALANCE_ENABLED, LIQ_IMBALANCE_THRESHOLD=2.0)
+- ✅ **Done**: Funding rate check (LIQ_FUNDING_ENABLED, LIQ_FUNDING_THRESHOLD_BPS=5.0)
+- Applied to both entry and exit gates with adaptive thresholds
 
-### 10. Cost-to-Edge Optimization
-- Track realized vs expected costs per trade
-- Adjust confidence stake power based on recent cost_ratio
-- Add slippage model per time-of-day
+### 10. Cost-to-Edge Optimization ✅ DONE (86897e5)
+- ✅ **Done**: Track realized vs expected costs per trade (COST_TRACKING_ENABLED)
+- ✅ **Done**: Adjust confidence stake power based on recent cost_ratio (COST_STAKE_POWER_ADJUST, MIN=0.3, MAX=0.7)
+- ✅ **Done**: Time-of-day slippage model (COST_SLIPPAGE_TOD_ENABLED with COST_SLIPPAGE_TOD_WINDOWS)
+- Integrated into _confidence_scaled_stake and _exit_position
 
 ### 11. Profit Taking / Partial Exits ✅ DONE (221b753)
 - ✅ **Done**: R-multiple partial exits at 1R/2R/3R (33%/33%/34%)
@@ -115,6 +120,10 @@
 | Nov 23 | **Fix trailing SL logic** (correct floor behavior) | `221b753` |
 | Nov 23 | **Seed vol_ratio history** (adaptive extreme vol threshold) | `8ee481d` |
 | Nov 23 | **Seed spread/depth history** (adaptive liquidity gates) | `8ee481d` |
+| Nov 23 | **Dynamic position sizing** (1/abs_vol scaling, cost-adjusted power, TOD slippage) | `86897e5` |
+| Nov 23 | **Trailing SL improvements** (min distance, chandelier exit) | `86897e5` |
+| Nov 23 | **Liquidity gate refinements** (separate entry/exit, imbalance, funding) | `86897e5` |
+| Nov 23 | **Cost-to-edge optimization** (cost tracking, stake power adjust, TOD model) | `86897e5` |
 
 ---
 
