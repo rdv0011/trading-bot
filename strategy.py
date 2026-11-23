@@ -32,11 +32,19 @@ from config import (
     ADAPTIVE_TRAIL_UPDATE_QUANTILE, ADAPTIVE_TRAIL_UPDATE_MULT,
     ADAPTIVE_TRAIL_UPDATE_MIN, ADAPTIVE_TRAIL_UPDATE_MAX,
     TRAILING_STOP_ENABLED, TRAILING_ATR_MULT, TRAILING_BREAKEVEN_MULT,
+    TRAILING_MIN_DISTANCE_ATR_MULT, TRAILING_CHANDELIER_ENABLED, TRAILING_CHANDELIER_MULT,
     GATE_EXTREME_VOL, EXTREME_VOL_RATIO,
     SCALING_ENABLED, MAX_SCALE_COUNT, SCALE_CONFIRM_BARS, SCALE_STAKE_FRAC,
     PARTIAL_EXIT_ENABLED, PARTIAL_EXIT_FRACTION, REVERSAL_FULL_CLOSE_STREAK,
     TRADE_COOLDOWN_ENABLED, TRADE_COOLDOWN_MINUTES,
     MIN_TREES,
+    DYNAMIC_SIZING_ENABLED, DYNAMIC_SIZING_ABS_VOL_THRESHOLD,
+    DYNAMIC_SIZING_MIN_FRAC, DYNAMIC_SIZING_MAX_FRAC,
+    LIQ_ENTRY_SPREAD_BPS, LIQ_ENTRY_MIN_DEPTH_USD, LIQ_ENTRY_MAX_VANISH_PCT,
+    LIQ_ENTRY_MIN_INTENSITY_USD, LIQ_IMBALANCE_ENABLED, LIQ_IMBALANCE_THRESHOLD,
+    LIQ_FUNDING_ENABLED, LIQ_FUNDING_THRESHOLD_BPS,
+    COST_TRACKING_ENABLED, COST_STAKE_POWER_ADJUST, COST_STAKE_POWER_MIN,
+    COST_STAKE_POWER_MAX, COST_SLIPPAGE_TOD_ENABLED, COST_SLIPPAGE_TOD_WINDOWS,
     is_testnet_env,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
@@ -215,6 +223,11 @@ class DualMLStrategy:
         self._last_synced_sl_price: Optional[float] = None
         self._last_synced_tp_price: Optional[float] = None
         self._last_sl_update_ts: float = 0.0
+
+        # Cost tracking for Cost-to-Edge optimization
+        self._cost_history: List[Dict] = []           # Track realized costs per trade
+        self._recent_cost_ratios: List[float] = []    # Track cost/edge ratios
+        self._slippage_tod_history: Dict[str, List[float]] = {}  # slippage by time window
 
         # Phase 2: rolling raw prediction history (for retrain cadence only)
 
@@ -1052,14 +1065,14 @@ class DualMLStrategy:
 
         # Entry / same-direction scaling / opposite-direction partial exit
         if self.position == 0 and signal in ("long", "short"):
-            self._enter_position(signal, current_price, now, pred=pred, threshold=thr)
+            self._enter_position(signal, current_price, now, pred=pred, threshold=thr, abs_vol_ratio=abs_vol_ratio)
         elif signal in ("long", "short") and self.position != 0:
             same_dir = (
                 (signal == "long" and self.position > 0)
                 or (signal == "short" and self.position < 0)
             )
             if same_dir:
-                self._scale_in_live(signal, current_price, now, pred=pred, threshold=thr)
+                self._scale_in_live(signal, current_price, now, pred=pred, threshold=thr, abs_vol_ratio=abs_vol_ratio)
             else:
                 self._handle_opposite_live(signal, current_price, now)
 
@@ -1100,18 +1113,54 @@ class DualMLStrategy:
             )
 
     # ── Confidence-Weighted Position Sizing ──────────────────────────────
-    def _confidence_scaled_stake(self, base_stake: float, pred: float, threshold: float) -> float:
-        """Scale stake fraction by prediction confidence relative to threshold.
+    def _confidence_scaled_stake(self, base_stake: float, pred: float, threshold: float,
+                                  abs_vol_ratio: float = 1.0) -> float:
+        """Scale stake fraction by prediction confidence and volatility.
 
         Uses sqrt scaling (diminishing returns) with a hard cap to avoid
         over-exposure on outlier predictions.
+        
+        Also applies:
+        - Dynamic sizing: reduces stake when abs_vol_ratio > threshold (elevated vol)
+        - Cost-to-edge adjustment: adjusts confidence power based on recent cost ratios
         """
         if threshold <= 0 or pred == 0:
             return base_stake
+        
         confidence = abs(pred) / threshold
+        
+        # Cost-to-edge: adjust confidence power based on recent cost performance
         power = float(_cfg_flag("CONFIDENCE_STAKE_POWER", 0.5, self.config))
+        if _cfg_flag("COST_STAKE_POWER_ADJUST", True, self.config) and self._recent_cost_ratios:
+            avg_cost_ratio = sum(self._recent_cost_ratios) / len(self._recent_cost_ratios)
+            # High cost ratio -> reduce power (more conservative) -> lower stakes
+            # Low cost ratio -> increase power (more aggressive) -> higher stakes
+            power_min = float(_cfg_flag("COST_STAKE_POWER_MIN", 0.3, self.config))
+            power_max = float(_cfg_flag("COST_STAKE_POWER_MAX", 0.7, self.config))
+            # Map cost_ratio ~1.0 to mid power, >1.5 to min power, <0.5 to max power
+            if avg_cost_ratio > 1.0:
+                power = max(power_min, power * (2.0 - avg_cost_ratio))
+            else:
+                power = min(power_max, power * (1.0 + (1.0 - avg_cost_ratio) * 0.5))
+            power = float(np.clip(power, power_min, power_max))
+        
         cap = float(_cfg_flag("CONFIDENCE_STAKE_CAP", 3.0, self.config))
         factor = min(confidence ** power, cap)
+        
+        # Dynamic position sizing: scale by inverse of abs_vol when elevated
+        if _cfg_flag("DYNAMIC_SIZING_ENABLED", True, self.config):
+            abs_vol_thresh = float(_cfg_flag("DYNAMIC_SIZING_ABS_VOL_THRESHOLD", 1.5, self.config))
+            if abs_vol_ratio > abs_vol_thresh:
+                # Reduce stake proportionally: 1/abs_vol capped at min_frac
+                min_frac = float(_cfg_flag("DYNAMIC_SIZING_MIN_FRAC", 0.25, self.config))
+                max_frac = float(_cfg_flag("DYNAMIC_SIZING_MAX_FRAC", 2.0, self.config))
+                vol_factor = float(np.clip(1.0 / abs_vol_ratio, min_frac, max_frac))
+                factor *= vol_factor
+                log_debug(
+                    f"[DYNAMIC SIZING] abs_vol={abs_vol_ratio:.2f} > {abs_vol_thresh:.1f} "
+                    f"-> vol_factor={vol_factor:.3f}, adjusted factor={factor:.3f}"
+                )
+        
         return base_stake * factor
 
     def _liquidity_entry_gate(self, side: str) -> Optional[str]:
@@ -1153,7 +1202,7 @@ class DualMLStrategy:
             if len(self.depth_history) > lookback:
                 self.depth_history = self.depth_history[-lookback:]
         
-        # Adaptive or static spread threshold
+        # Adaptive or static spread threshold (ENTRY-specific)
         if _cfg_flag("ADAPTIVE_BOOK_ENABLED", True, self.config) and len(self.spread_history) >= 20:
             max_spread = adaptive_spread_threshold(
                 pd.Series(self.spread_history),
@@ -1161,18 +1210,18 @@ class DualMLStrategy:
                 quantile=float(_cfg_flag("ADAPTIVE_SPREAD_QUANTILE", 0.75, self.config)),
                 min_threshold=float(_cfg_flag("ADAPTIVE_SPREAD_MIN", 2.0, self.config)),
                 max_threshold=float(_cfg_flag("ADAPTIVE_SPREAD_MAX", 20.0, self.config)),
-                fallback=float(_cfg_flag("LIQ_MAX_SPREAD_BPS", 10.0, self.config)),
+                fallback=float(_cfg_flag("LIQ_ENTRY_SPREAD_BPS", 15.0, self.config)),
             )
             spread_mode = "adapt"
         else:
-            max_spread = float(_cfg_flag("LIQ_MAX_SPREAD_BPS", 10.0, self.config))
+            max_spread = float(_cfg_flag("LIQ_ENTRY_SPREAD_BPS", 15.0, self.config))
             spread_mode = "static"
         
         if spread_bps > max_spread:
             log_debug(f"GATE spread: {spread_bps:.1f}bps > {max_spread:.1f}bps ({spread_mode})")
             return "spread"
         
-        # Adaptive or static depth threshold
+        # Adaptive or static depth threshold (ENTRY-specific)
         side_depth = snap["depth_ask_usd"] if side == "long" else snap["depth_bid_usd"]
         if _cfg_flag("ADAPTIVE_BOOK_ENABLED", True, self.config) and len(self.depth_history) >= 20:
             min_depth = adaptive_depth_threshold(
@@ -1181,26 +1230,67 @@ class DualMLStrategy:
                 quantile=float(_cfg_flag("ADAPTIVE_DEPTH_QUANTILE", 0.25, self.config)),
                 min_threshold=float(_cfg_flag("ADAPTIVE_DEPTH_MIN", 20000.0, self.config)),
                 max_threshold=float(_cfg_flag("ADAPTIVE_DEPTH_MAX", 500000.0, self.config)),
-                fallback=float(_cfg_flag("LIQ_MIN_DEPTH_USD", 50000.0, self.config)),
+                fallback=float(_cfg_flag("LIQ_ENTRY_MIN_DEPTH_USD", 75000.0, self.config)),
             )
             depth_mode = "adapt"
         else:
-            min_depth = float(_cfg_flag("LIQ_MIN_DEPTH_USD", 50000.0, self.config))
+            min_depth = float(_cfg_flag("LIQ_ENTRY_MIN_DEPTH_USD", 75000.0, self.config))
             depth_mode = "static"
         
         if side_depth < min_depth:
             log_debug(f"GATE depth: {side_depth:.0f} < {min_depth:.0f} ({depth_mode})")
             return "depth"
         
-        if snap["vanish_pct"] > float(_cfg_flag("LIQ_MAX_VANISH_PCT", 60.0, self.config)):
+        # Vanish check (ENTRY-specific threshold)
+        if snap["vanish_pct"] > float(_cfg_flag("LIQ_ENTRY_MAX_VANISH_PCT", 50.0, self.config)):
             return "vanish"
+        
+        # Orderbook imbalance check (bid/ask depth ratio)
+        if _cfg_flag("LIQ_IMBALANCE_ENABLED", True, self.config):
+            depth_bid = snap.get("depth_bid_usd", 0)
+            depth_ask = snap.get("depth_ask_usd", 0)
+            if depth_bid > 0 and depth_ask > 0:
+                imbalance_ratio = max(depth_bid, depth_ask) / min(depth_bid, depth_ask)
+                imbalance_thresh = float(_cfg_flag("LIQ_IMBALANCE_THRESHOLD", 2.0, self.config))
+                if imbalance_ratio > imbalance_thresh:
+                    log_debug(f"GATE imbalance: ratio={imbalance_ratio:.2f} > {imbalance_thresh:.1f}")
+                    return "imbalance"
+        
+        # Funding rate check
+        if _cfg_flag("LIQ_FUNDING_ENABLED", True, self.config):
+            funding_rate = snap.get("funding_rate", 0)
+            funding_thresh = float(_cfg_flag("LIQ_FUNDING_THRESHOLD_BPS", 5.0, self.config)) / 10000.0  # bps to decimal
+            if abs(funding_rate) > funding_thresh:
+                log_debug(f"GATE funding: rate={funding_rate:.6f} > {funding_thresh:.6f}")
+                return "funding"
+        
         buy_ratio = snap["aggressor_buy_ratio"]
         if side == "long" and buy_ratio < float(_cfg_flag("LIQ_MIN_AGGRESSOR_RATIO", 0.35, self.config)):
             return "aggressor"
         if side == "short" and buy_ratio > float(_cfg_flag("LIQ_MAX_AGGRESSOR_RATIO", 0.65, self.config)):
             return "aggressor"
         
-        # Adaptive or static trade intensity threshold
+        # Adaptive or static trade intensity threshold (ENTRY-specific)
+        intensity = snap["trade_intensity_usd_s"]
+        if _cfg_flag("ADAPTIVE_LIQ_ENABLED", True, self.config):
+            # Add to history
+            self.trade_intensity_history.append(intensity)
+            lookback = int(_cfg_flag("ADAPTIVE_LIQ_LOOKBACK", 200, self.config))
+            if len(self.trade_intensity_history) > lookback:
+                self.trade_intensity_history = self.trade_intensity_history[-lookback:]
+            min_intensity = adaptive_liquidity_threshold(
+                pd.Series(self.trade_intensity_history),
+                lookback=lookback,
+                quantile=float(_cfg_flag("ADAPTIVE_LIQ_QUANTILE", 0.25, self.config)),
+                min_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MIN_USD", 10000.0, self.config)),
+                max_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MAX_USD", 100000.0, self.config)),
+            )
+        else:
+            min_intensity = float(_cfg_flag("LIQ_ENTRY_MIN_INTENSITY_USD", 30000.0, self.config))
+        
+        if intensity < min_intensity:
+            return "intensity"
+        return None
         intensity = snap["trade_intensity_usd_s"]
         if _cfg_flag("ADAPTIVE_LIQ_ENABLED", True, self.config):
             # Add to history
@@ -1309,6 +1399,31 @@ class DualMLStrategy:
                 f"vanish={vanish:.1f}% tape={tape_trades:.0f} "
                 f"adaptive={'on' if _cfg_flag('ADAPTIVE_LIQ_ENABLED', True, self.config) else 'off'}"
             )
+        
+        # Orderbook imbalance check for exit
+        if _cfg_flag("LIQ_IMBALANCE_ENABLED", True, self.config):
+            depth_bid = snap.get("depth_bid_usd", 0)
+            depth_ask = snap.get("depth_ask_usd", 0)
+            if depth_bid > 0 and depth_ask > 0:
+                imbalance_ratio = max(depth_bid, depth_ask) / min(depth_bid, depth_ask)
+                imbalance_thresh = float(_cfg_flag("LIQ_IMBALANCE_THRESHOLD", 2.0, self.config))
+                if imbalance_ratio > imbalance_thresh:
+                    log_warning(
+                        f"LIQ_EXIT triggered: imbalance ratio={imbalance_ratio:.2f} "
+                        f"> {imbalance_thresh:.1f}"
+                    )
+                    return "liq_exit"
+        
+        # Funding rate check for exit
+        if _cfg_flag("LIQ_FUNDING_ENABLED", True, self.config):
+            funding_rate = snap.get("funding_rate", 0)
+            funding_thresh = float(_cfg_flag("LIQ_FUNDING_THRESHOLD_BPS", 5.0, self.config)) / 10000.0
+            if abs(funding_rate) > funding_thresh:
+                log_warning(
+                    f"LIQ_EXIT triggered: funding rate={funding_rate:.6f} "
+                    f"> {funding_thresh:.6f}"
+                )
+                return "liq_exit"
         
         if intensity < min_intensity:
             # Cooldown: prevent repeated LIQ_EXIT triggers in short succession
@@ -1433,6 +1548,15 @@ class DualMLStrategy:
                 atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.2, self.config))
                 be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
                 trail_immediate = _cfg_flag("TRAILING_START_IMMEDIATE", True, self.config)
+                
+                # Minimum trailing distance to prevent too-tight trails
+                min_trail_atr_mult = float(_cfg_flag("TRAILING_MIN_DISTANCE_ATR_MULT", 0.5, self.config))
+                min_trail_dist = min_trail_atr_mult * atr14
+                
+                # Chandelier exit variant
+                chandelier_enabled = _cfg_flag("TRAILING_CHANDELIER_ENABLED", False, self.config)
+                chandelier_mult = float(_cfg_flag("TRAILING_CHANDELIER_MULT", 3.0, self.config))
+                
                 if self.trail_extreme <= 0:
                     self.trail_extreme = self.entry_price
                 if self.position > 0:
@@ -1443,6 +1567,17 @@ class DualMLStrategy:
                     breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
                     base_sl = self.entry_price * (1 - sl_frac)
                     trail_sl = self.trail_extreme - atr_mult * atr14
+                    
+                    # Minimum trailing distance: ensure trail_sl is at least min_trail_dist below trail_extreme
+                    if self.position > 0:
+                        min_allowed_sl = self.trail_extreme - min_trail_dist
+                        if trail_sl > min_allowed_sl:
+                            trail_sl = min_allowed_sl
+                    
+                    # Chandelier exit: trail from highest high - chandelier_mult * ATR
+                    if chandelier_enabled:
+                        chandelier_sl = self.trail_extreme - chandelier_mult * atr14
+                        trail_sl = min(trail_sl, chandelier_sl)  # More conservative (lower SL)
                     
                     if trail_immediate:
                         # Trail from entry immediately, floor at initial SL until 1R, then breakeven
@@ -1491,6 +1626,16 @@ class DualMLStrategy:
                     breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
                     base_sl = self.entry_price * (1 + sl_frac)
                     trail_sl = self.trail_extreme + atr_mult * atr14
+                    
+                    # Minimum trailing distance: ensure trail_sl is at least min_trail_dist above trail_extreme
+                    max_allowed_sl = self.trail_extreme + min_trail_dist
+                    if trail_sl < max_allowed_sl:
+                        trail_sl = max_allowed_sl
+                    
+                    # Chandelier exit: trail from lowest low + chandelier_mult * ATR
+                    if chandelier_enabled:
+                        chandelier_sl = self.trail_extreme + chandelier_mult * atr14
+                        trail_sl = max(trail_sl, chandelier_sl)  # More conservative (higher SL for short)
                     
                     if trail_immediate:
                         # Trail from entry immediately, floor at initial SL until 1R, then breakeven
@@ -1574,6 +1719,14 @@ class DualMLStrategy:
         atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.2, self.config))
         be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
         
+        # Minimum trailing distance to prevent too-tight trails
+        min_trail_atr_mult = float(_cfg_flag("TRAILING_MIN_DISTANCE_ATR_MULT", 0.5, self.config))
+        min_trail_dist = min_trail_atr_mult * atr14
+        
+        # Chandelier exit variant
+        chandelier_enabled = _cfg_flag("TRAILING_CHANDELIER_ENABLED", False, self.config)
+        chandelier_mult = float(_cfg_flag("TRAILING_CHANDELIER_MULT", 3.0, self.config))
+        
         # Adaptive or static trailing SL update threshold
         atr_pct = atr14 / current_price if current_price > 0 else 0
         if _cfg_flag("ADAPTIVE_TRAIL_UPDATE_ENABLED", True, self.config):
@@ -1610,6 +1763,17 @@ class DualMLStrategy:
             self.trail_extreme = max(self.trail_extreme, current_price)
             base_sl = self.entry_price * (1 - sl_frac)          # Initial bracket SL
             trail_sl = self.trail_extreme - atr_mult * atr14    # Trailing SL from peak
+            
+            # Minimum trailing distance
+            min_allowed_sl = self.trail_extreme - min_trail_dist
+            if trail_sl > min_allowed_sl:
+                trail_sl = min_allowed_sl
+            
+            # Chandelier exit
+            if chandelier_enabled:
+                chandelier_sl = self.trail_extreme - chandelier_mult * atr14
+                trail_sl = min(trail_sl, chandelier_sl)
+            
             new_sl = max(base_sl, trail_sl)                     # Use the better (higher) SL
 
             # TP: Use initial bracket TP as wide safety net (not trailed)
@@ -1620,6 +1784,17 @@ class DualMLStrategy:
             self.trail_extreme = min(self.trail_extreme, current_price)
             base_sl = self.entry_price * (1 + sl_frac)          # Initial bracket SL
             trail_sl = self.trail_extreme + atr_mult * atr14    # Trailing SL from trough
+            
+            # Minimum trailing distance
+            max_allowed_sl = self.trail_extreme + min_trail_dist
+            if trail_sl < max_allowed_sl:
+                trail_sl = max_allowed_sl
+            
+            # Chandelier exit
+            if chandelier_enabled:
+                chandelier_sl = self.trail_extreme + chandelier_mult * atr14
+                trail_sl = max(trail_sl, chandelier_sl)
+            
             new_sl = min(base_sl, trail_sl)                     # Use the better (lower) SL
 
             # TP: Use initial bracket TP as wide safety net
@@ -1790,7 +1965,7 @@ class DualMLStrategy:
         if self.position == 0 and signal in ("long", "short"):
             self._enter_position(signal, current_price, current_time, pred=pred, threshold=threshold)
 
-    def _enter_position(self, side: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
+    def _enter_position(self, side: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0, abs_vol_ratio: float = 1.0) -> None:
         """Open new position with optional confidence-weighted stake scaling."""
         base_stake_frac = (
             self.current_meta["stake_long_frac"]
@@ -1799,9 +1974,9 @@ class DualMLStrategy:
         )
         leverage = self.current_meta["recommended_leverage"]
 
-        # Confidence-weighted scaling (Improvement 1)
+        # Confidence-weighted scaling (Improvement 1) + dynamic sizing
         if threshold > 0 and pred != 0:
-            stake_frac = self._confidence_scaled_stake(base_stake_frac, pred, threshold)
+            stake_frac = self._confidence_scaled_stake(base_stake_frac, pred, threshold, abs_vol_ratio=abs_vol_ratio)
         else:
             stake_frac = base_stake_frac
 
@@ -1896,7 +2071,7 @@ class DualMLStrategy:
 
         log_info(f"LIVE ENTRY {side.upper()} @ {self.entry_price:.2f} | Meta: {json.dumps(self.current_meta, default=str)}")
 
-    def _scale_in_live(self, signal: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0) -> None:
+    def _scale_in_live(self, signal: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0, abs_vol_ratio: float = 1.0) -> None:
         """Phase 3: scale into an open position on a same-direction signal.
 
         Adds SCALE_STAKE_FRAC-sized stake (optionally confidence-scaled) via
@@ -1926,11 +2101,11 @@ class DualMLStrategy:
             log_debug(f"Scale-in skipped: profit {gain_r:.2f}R < minimum {min_profit_r:.2f}R")
             return
 
-        # Scale-in quantity with optional confidence weighting
+        # Scale-in quantity with optional confidence weighting + dynamic sizing
         base_qty = self._initial_qty or abs(self.current_trade.get("qty", 0.0))
         add_qty = base_qty * float(_cfg_flag("SCALE_STAKE_FRAC", 0.33, self.config))
         if threshold > 0 and pred != 0 and add_qty > 0:
-            conf_factor = self._confidence_scaled_stake(1.0, pred, threshold)
+            conf_factor = self._confidence_scaled_stake(1.0, pred, threshold, abs_vol_ratio=abs_vol_ratio)
             add_qty = add_qty * conf_factor
         if add_qty <= 0:
             return
@@ -2166,6 +2341,57 @@ class DualMLStrategy:
                 notional=notional,
                 expected_profit=avg_expected_profit,
                 total_cost=effective_cost,
+            )
+        
+        # Cost-to-Edge tracking
+        if _cfg_flag("COST_TRACKING_ENABLED", True, self.config):
+            cost_ratio = effective_cost / max(avg_expected_profit, 1e-8) if avg_expected_profit > 0 else 0.0
+            
+            # Track slippage by time-of-day window
+            if _cfg_flag("COST_SLIPPAGE_TOD_ENABLED", True, self.config):
+                hour = timestamp.hour
+                if 0 <= hour < 6:
+                    tod_window = "00-06"
+                elif 6 <= hour < 12:
+                    tod_window = "06-12"
+                elif 12 <= hour < 18:
+                    tod_window = "12-18"
+                else:
+                    tod_window = "18-24"
+                
+                if tod_window not in self._slippage_tod_history:
+                    self._slippage_tod_history[tod_window] = []
+                self._slippage_tod_history[tod_window].append(slippage / max(notional, 1e-8))
+                # Keep only last 50 samples per window
+                if len(self._slippage_tod_history[tod_window]) > 50:
+                    self._slippage_tod_history[tod_window] = self._slippage_tod_history[tod_window][-50:]
+            
+            self._cost_history.append({
+                "trade_id": trade_id,
+                "timestamp": timestamp.isoformat(),
+                "side": side,
+                "spread": spread,
+                "slippage": slippage,
+                "commission": commission,
+                "financing": financing,
+                "total_cost": effective_cost,
+                "notional": notional,
+                "expected_profit": avg_expected_profit,
+                "cost_ratio": cost_ratio,
+            })
+            # Keep last 100 trades
+            if len(self._cost_history) > 100:
+                self._cost_history = self._cost_history[-100:]
+            
+            # Track recent cost ratios for stake power adjustment
+            self._recent_cost_ratios.append(cost_ratio)
+            if len(self._recent_cost_ratios) > 20:
+                self._recent_cost_ratios = self._recent_cost_ratios[-20:]
+            
+            log_debug(
+                f"[COST TRACKING] trade_id={trade_id} cost_ratio={cost_ratio:.3f} "
+                f"slippage={slippage:.4f} spread={spread:.4f} commission={commission:.4f} "
+                f"financing={financing:.4f} expected_profit={avg_expected_profit:.4f}"
             )
 
         log_info(f"LIVE EXIT {reason.upper()} @ {actual_fill:.2f}")

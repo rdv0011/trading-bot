@@ -246,11 +246,38 @@ SCALE_STAKE_FRAC = 0.33                  # scale-in stake = fraction of current 
 
 # ── Trailing SL Improvements ───────────────────────────────────────────
 TRAILING_START_IMMEDIATE = _get_bool("TRAILING_START_IMMEDIATE", True)  # trail from entry, not after 1R
+TRAILING_MIN_DISTANCE_ATR_MULT = 0.5       # minimum trailing distance as fraction of ATR (prevents too-tight trails)
+TRAILING_CHANDELIER_ENABLED = _get_bool("TRAILING_CHANDELIER_ENABLED", False)  # chandelier exit variant
+TRAILING_CHANDELIER_MULT = 3.0             # chandelier exit ATR multiplier (typically 2-3)
 
 # ── Time-Weighted SL Tightening ────────────────────────────────────────
 TIME_WEIGHTED_SL_ENABLED = _get_bool("TIME_WEIGHTED_SL_ENABLED", True)
 TIME_WEIGHTED_SL_TRIGGER = 0.75          # start tightening at 75% of max_hold (was 50%)
 TIME_WEIGHTED_SL_PROGRESSIVE = _get_bool("TIME_WEIGHTED_SL_PROGRESSIVE", True)  # progressive tightening
+
+# ── Dynamic Position Sizing (Volatility-Based) ─────────────────────────
+DYNAMIC_SIZING_ENABLED = _get_bool("DYNAMIC_SIZING_ENABLED", True)      # scale stake by 1/abs_vol when vol elevated
+DYNAMIC_SIZING_ABS_VOL_THRESHOLD = 1.5    # abs_vol ratio above which to reduce stake (e.g., 1.5 = 150% median)
+DYNAMIC_SIZING_MIN_FRAC = 0.25            # minimum stake fraction multiplier (cap reduction)
+DYNAMIC_SIZING_MAX_FRAC = 2.0             # maximum stake fraction multiplier (cap increase)
+
+# ── Liquidity Gate Refinements ──────────────────────────────────────────
+LIQ_ENTRY_SPREAD_BPS = 15.0               # entry spread threshold (separate from exit)
+LIQ_ENTRY_MIN_DEPTH_USD = 75000.0         # entry min depth (separate from exit)
+LIQ_ENTRY_MAX_VANISH_PCT = 50.0           # entry max vanish (separate from exit)
+LIQ_ENTRY_MIN_INTENSITY_USD = 30000.0     # entry min trade intensity (separate from exit)
+LIQ_IMBALANCE_ENABLED = _get_bool("LIQ_IMBALANCE_ENABLED", True)        # use bid/ask depth ratio
+LIQ_IMBALANCE_THRESHOLD = 2.0             # max bid/ask depth ratio before blocking
+LIQ_FUNDING_ENABLED = _get_bool("LIQ_FUNDING_ENABLED", True)            # consider funding rate
+LIQ_FUNDING_THRESHOLD_BPS = 5.0           # funding rate threshold in bps (abs value)
+
+# ── Cost-to-Edge Optimization ───────────────────────────────────────────
+COST_TRACKING_ENABLED = _get_bool("COST_TRACKING_ENABLED", True)        # track realized vs expected costs
+COST_STAKE_POWER_ADJUST = _get_bool("COST_STAKE_POWER_ADJUST", True)    # adjust confidence power by cost_ratio
+COST_STAKE_POWER_MIN = 0.3                # minimum confidence power when costs high
+COST_STAKE_POWER_MAX = 0.7                # maximum confidence power when costs low
+COST_SLIPPAGE_TOD_ENABLED = _get_bool("COST_SLIPPAGE_TOD_ENABLED", True) # time-of-day slippage model
+COST_SLIPPAGE_TOD_WINDOWS = {"00-06": 1.5, "06-12": 1.0, "12-18": 0.8, "18-24": 1.2}  # mult per window
 
 # ── Trade Cooldown (Phase 3) ───────────────────────────────────────────
 TRADE_COOLDOWN_ENABLED = _get_bool("TRADE_COOLDOWN_ENABLED", True)
