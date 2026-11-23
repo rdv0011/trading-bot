@@ -1122,15 +1122,24 @@ class DualMLStrategy:
                 return "max_hold"
 
         # Stop loss / Take profit with time-weighted tightening
-        # After 50% of max_hold_hours, tighten SL to half distance to limit prolonged losses
+        # After TIME_WEIGHTED_SL_TRIGGER of max_hold_hours, tighten SL to limit prolonged losses
         # Use a separate variable to avoid mutating the original SL fraction used by trailing stop
         sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
         sl_frac_tightened = sl_frac
         if self.entry_time is not None and self.position != 0:
             hours_held = (current_time - self.entry_time).total_seconds() / 3600
             max_hold = self.current_meta.get("max_hold_hours", MAX_HOLD_HOURS_DEFAULT)
-            if hours_held >= max_hold * 0.5:
-                sl_frac_tightened = sl_frac * 0.5  # Tighten SL to half
+            if _cfg_flag("TIME_WEIGHTED_SL_ENABLED", True, self.config):
+                trigger_pct = float(_cfg_flag("TIME_WEIGHTED_SL_TRIGGER", 0.75, self.config))
+                if hours_held >= max_hold * trigger_pct:
+                    if _cfg_flag("TIME_WEIGHTED_SL_PROGRESSIVE", True, self.config):
+                        # Progressive: linear from 0% at trigger → 50% at 100% max_hold
+                        progress = (hours_held - max_hold * trigger_pct) / (max_hold * (1 - trigger_pct))
+                        progress = min(max(progress, 0.0), 1.0)
+                        sl_frac_tightened = sl_frac * (1 - 0.5 * progress)  # 100% → 50%
+                    else:
+                        # Immediate: halve at trigger point
+                        sl_frac_tightened = sl_frac * 0.5
 
         # Calculate SL/TP prices based on position direction
         if self.position > 0:  # Long
@@ -1177,6 +1186,7 @@ class DualMLStrategy:
                 sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
                 atr_mult = float(_cfg_flag("TRAILING_ATR_MULT", 1.2, self.config))
                 be_mult = float(_cfg_flag("TRAILING_BREAKEVEN_MULT", 1.0, self.config))
+                trail_immediate = _cfg_flag("TRAILING_START_IMMEDIATE", True, self.config)
                 if self.trail_extreme <= 0:
                     self.trail_extreme = self.entry_price
                 if self.position > 0:
@@ -1187,7 +1197,31 @@ class DualMLStrategy:
                     breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
                     base_sl = self.entry_price * (1 - sl_frac)
                     trail_sl = self.trail_extreme - atr_mult * atr14
-                    eff_sl = max(base_sl, trail_sl)
+                    
+                    if trail_immediate:
+                        # Trail from entry immediately, floor at initial SL until 1R, then breakeven
+                        if profit_dist >= sl_frac * self.entry_price:
+                            # 1R reached: floor at breakeven
+                            floor_sl = max(base_sl, breakeven_price)
+                        else:
+                            # Before 1R: floor at initial SL
+                            floor_sl = base_sl
+                        eff_sl = max(floor_sl, trail_sl)
+                    else:
+                        # Legacy: only trail after 1R + breakeven
+                        if profit_dist >= sl_frac * self.entry_price:
+                            if current_price <= self.entry_price:
+                                return "trailing_sl"
+                            trail_sl = self.entry_price - atr_mult * atr14
+                            if current_price <= trail_sl:
+                                return "trailing_sl"
+                        else:
+                            breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
+                            if self.trail_extreme >= breakeven_price:
+                                eff_sl = max(base_sl, trail_sl)
+                                if current_price <= eff_sl and eff_sl > base_sl:
+                                    return "trailing_sl"
+                    
                     log_debug(
                         f"[TRAIL CHECK] pos=long trail_extreme={self.trail_extreme:.2f} "
                         f"atr14={atr14:.2f} profit_dist={profit_dist:.2f} "
@@ -1195,38 +1229,47 @@ class DualMLStrategy:
                         f"trail_sl={trail_sl:.2f} eff_sl={eff_sl:.2f} "
                         f"current={current_price:.2f} "
                         f"profit>=1R={profit_dist >= sl_frac * self.entry_price} "
-                        f"trail_active={self.trail_extreme >= breakeven_price} "
+                        f"trail_active={eff_sl > base_sl} "
                         f"below_eff={current_price <= eff_sl} "
-                        f"eff>base={eff_sl > base_sl}"
+                        f"floor={floor_sl if trail_immediate else 'legacy'}"
                     )
-                    # Profit-lock: once profit >= 1x SL distance, lock SL at breakeven
-                    profit_dist = current_price - self.entry_price
-                    if profit_dist >= sl_frac * self.entry_price:
-                        # Lock SL at entry price — no more loss possible
-                        if current_price <= self.entry_price:
-                            return "trailing_sl"
-                        # Trail from breakeven
-                        trail_sl = self.entry_price - atr_mult * atr14
-                        if current_price <= trail_sl:
-                            return "trailing_sl"
-                    else:
-                        breakeven_price = self.entry_price * (1 + be_mult * sl_frac)
-                        if self.trail_extreme >= breakeven_price:
-                            base_sl = self.entry_price * (1 - sl_frac)
-                            trail_sl = self.trail_extreme - atr_mult * atr14
-                            eff_sl = max(base_sl, trail_sl)
-                            if current_price <= eff_sl and eff_sl > base_sl:
-                                return "trailing_sl"
+                    
+                    if current_price <= eff_sl:
+                        return "trailing_sl"
+                        
                 else:
                     self.trail_extreme = min(self.trail_extreme, current_price)
-                    # Profit-lock: once profit >= 1x SL distance, lock SL at breakeven
                     profit_dist = self.entry_price - current_price
 
                     # DEBUG: Log trailing SL check details for short
                     breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
                     base_sl = self.entry_price * (1 + sl_frac)
                     trail_sl = self.trail_extreme + atr_mult * atr14
-                    eff_sl = min(base_sl, trail_sl)
+                    
+                    if trail_immediate:
+                        # Trail from entry immediately, floor at initial SL until 1R, then breakeven
+                        if profit_dist >= sl_frac * self.entry_price:
+                            # 1R reached: floor at breakeven
+                            floor_sl = min(base_sl, breakeven_price)
+                        else:
+                            # Before 1R: floor at initial SL
+                            floor_sl = base_sl
+                        eff_sl = min(floor_sl, trail_sl)
+                    else:
+                        # Legacy: only trail after 1R + breakeven
+                        if profit_dist >= sl_frac * self.entry_price:
+                            if current_price >= self.entry_price:
+                                return "trailing_sl"
+                            trail_sl = self.entry_price + atr_mult * atr14
+                            if current_price >= trail_sl:
+                                return "trailing_sl"
+                        else:
+                            breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
+                            if self.trail_extreme <= breakeven_price:
+                                eff_sl = min(base_sl, trail_sl)
+                                if current_price >= eff_sl and eff_sl < base_sl:
+                                    return "trailing_sl"
+                    
                     log_debug(
                         f"[TRAIL CHECK] pos=short trail_extreme={self.trail_extreme:.2f} "
                         f"atr14={atr14:.2f} profit_dist={profit_dist:.2f} "
@@ -1234,27 +1277,13 @@ class DualMLStrategy:
                         f"trail_sl={trail_sl:.2f} eff_sl={eff_sl:.2f} "
                         f"current={current_price:.2f} "
                         f"profit>=1R={profit_dist >= sl_frac * self.entry_price} "
-                        f"trail_active={self.trail_extreme <= breakeven_price} "
+                        f"trail_active={eff_sl < base_sl} "
                         f"above_eff={current_price >= eff_sl} "
-                        f"eff<base={eff_sl < base_sl}"
+                        f"floor={floor_sl if trail_immediate else 'legacy'}"
                     )
-
-                    # Profit-lock: once profit >= 1x SL distance, lock SL at breakeven
-                    profit_dist = self.entry_price - current_price
-                    if profit_dist >= sl_frac * self.entry_price:
-                        if current_price >= self.entry_price:
-                            return "trailing_sl"
-                        trail_sl = self.entry_price + atr_mult * atr14
-                        if current_price >= trail_sl:
-                            return "trailing_sl"
-                    else:
-                        breakeven_price = self.entry_price * (1 - be_mult * sl_frac)
-                        if self.trail_extreme <= breakeven_price:
-                            base_sl = self.entry_price * (1 + sl_frac)
-                            trail_sl = self.trail_extreme + atr_mult * atr14
-                            eff_sl = min(base_sl, trail_sl)
-                            if current_price >= eff_sl and eff_sl < base_sl:
-                                return "trailing_sl"
+                    
+                    if current_price >= eff_sl:
+                        return "trailing_sl"
 
         # Liquidity emergency override: fires LAST, only when book structure
         # is collapsing. This ensures SL/TP/trailing stop get the first chance
@@ -1461,6 +1490,8 @@ class DualMLStrategy:
         - 3R: Close R_PARTIAL_FRACTIONS[2] (default 34%)
         - Remaining: Let trailing SL protect
         
+        Buffer: R_PARTIAL_THRESHOLD_BUFFER (default 5%) triggers at 0.95R, 1.95R, 2.95R
+        
         Returns True if a partial exit was executed.
         """
         if not _cfg_flag("R_PARTIAL_EXITS_ENABLED", True, self.config):
@@ -1468,6 +1499,7 @@ class DualMLStrategy:
             
         max_levels = int(_cfg_flag("R_PARTIAL_LEVELS", 3, self.config))
         fractions = _cfg_flag("R_PARTIAL_FRACTIONS", [0.33, 0.33, 0.34], self.config)
+        buffer = float(_cfg_flag("R_PARTIAL_THRESHOLD_BUFFER", 0.05, self.config))
         
         if self.position == 0 or self._partial_exits_hit >= max_levels:
             return False
@@ -1476,8 +1508,8 @@ class DualMLStrategy:
         initial_risk = self.entry_price * sl_frac
         current_gain = (current_price - self.entry_price) if self.position > 0 else (self.entry_price - current_price)
 
-        # Check if we've hit the next R-level
-        target_gain = self._next_partial_r_level * initial_risk
+        # Check if we've hit the next R-level (with buffer)
+        target_gain = self._next_partial_r_level * initial_risk * (1 - buffer)
         if current_gain >= target_gain:
             # Execute partial exit
             fraction = fractions[self._partial_exits_hit] if self._partial_exits_hit < len(fractions) else fractions[-1]
@@ -1638,9 +1670,19 @@ class DualMLStrategy:
             self.same_dir_streak = 0
             return
 
+        # Require minimum profit before scaling in (SCALE_MIN_PROFIT_R in R-multiples)
+        min_profit_r = float(_cfg_flag("SCALE_MIN_PROFIT_R", 0.5, self.config))
+        sl_frac = self.current_meta.get("stop_loss_frac", STOP_LOSS_FRAC_DEFAULT)
+        initial_risk = self.entry_price * sl_frac
+        current_gain = (price - self.entry_price) if self.position > 0 else (self.entry_price - price)
+        gain_r = current_gain / initial_risk if initial_risk > 0 else 0.0
+        if gain_r < min_profit_r:
+            log_debug(f"Scale-in skipped: profit {gain_r:.2f}R < minimum {min_profit_r:.2f}R")
+            return
+
         # Scale-in quantity with optional confidence weighting
         base_qty = self._initial_qty or abs(self.current_trade.get("qty", 0.0))
-        add_qty = base_qty * float(_cfg_flag("SCALE_STAKE_FRAC", 0.5, self.config))
+        add_qty = base_qty * float(_cfg_flag("SCALE_STAKE_FRAC", 0.33, self.config))
         if threshold > 0 and pred != 0 and add_qty > 0:
             conf_factor = self._confidence_scaled_stake(1.0, pred, threshold)
             add_qty = add_qty * conf_factor

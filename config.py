@@ -221,6 +221,19 @@ REVERSAL_FULL_CLOSE_STREAK = 2        # reversal signals before full close
 R_PARTIAL_EXITS_ENABLED = _get_bool("R_PARTIAL_EXITS_ENABLED", True)   # enable R-multiple profit taking
 R_PARTIAL_LEVELS = 3                     # number of R-levels (1R, 2R, 3R)
 R_PARTIAL_FRACTIONS = [0.33, 0.33, 0.34]  # fractions at each level (must sum to ~1.0)
+R_PARTIAL_THRESHOLD_BUFFER = 0.05        # trigger partial exits at 0.95R, 1.95R, 2.95R (5% buffer)
+
+# ── Scale-In Improvements ──────────────────────────────────────────────
+SCALE_MIN_PROFIT_R = 0.5                 # minimum profit (in R) before allowing scale-in
+SCALE_STAKE_FRAC = 0.33                  # scale-in stake = fraction of current position (reduced from 0.5)
+
+# ── Trailing SL Improvements ───────────────────────────────────────────
+TRAILING_START_IMMEDIATE = _get_bool("TRAILING_START_IMMEDIATE", True)  # trail from entry, not after 1R
+
+# ── Time-Weighted SL Tightening ────────────────────────────────────────
+TIME_WEIGHTED_SL_ENABLED = _get_bool("TIME_WEIGHTED_SL_ENABLED", True)
+TIME_WEIGHTED_SL_TRIGGER = 0.75          # start tightening at 75% of max_hold (was 50%)
+TIME_WEIGHTED_SL_PROGRESSIVE = _get_bool("TIME_WEIGHTED_SL_PROGRESSIVE", True)  # progressive tightening
 
 # ── Trade Cooldown (Phase 3) ───────────────────────────────────────────
 TRADE_COOLDOWN_ENABLED = _get_bool("TRADE_COOLDOWN_ENABLED", True)
