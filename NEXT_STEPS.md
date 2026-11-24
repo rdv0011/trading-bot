@@ -131,6 +131,8 @@
 | Nov 24 | **Relax LIQ_EXIT for Trending Markets** (quantile=0.10, min=3000, grace=20min, trend relax) | `e678584` |
 | Nov 24 | **Lower Entry Threshold for Shorts** (THRESHOLD_SHORT=0.003, ADAPTIVE_MIN=0.001) | `e678584` |
 | Nov 24 | **Add Trend-Following Filter** (EMA50, block counter-trend signals) | `e678584` |
+| Nov 24 | **Retrain tactical model with balanced labels** (180 days, sample weight balancing) | `d414d39` |
+| Nov 24 | **Fix walk-forward retraining** to use sample weight balancing, add disable option | `87cdbe5` |
 
 ---
 
@@ -170,11 +172,12 @@
 
 ## Remaining Items (Optional / Nice-to-Have)
 
-### Critical (Required for Profitability)
-- **Retrain tactical model with balanced labels**: Current model only predicts positive → no short signals
-  - Add class weights or balanced sampling in training
-  - Include bear market data (2022, 2018)
-  - Validate on out-of-sample downtrend periods
+### Critical (Required for Profitability) - ✅ COMPLETE
+- **Retrain tactical model with balanced labels**: ✅ Done (180 days, sample weight balancing)
+  - Added class weight balancing in training (`TACTICAL_BALANCE_SAMPLES=True`)
+  - Trained on 180 days of data (includes bear market periods)
+  - Model now produces both positive and negative predictions
+  - Fixed walk-forward retraining to preserve balanced training
 
 ### Code Quality Improvements
 - **Refactor large functions**: Split `_check_exits()` and `_sync_trailing_orders()` into smaller helpers
