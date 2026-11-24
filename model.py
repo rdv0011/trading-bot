@@ -114,8 +114,9 @@ class CatBoostModel:
         Returns:
             Tuple of (train_sample_weights, val_sample_weights)
         """
-        # Check if balancing is enabled
-        if not _cfg_flag("TACTICAL_BALANCE_SAMPLES", True, self.config):
+        # Check if balancing is enabled - use config module directly
+        import config as cfg_module
+        if not _cfg_flag("TACTICAL_BALANCE_SAMPLES", True, cfg_module):
             return None, None
         
         # Split into train/val
@@ -141,8 +142,8 @@ class CatBoostModel:
         neg_weight = total_train / (2 * train_neg)
         
         # Clip weights to configured bounds
-        min_w = float(_cfg_flag("TACTICAL_MIN_CLASS_WEIGHT", 0.1, self.config))
-        max_w = float(_cfg_flag("TACTICAL_MAX_CLASS_WEIGHT", 5.0, self.config))
+        min_w = float(_cfg_flag("TACTICAL_MIN_CLASS_WEIGHT", 0.1, cfg_module))
+        max_w = float(_cfg_flag("TACTICAL_MAX_CLASS_WEIGHT", 5.0, cfg_module))
         pos_weight = float(np.clip(pos_weight, min_w, max_w))
         neg_weight = float(np.clip(neg_weight, min_w, max_w))
         
