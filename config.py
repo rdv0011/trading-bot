@@ -180,7 +180,6 @@ ADAPTIVE_DEPTH_MAX = 500000.0         # absolute ceiling (USD)
 
 # ── Trailing Stop (Phase 2) ────────────────────────────────────────────
 TRAILING_STOP_ENABLED = _get_bool("TRAILING_STOP_ENABLED", True)
-TRAILING_ATR_MULT = 1.5               # trail distance = mult * ATR14
 TRAILING_BREAKEVEN_MULT = 1.0         # move SL to breakeven after 1x initial risk
 TRAILING_SL_UPDATE_THRESHOLD = 0.002  # 0.2% min move to trigger exchange SL/TP update (hybrid) — fallback when adaptive disabled
 
