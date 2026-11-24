@@ -204,18 +204,18 @@ class CatBoostModel:
             y = df[target_col].fillna(0)
             multi = False
 
+        # Internal train/validation split (80/20) for early stopping
+        n = len(X)
+        n_train = int(np.floor(n * 0.8))
+        X_train, X_val = X.iloc[:n_train], X.iloc[n_train:]
+        y_train, y_val = y.iloc[:n_train], y.iloc[n_train:]
+
         # Compute sample weights for balanced regression (tactical model only)
         sample_weight = None
         val_sample_weight = None
         if not multi:
             # For tactical model: balance positive/negative returns
             sample_weight, val_sample_weight = self._compute_sample_weights(y, n_train)
-
-        # Internal train/validation split (80/20) for early stopping
-        n = len(X)
-        n_train = int(np.floor(n * 0.8))
-        X_train, X_val = X.iloc[:n_train], X.iloc[n_train:]
-        y_train, y_val = y.iloc[:n_train], y.iloc[n_train:]
 
         # Create and train model
         base = CatBoostRegressor(**self.params)
