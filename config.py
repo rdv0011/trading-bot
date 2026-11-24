@@ -148,7 +148,7 @@ INITIAL_EQUITY = 1.0          # Start with 1.0 (100%)
 # the live model retrained every ~10 min DOES signal (observed: live saw ~28
 # entry episodes over 2 days, default sim saw 0). The sim therefore must
 # retrain far more often than 100 candles to mirror live's behavior.
-WALKFORWARD_RETRAIN_EVERY = 10    # how often LIVE retrains, in live iterations
+WALKFORWARD_RETRAIN_EVERY = 10    # how often LIVE retrains, in live iterations (set 0 to disable)
 WALKFORWARD_RETRAIN_EVERY_CANDLES = 1   # how often SIM retrains, in 15m candles (mirrors live)
 
 # Live model hot-swap: reload tactical/strategic models from disk this often

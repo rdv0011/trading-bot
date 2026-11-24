@@ -268,8 +268,7 @@ class DualMLStrategy:
         # Threshold
         self.threshold = getattr(config, 'ABSOLUTE_THRESHOLD', ABSOLUTE_THRESHOLD) if config else ABSOLUTE_THRESHOLD
 
-        # Walk-forward retraining
-        self.retrain_every = getattr(config, 'WALKFORWARD_RETRAIN_EVERY', 100) if config else 100
+        # Walk-forward retraining (read dynamically from config in _live_iteration)
         self.candles_since_retrain = 0
         self.model_refresh_every = getattr(config, 'MODEL_REFRESH_EVERY', 50) if config else 50
 
@@ -533,17 +532,55 @@ class DualMLStrategy:
         """Retrain the tactical model on the recent window (mirrors walk-forward)."""
         from catboost import CatBoostRegressor
         from model import TARGET_COLUMN
+        import config as cfg_module
+        from strategy import _cfg_flag
+        import numpy as np
+
         df_feat = make_features_df(df_raw, timeframe=TACTICAL_TF)
         df_lbl = make_labels_df(df_feat, timeframe=TACTICAL_TF).dropna()
         if len(df_lbl) < 100 or not self.feature_cols:
             return
         feats = [c for c in self.feature_cols if c in df_lbl.columns]
+        X = df_lbl[feats].fillna(0)
+        y = df_lbl[TARGET_COLUMN].fillna(0)
+
+        # Compute sample weights for balanced regression (if enabled)
+        sample_weight = None
+        if _cfg_flag("TACTICAL_BALANCE_SAMPLES", True, cfg_module):
+            # Split into train/val (80/20)
+            n = len(X)
+            n_train = int(np.floor(n * 0.8))
+            y_train = y.iloc[:n_train]
+            
+            train_pos = (y_train > 0).sum()
+            train_neg = (y_train <= 0).sum()
+            total_train = len(y_train)
+            
+            if train_pos > 0 and train_neg > 0:
+                # Compute weights: weight = total / (2 * class_count)
+                pos_weight = total_train / (2 * train_pos)
+                neg_weight = total_train / (2 * train_neg)
+                
+                # Clip weights to configured bounds
+                min_w = float(_cfg_flag("TACTICAL_MIN_CLASS_WEIGHT", 0.1, cfg_module))
+                max_w = float(_cfg_flag("TACTICAL_MAX_CLASS_WEIGHT", 5.0, cfg_module))
+                pos_weight = float(np.clip(pos_weight, min_w, max_w))
+                neg_weight = float(np.clip(neg_weight, min_w, max_w))
+                
+                sample_weight = np.where(y > 0, pos_weight, neg_weight).astype(float)
+                pos_pct = train_pos / total_train * 100
+                neg_pct = train_neg / total_train * 100
+                log_debug(f"  Walk-forward retrain balance: pos={pos_pct:.1f}% ({train_pos}), neg={neg_pct:.1f}% ({train_neg})")
+                log_debug(f"  Walk-forward retrain weights: pos={pos_weight:.3f}, neg={neg_weight:.3f}")
+
         base = CatBoostRegressor(**self.tactical_model.params)
-        base.fit(
-            df_lbl[feats].fillna(0),
-            df_lbl[TARGET_COLUMN].fillna(0),
-            verbose=False,
-        )
+        fit_params = {
+            "X": X, "y": y,
+            "verbose": False,
+        }
+        if sample_weight is not None:
+            fit_params["sample_weight"] = sample_weight
+        base.fit(**fit_params)
         n_trees = getattr(base, "tree_count_", 0)
         if n_trees < MIN_TREES:
             log_warning(
@@ -551,11 +588,7 @@ class DualMLStrategy:
                 f"(< {MIN_TREES}); retraining without early stopping..."
             )
             base2 = CatBoostRegressor(**self.tactical_model.params)
-            base2.fit(
-                df_lbl[feats].fillna(0),
-                df_lbl[TARGET_COLUMN].fillna(0),
-                verbose=False,
-            )
+            base2.fit(X, y, verbose=False)
             n_trees = getattr(base2, "tree_count_", 0)
             base = base2
         self.tactical_model.model = base
@@ -992,8 +1025,11 @@ class DualMLStrategy:
         # live matches sim. The frozen full-history model compresses predictions
         # to ~0 (never crosses threshold); the recent-window retrain recovers
         # the signal that simulation exploits.
+        # NOTE: Set WALKFORWARD_RETRAIN_EVERY=0 in config to disable walk-forward
+        # retraining and rely solely on the balanced full-history model.
         self.candles_since_retrain = getattr(self, "candles_since_retrain", 0) + 1
-        if (self.candles_since_retrain >= self.retrain_every
+        retrain_every = int(_cfg_flag("WALKFORWARD_RETRAIN_EVERY", 10, self.config))
+        if retrain_every > 0 and (self.candles_since_retrain >= retrain_every
                 or self.tactical_model is None
                 or self.tactical_model.model is None
                 or self._tactical_model_is_degenerate()):
