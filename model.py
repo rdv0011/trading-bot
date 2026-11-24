@@ -223,7 +223,7 @@ class CatBoostModel:
 
         print(f"\n  Training with {n_train} train, {n - n_train} val samples...")
 
-        def _fit_with_fallback(X_tr, y_tr, X_v, y_v, verbose=100, sample_weight=None, val_sample_weight=None):
+        def _fit_with_fallback(X_tr, y_tr, X_v, y_v, verbose=100, sample_weight=None):
             """Fit with early stopping; retrain without it if too few trees."""
             cb = CatBoostRegressor(**self.params)
             fit_params = {
@@ -234,8 +234,6 @@ class CatBoostModel:
             }
             if sample_weight is not None:
                 fit_params["sample_weight"] = sample_weight
-            if val_sample_weight is not None:
-                fit_params["eval_sample_weight"] = val_sample_weight
             cb.fit(**fit_params)
             n_trees = getattr(cb, "tree_count_", 0)
             if n_trees < MIN_TREES:
@@ -272,7 +270,7 @@ class CatBoostModel:
             best_score_val = float(np.mean(best_scores)) if best_scores else None
         else:
             self.model = _fit_with_fallback(X_train, y_train, X_val, y_val, verbose=100,
-                                            sample_weight=sample_weight, val_sample_weight=val_sample_weight)
+                                            sample_weight=sample_weight)
             best_score_val = None
             if hasattr(self.model, 'best_score_'):
                 bs = self.model.best_score_
