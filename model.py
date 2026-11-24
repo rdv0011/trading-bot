@@ -20,6 +20,7 @@ from config import (
     WALKFORWARD_RETRAIN_EVERY_CANDLES, TACTICAL_TF, STRATEGIC_TARGET_COLS,
     MIN_TREES,
 )
+from strategy import _cfg_flag
 
 # ── Constants ───────────────────────────────────────────────────────────
 TARGET_COLUMN = 'future_ret'
@@ -99,6 +100,69 @@ class CatBoostModel:
         self.meta_path = self.model_dir / f"{prefix}_{self.model_type}_meta.json"
         return self.model_path, self.meta_path
 
+    def _compute_sample_weights(self, y: pd.Series, n_train: int) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Compute sample weights to balance positive/negative returns for tactical model.
+        
+        Returns higher weights for the minority class (typically negative returns
+        in bull markets) to prevent the model from learning only positive predictions.
+        
+        Args:
+            y: Target values (future returns)
+            n_train: Number of training samples
+            
+        Returns:
+            Tuple of (train_sample_weights, val_sample_weights)
+        """
+        # Check if balancing is enabled
+        if not _cfg_flag("TACTICAL_BALANCE_SAMPLES", True, self.config):
+            return None, None
+        
+        # Split into train/val
+        y_train = y.iloc[:n_train]
+        y_val = y.iloc[n_train:]
+        
+        # Compute class balance (positive vs negative returns)
+        train_pos = (y_train > 0).sum()
+        train_neg = (y_train <= 0).sum()
+        total_train = len(y_train)
+        
+        val_pos = (y_val > 0).sum()
+        val_neg = (y_val <= 0).sum()
+        total_val = len(y_val)
+        
+        if train_pos == 0 or train_neg == 0:
+            # No imbalance, return uniform weights
+            return np.ones(total_train), np.ones(total_val)
+        
+        # Compute weights: weight = total / (2 * class_count)
+        # This gives equal total weight to each class
+        pos_weight = total_train / (2 * train_pos)
+        neg_weight = total_train / (2 * train_neg)
+        
+        # Clip weights to configured bounds
+        min_w = float(_cfg_flag("TACTICAL_MIN_CLASS_WEIGHT", 0.1, self.config))
+        max_w = float(_cfg_flag("TACTICAL_MAX_CLASS_WEIGHT", 5.0, self.config))
+        pos_weight = float(np.clip(pos_weight, min_w, max_w))
+        neg_weight = float(np.clip(neg_weight, min_w, max_w))
+        
+        val_pos_weight = total_val / (2 * val_pos) if val_pos > 0 else 1.0
+        val_neg_weight = total_val / (2 * val_neg) if val_neg > 0 else 1.0
+        val_pos_weight = float(np.clip(val_pos_weight, min_w, max_w))
+        val_neg_weight = float(np.clip(val_neg_weight, min_w, max_w))
+        
+        # Build weight arrays
+        train_weights = np.where(y_train > 0, pos_weight, neg_weight).astype(float)
+        val_weights = np.where(y_val > 0, val_pos_weight, val_neg_weight).astype(float)
+        
+        # Log balance info
+        pos_pct = train_pos / total_train * 100
+        neg_pct = train_neg / total_train * 100
+        print(f"  Target balance: pos={pos_pct:.1f}% ({train_pos}), neg={neg_pct:.1f}% ({train_neg})")
+        print(f"  Sample weights: pos={pos_weight:.3f}, neg={neg_weight:.3f}")
+        
+        return train_weights, val_weights
+
     def train(
         self,
         df: pd.DataFrame,
@@ -140,6 +204,13 @@ class CatBoostModel:
             y = df[target_col].fillna(0)
             multi = False
 
+        # Compute sample weights for balanced regression (tactical model only)
+        sample_weight = None
+        val_sample_weight = None
+        if not multi:
+            # For tactical model: balance positive/negative returns
+            sample_weight, val_sample_weight = self._compute_sample_weights(y, n_train)
+
         # Internal train/validation split (80/20) for early stopping
         n = len(X)
         n_train = int(np.floor(n * 0.8))
@@ -151,15 +222,20 @@ class CatBoostModel:
 
         print(f"\n  Training with {n_train} train, {n - n_train} val samples...")
 
-        def _fit_with_fallback(X_tr, y_tr, X_v, y_v, verbose=100):
+        def _fit_with_fallback(X_tr, y_tr, X_v, y_v, verbose=100, sample_weight=None, val_sample_weight=None):
             """Fit with early stopping; retrain without it if too few trees."""
             cb = CatBoostRegressor(**self.params)
-            cb.fit(
-                X_tr, y_tr,
-                eval_set=(X_v, y_v),
-                early_stopping_rounds=500,
-                verbose=verbose,
-            )
+            fit_params = {
+                "X": X_tr, "y": y_tr,
+                "eval_set": (X_v, y_v),
+                "early_stopping_rounds": 500,
+                "verbose": verbose,
+            }
+            if sample_weight is not None:
+                fit_params["sample_weight"] = sample_weight
+            if val_sample_weight is not None:
+                fit_params["eval_sample_weight"] = val_sample_weight
+            cb.fit(**fit_params)
             n_trees = getattr(cb, "tree_count_", 0)
             if n_trees < MIN_TREES:
                 print(f"\n  WARNING: Early stopping produced only {n_trees} "
@@ -194,7 +270,8 @@ class CatBoostModel:
             self.model = MultiOutputCatBoost(base_models, target_cols)
             best_score_val = float(np.mean(best_scores)) if best_scores else None
         else:
-            self.model = _fit_with_fallback(X_train, y_train, X_val, y_val, verbose=100)
+            self.model = _fit_with_fallback(X_train, y_train, X_val, y_val, verbose=100,
+                                            sample_weight=sample_weight, val_sample_weight=val_sample_weight)
             best_score_val = None
             if hasattr(self.model, 'best_score_'):
                 bs = self.model.best_score_

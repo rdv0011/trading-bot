@@ -55,6 +55,11 @@ TACTICAL_MODEL_PARAMS = {
     "verbose": False,
 }
 
+# Tactical model balancing
+TACTICAL_BALANCE_SAMPLES = _get_bool("TACTICAL_BALANCE_SAMPLES", True)    # enable sample weight balancing
+TACTICAL_MIN_CLASS_WEIGHT = 0.1   # minimum weight for minority class
+TACTICAL_MAX_CLASS_WEIGHT = 5.0   # maximum weight for minority class
+
 # Strategic ML (1h, persisted model) - multi-output trade-parameter model
 STRATEGIC_MODEL_PARAMS = {
     "iterations": 500,      # More thorough training
