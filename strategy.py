@@ -111,14 +111,8 @@ def reload_runtime_overrides(path: Path = RUNTIME_OVERRIDES_PATH) -> bool:
     return True
 
 
-def _cfg_flag(name: str, default: Any, cfg: Any = None) -> Any:
-    """Read a runtime flag: live file override (highest), then an injected
-    config object (e.g. mock in tests), then the module-level config module."""
-    if name in _RUNTIME_OVERRIDES:
-        return _RUNTIME_OVERRIDES[name]
-    src = cfg if cfg is not None else _config
-    return getattr(src, name, default)
-
+# Import _cfg_flag from config to avoid circular imports
+from config import _cfg_flag, _RUNTIME_OVERRIDES
 
 # ── Signal Conversion ───────────────────────────────────────────────────
 def prediction_to_signal(

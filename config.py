@@ -25,6 +25,22 @@ def _get_bool(key: str, default: bool) -> bool:
     return raw.strip().lower() in ("1", "true", "yes", "on")
 
 
+def _cfg_flag(name: str, default: Any, cfg: Any = None) -> Any:
+    """Read a config flag: runtime override (highest), then injected config object,
+    then the module-level config module. Used for runtime-overrideable settings."""
+    # Import here to avoid circular imports
+    import sys
+    _config_module = sys.modules.get('config')
+    if _config_module is not None and hasattr(_config_module, '_RUNTIME_OVERRIDES'):
+        if name in _config_module._RUNTIME_OVERRIDES:
+            return _config_module._RUNTIME_OVERRIDES[name]
+    src = cfg if cfg is not None else _config_module
+    return getattr(src, name, default) if src is not None else default
+
+
+# Runtime overrides dictionary (for live testing without code changes)
+_RUNTIME_OVERRIDES = {}
+
 # ── Data ───────────────────────────────────────────────────────────────
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "15m"          # Tactical timeframe

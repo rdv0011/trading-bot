@@ -19,8 +19,8 @@ from config import (
     MODEL_DIR, TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
     WALKFORWARD_RETRAIN_EVERY_CANDLES, TACTICAL_TF, STRATEGIC_TARGET_COLS,
     MIN_TREES,
+    _cfg_flag,
 )
-from strategy import _cfg_flag
 
 # ── Constants ───────────────────────────────────────────────────────────
 TARGET_COLUMN = 'future_ret'
