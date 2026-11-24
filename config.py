@@ -246,9 +246,10 @@ SCALE_STAKE_FRAC = 0.33                  # scale-in stake = fraction of current 
 
 # ── Trailing SL Improvements ───────────────────────────────────────────
 TRAILING_START_IMMEDIATE = _get_bool("TRAILING_START_IMMEDIATE", True)  # trail from entry, not after 1R
-TRAILING_MIN_DISTANCE_ATR_MULT = 0.5       # minimum trailing distance as fraction of ATR (prevents too-tight trails)
-TRAILING_CHANDELIER_ENABLED = _get_bool("TRAILING_CHANDELIER_ENABLED", False)  # chandelier exit variant
+TRAILING_MIN_DISTANCE_ATR_MULT = 1.0       # minimum trailing distance as fraction of ATR (prevents too-tight trails) — INCREASED from 0.5
+TRAILING_CHANDELIER_ENABLED = _get_bool("TRAILING_CHANDELIER_ENABLED", True)  # chandelier exit variant — ENABLED
 TRAILING_CHANDELIER_MULT = 3.0             # chandelier exit ATR multiplier (typically 2-3)
+TRAILING_ATR_MULT = 2.0                    # trail distance = mult * ATR14 — INCREASED from 1.5
 
 # ── Time-Weighted SL Tightening ────────────────────────────────────────
 TIME_WEIGHTED_SL_ENABLED = _get_bool("TIME_WEIGHTED_SL_ENABLED", True)
@@ -270,6 +271,19 @@ LIQ_IMBALANCE_ENABLED = _get_bool("LIQ_IMBALANCE_ENABLED", True)        # use bi
 LIQ_IMBALANCE_THRESHOLD = 2.0             # max bid/ask depth ratio before blocking
 LIQ_FUNDING_ENABLED = _get_bool("LIQ_FUNDING_ENABLED", True)            # consider funding rate
 LIQ_FUNDING_THRESHOLD_BPS = 5.0           # funding rate threshold in bps (abs value)
+
+# ── LIQ_EXIT Relaxation for Trending Markets ──────────────────────────────
+LIQ_EXIT_ADAPTIVE_QUANTILE = 0.10             # use 10th percentile (was 25th) — more conservative floor
+LIQ_EXIT_ADAPTIVE_MIN_USD = 3000.0            # absolute floor USD/s — LOWERED from 10000
+LIQ_EXIT_ADAPTIVE_MAX_USD = 50000.0           # absolute ceiling USD/s — LOWERED from 100000
+LIQ_EXIT_GRACE_PERIOD_MIN = 20                # minutes to suppress liq_exit after entry — INCREASED from 10
+LIQ_EXIT_TREND_RELAX_ENABLED = _get_bool("LIQ_EXIT_TREND_RELAX_ENABLED", True)  # relax in strong trends
+LIQ_EXIT_TREND_RELAX_MULT = 0.5               # multiply threshold by this in strong trend
+
+# ── Trend-Following Filter ────────────────────────────────────────────────
+TREND_FILTER_ENABLED = _get_bool("TREND_FILTER_ENABLED", True)   # enable EMA trend filter
+TREND_FILTER_EMA_PERIOD = 50                  # EMA period for trend detection
+TREND_FILTER_REQUIRE_ALIGNMENT = True         # require signal direction = trend direction
 
 # ── Cost-to-Edge Optimization ───────────────────────────────────────────
 COST_TRACKING_ENABLED = _get_bool("COST_TRACKING_ENABLED", True)        # track realized vs expected costs
@@ -313,7 +327,12 @@ ABS_VOL_RATIO_ROLLING_WINDOW = 48          # rolling window for median (candles)
 
 # ── Signal Thresholds ──────────────────────────────────────────────────
 # Tactical signal threshold (absolute; used when ADAPTIVE_THRESHOLD_ENABLED=False)
-ABSOLUTE_THRESHOLD = 0.006      # Minimum prediction to trigger LONG/SHORT
+ABSOLUTE_THRESHOLD = 0.006          # Minimum prediction to trigger LONG (fallback)
+ABSOLUTE_THRESHOLD_SHORT = 0.003    # Minimum prediction magnitude to trigger SHORT — LOWERED
+
+# Adaptive threshold bounds
+ADAPTIVE_MIN_THRESHOLD = 0.001      # floor so threshold never goes too low — LOWERED from 0.002
+ADAPTIVE_MAX_THRESHOLD = 0.02       # ceiling so threshold never goes too high
 
 # ── Logging ────────────────────────────────────────────────────────────
 LOG_DIR = "logs"                         # Daily log files go here

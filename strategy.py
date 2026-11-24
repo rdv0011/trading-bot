@@ -48,6 +48,10 @@ from config import (
     CIRCUIT_BREAKER_ENABLED, CIRCUIT_BREAKER_MAX_DAILY_LOSS_PCT,
     CIRCUIT_BREAKER_MAX_CONSECUTIVE_LOSSES, CIRCUIT_BREAKER_COOLDOWN_HOURS,
     CIRCUIT_BREAKER_MAX_DRAWDOWN_PCT,
+    ABSOLUTE_THRESHOLD_SHORT, ADAPTIVE_MIN_THRESHOLD, ADAPTIVE_MAX_THRESHOLD,
+    LIQ_EXIT_ADAPTIVE_QUANTILE, LIQ_EXIT_ADAPTIVE_MIN_USD, LIQ_EXIT_ADAPTIVE_MAX_USD,
+    LIQ_EXIT_GRACE_PERIOD_MIN, LIQ_EXIT_TREND_RELAX_ENABLED, LIQ_EXIT_TREND_RELAX_MULT,
+    TREND_FILTER_ENABLED, TREND_FILTER_EMA_PERIOD, TREND_FILTER_REQUIRE_ALIGNMENT,
     is_testnet_env,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
@@ -117,13 +121,36 @@ def _cfg_flag(name: str, default: Any, cfg: Any = None) -> Any:
 
 
 # ── Signal Conversion ───────────────────────────────────────────────────
-def prediction_to_signal(pred: float, threshold: float = ABSOLUTE_THRESHOLD) -> str:
-    """Convert tactical prediction to trading signal."""
+def prediction_to_signal(
+    pred: float,
+    threshold: float = ABSOLUTE_THRESHOLD,
+    short_threshold: float = None,
+    trend_direction: str = "neutral"  # "up", "down", "neutral"
+) -> str:
+    """Convert tactical prediction to trading signal with optional trend filter.
+
+    Args:
+        pred: Model prediction
+        threshold: Threshold for long signals
+        short_threshold: Threshold for short signals (defaults to threshold)
+        trend_direction: "up", "down", or "neutral" - if trend filter enabled,
+                         only signals aligned with trend are allowed
+    """
+    if short_threshold is None:
+        short_threshold = threshold
+
     if np.isnan(pred):
         return "hold"
+
+    # Apply trend filter if enabled and trend is not neutral
+    if trend_direction == "up" and pred <= 0:
+        return "hold"  # Block shorts in uptrend
+    if trend_direction == "down" and pred >= 0:
+        return "hold"  # Block longs in downtrend
+
     if pred > threshold:
         return "long"
-    if pred < -threshold:
+    if pred < -short_threshold:
         return "short"
     return "hold"
 
@@ -989,7 +1016,39 @@ class DualMLStrategy:
                 self.pred_history = self.pred_history[-lookback:]
         self._last_tactical_pred = float(pred) if not np.isnan(pred) else 0.0
         thr = self._current_threshold()
-        signal = prediction_to_signal(pred, thr)
+
+        # Trend filter: compute EMA trend direction
+        trend_direction = "neutral"
+        if _cfg_flag("TREND_FILTER_ENABLED", True, self.config):
+            ema_period = int(_cfg_flag("TREND_FILTER_EMA_PERIOD", 50, self.config))
+            close_prices = df_tactical["close"]
+            if len(close_prices) >= ema_period:
+                ema = close_prices.ewm(span=ema_period, adjust=False).mean().iloc[-1]
+                current_price = close_prices.iloc[-1]
+                if current_price > ema:
+                    trend_direction = "up"
+                elif current_price < ema:
+                    trend_direction = "down"
+                else:
+                    trend_direction = "neutral"
+                log_debug(f"[TREND FILTER] EMA({ema_period})={ema:.2f}, price={current_price:.2f}, trend={trend_direction}")
+
+        # Use separate short threshold
+        short_thr = float(_cfg_flag("ABSOLUTE_THRESHOLD_SHORT", 0.003, self.config))
+
+        # Apply trend filter if enabled
+        require_alignment = _cfg_flag("TREND_FILTER_REQUIRE_ALIGNMENT", True, self.config)
+        if not require_alignment:
+            trend_direction = "neutral"
+
+        # Store trend direction for use in LIQ_EXIT relaxation
+        self._last_trend_direction = trend_direction
+
+        signal = prediction_to_signal(
+            pred, thr,
+            short_threshold=short_thr,
+            trend_direction=trend_direction
+        )
 
         # Stash latest ATR14 for the trailing stop (Phase 2)
         self._last_atr14 = float(df_feat.iloc[-1].get("atr14", 0.0) or 0.0)
@@ -1483,13 +1542,33 @@ class DualMLStrategy:
             lookback = int(_cfg_flag("ADAPTIVE_LIQ_LOOKBACK", 200, self.config))
             if len(self.trade_intensity_history) > lookback:
                 self.trade_intensity_history = self.trade_intensity_history[-lookback:]
+            
+            # Use new LIQ_EXIT adaptive parameters for exit
+            liq_quantile = float(_cfg_flag("LIQ_EXIT_ADAPTIVE_QUANTILE", 0.10, self.config))
+            liq_min_usd = float(_cfg_flag("LIQ_EXIT_ADAPTIVE_MIN_USD", 3000.0, self.config))
+            liq_max_usd = float(_cfg_flag("LIQ_EXIT_ADAPTIVE_MAX_USD", 50000.0, self.config))
+            
             min_intensity = adaptive_liquidity_threshold(
                 pd.Series(self.trade_intensity_history),
                 lookback=lookback,
-                quantile=float(_cfg_flag("ADAPTIVE_LIQ_QUANTILE", 0.25, self.config)),
-                min_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MIN_USD", 10000.0, self.config)),
-                max_threshold=float(_cfg_flag("ADAPTIVE_LIQ_MAX_USD", 100000.0, self.config)),
+                quantile=liq_quantile,
+                min_threshold=liq_min_usd,
+                max_threshold=liq_max_usd,
             )
+            
+            # Trend relaxation: if strong trend in position direction, relax threshold
+            if _cfg_flag("LIQ_EXIT_TREND_RELAX_ENABLED", True, self.config):
+                trend_relax_mult = float(_cfg_flag("LIQ_EXIT_TREND_RELAX_MULT", 0.5, self.config))
+                # Use stored trend direction from _live_iteration
+                trend_direction = getattr(self, '_last_trend_direction', 'neutral')
+                if self.position > 0 and trend_direction == "up":
+                    # Long position in uptrend - relax threshold
+                    min_intensity *= trend_relax_mult
+                    log_debug(f"[LIQ_EXIT RELAX] Long in uptrend: threshold relaxed to {min_intensity:.0f}")
+                elif self.position < 0 and trend_direction == "down":
+                    # Short position in downtrend - relax threshold
+                    min_intensity *= trend_relax_mult
+                    log_debug(f"[LIQ_EXIT RELAX] Short in downtrend: threshold relaxed to {min_intensity:.0f}")
         else:
             min_intensity = float(_cfg_flag("LIQ_EXIT_MIN_TRADE_INTENSITY_USD", 25000.0, self.config))
         
