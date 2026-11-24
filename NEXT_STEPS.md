@@ -126,6 +126,11 @@
 | Nov 23 | **Cost-to-edge optimization** (cost tracking, stake power adjust, TOD model) | `86897e5` |
 | Nov 23 | **Circuit breaker** (daily loss %, consecutive losses, drawdown, cooldown) | `362b33f` |
 | Nov 23 | **Position sync improvements** (existing SL/TP detection, dust validation, trailing sync) | `362b33f` |
+| Nov 24 | **Enable Short Signals** (ABSOLUTE_THRESHOLD_SHORT=0.003, separate threshold) | `e678584` |
+| Nov 24 | **Reduce Trailing SL Sensitivity** (ATR_MULT=2.0, MIN_DIST=1.0, CHANDELIER=on) | `e678584` |
+| Nov 24 | **Relax LIQ_EXIT for Trending Markets** (quantile=0.10, min=3000, grace=20min, trend relax) | `e678584` |
+| Nov 24 | **Lower Entry Threshold for Shorts** (THRESHOLD_SHORT=0.003, ADAPTIVE_MIN=0.001) | `e678584` |
+| Nov 24 | **Add Trend-Following Filter** (EMA50, block counter-trend signals) | `e678584` |
 
 ---
 
@@ -164,6 +169,12 @@
 ---
 
 ## Remaining Items (Optional / Nice-to-Have)
+
+### Critical (Required for Profitability)
+- **Retrain tactical model with balanced labels**: Current model only predicts positive → no short signals
+  - Add class weights or balanced sampling in training
+  - Include bear market data (2022, 2018)
+  - Validate on out-of-sample downtrend periods
 
 ### Code Quality Improvements
 - **Refactor large functions**: Split `_check_exits()` and `_sync_trailing_orders()` into smaller helpers
