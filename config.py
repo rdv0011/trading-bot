@@ -44,14 +44,15 @@ _RUNTIME_OVERRIDES = {}
 
 # ── Data ───────────────────────────────────────────────────────────────
 SYMBOL = "BTCUSDT"
-TIMEFRAME = "15m"          # Tactical timeframe
+TIMEFRAME = "1h"           # Tactical timeframe (was 15m)
 TACTICAL_TF = TIMEFRAME     # Alias for compatibility
-STRATEGIC_TF = "1h"        # Strategic timeframe
-HISTORY_DAYS = 50          # ~4800 candles 15m, ~1200 candles 1h (live Binance 90d+)
+STRATEGIC_TF = "1h"        # Strategic timeframe (same as tactical now)
+HISTORY_DAYS = 180         # ~4320 candles 1h (live Binance 90d+)
 TRAIN_FRACTION = 0.8       # Chronological split: 80% train, 20% validation
 
 # ── Feature Engineering ────────────────────────────────────────────────
-LABEL_HORIZON = 4          # Predict 4 candles ahead = 1 hour ahead
+# LABEL_HORIZON is now defined per-timeframe in TIMEFRAME_CONFIG
+# For 1h: label_horizon_candles=1 (predict 1 hour ahead)
 FEATURE_LAGS = [1, 2, 3, 5, 10, 20, 50]  # Return lags
 EMA_SPANS = [5, 10, 20, 50, 100]          # EMAs for trend detection
 ATR_PERIOD = 14                                          # Average True Range
@@ -269,8 +270,8 @@ SCALE_STAKE_FRAC = 0.33                  # scale-in stake = fraction of current 
 TRAILING_START_IMMEDIATE = _get_bool("TRAILING_START_IMMEDIATE", True)  # trail from entry, not after 1R
 TRAILING_MIN_DISTANCE_ATR_MULT = 1.0       # minimum trailing distance as fraction of ATR (prevents too-tight trails) — INCREASED from 0.5
 TRAILING_CHANDELIER_ENABLED = _get_bool("TRAILING_CHANDELIER_ENABLED", True)  # chandelier exit variant — ENABLED
-TRAILING_CHANDELIER_MULT = 3.0             # chandelier exit ATR multiplier (typically 2-3)
-TRAILING_ATR_MULT = 2.0                    # trail distance = mult * ATR14 — INCREASED from 1.5
+TRAILING_CHANDELIER_MULT = 5.0             # chandelier exit ATR multiplier (wider for 1h timeframe, was 3.0)
+TRAILING_ATR_MULT = 3.0                    # trail distance = mult * ATR14 (wider for 1h timeframe, was 2.0)
 
 # ── Time-Weighted SL Tightening ────────────────────────────────────────
 TIME_WEIGHTED_SL_ENABLED = _get_bool("TIME_WEIGHTED_SL_ENABLED", True)
