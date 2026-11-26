@@ -182,9 +182,17 @@
   - Fixed walk-forward retraining to preserve balanced training
 - **Switch tactical model to 1h timeframe**: ✅ Done (Nov 26)
   - Retrained on 180 days of 1h data (4320 candles)
-  - 500 trees, balanced labels (49.9%/50.1%)
+  - 500 trees (early stopped to 30), balanced labels (49.9%/50.1%)
   - Wider trailing SL for 1h: CHANDELIER_MULT=5.0, ATR_MULT=3.0
   - Bot restarted and running on 1h timeframe
+- **Remove Strategic Model (Phase 1)**: ✅ Done (Nov 26)
+  - Deleted strategic ML model training/loading/prediction code
+  - Replaced with heuristic meta-params in strategy.py (_update_meta_params_heuristic)
+  - Updated train_mode, simulate_mode, live_mode to use tactical model only
+  - Removed STRATEGIC_TARGET_COLS, STRATEGIC_MODEL_PARAMS, STRATEGIC_TF from config.py
+  - Removed strategic features from data.py
+  - Updated compare_live_vs_sim.py and all tests
+  - Simplifies codebase: single tactical model (1h) + heuristic meta-params
 
 ### Code Quality Improvements
 - **Refactor large functions**: Split `_check_exits()` and `_sync_trailing_orders()` into smaller helpers
