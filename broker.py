@@ -22,7 +22,7 @@ from binance.exceptions import BinanceAPIException
 
 import config
 from config import (
-    SYMBOL, TACTICAL_TF, STRATEGIC_TF,
+    SYMBOL, TACTICAL_TF,
     INITIAL_EQUITY, FEE, SLIPPAGE,
     is_testnet_env,
 )
