@@ -133,6 +133,8 @@
 | Nov 24 | **Add Trend-Following Filter** (EMA50, block counter-trend signals) | `e678584` |
 | Nov 24 | **Retrain tactical model with balanced labels** (180 days, sample weight balancing) | `d414d39` |
 | Nov 24 | **Fix walk-forward retraining** to use sample weight balancing, add disable option | `87cdbe5` |
+| Nov 26 | **Switch tactical model to 1h timeframe** (retrained on 180 days 1h data, 500 trees) | `3c33a36` |
+| Nov 26 | **Widen trailing SL for 1h** (CHANDELIER_MULT=5.0, ATR_MULT=3.0) | `3c33a36` |
 
 ---
 
@@ -178,6 +180,11 @@
   - Trained on 180 days of data (includes bear market periods)
   - Model now produces both positive and negative predictions
   - Fixed walk-forward retraining to preserve balanced training
+- **Switch tactical model to 1h timeframe**: ✅ Done (Nov 26)
+  - Retrained on 180 days of 1h data (4320 candles)
+  - 500 trees, balanced labels (49.9%/50.1%)
+  - Wider trailing SL for 1h: CHANDELIER_MULT=5.0, ATR_MULT=3.0
+  - Bot restarted and running on 1h timeframe
 
 ### Code Quality Improvements
 - **Refactor large functions**: Split `_check_exits()` and `_sync_trailing_orders()` into smaller helpers
