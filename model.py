@@ -16,8 +16,8 @@ import logging
 from catboost import CatBoostRegressor, Pool
 
 from config import (
-    MODEL_DIR, TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
-    WALKFORWARD_RETRAIN_EVERY_CANDLES, TACTICAL_TF, STRATEGIC_TARGET_COLS,
+    MODEL_DIR, TACTICAL_MODEL_PARAMS,
+    WALKFORWARD_RETRAIN_EVERY_CANDLES, TACTICAL_TF,
     MIN_TREES,
     _cfg_flag,
 )
@@ -548,88 +548,33 @@ def strategic_batch_predict(
     model: CatBoostModel,
     feature_cols: List[str],
 ) -> pd.Series:
-    """Batch prediction using strategic model on entire dataset."""
+    """Batch prediction using tactical model on entire dataset."""
     return model.predict(df, feature_cols)
 
 
-# ── Meta-Parameter Prediction from Strategic Model ──────────────────────
-def predict_strategic_meta_params(
-    df: pd.DataFrame,
-    model: CatBoostModel,
-    feature_cols: List[str],
-) -> List[Dict[str, Any]]:
-    """
-    Predict strategic meta-parameters (stake, SL, TP, max_hold, leverage).
-    Returns list of param dicts, one per row in df.
-
-    The strategic model is a multi-output regressor over STRATEGIC_TARGET_COLS.
-    Each predicted value is clamped to a sane range; if a target is absent
-    (older single-output model), it falls back to the safe default.
-    """
-    if model.model is None:
-        raise RuntimeError("Strategic model not loaded")
-
-    X = df[feature_cols].fillna(0)
-    raw_preds = model.model.predict(X)
-
-    target_cols = (
-        list(model.metadata.get("target_cols", []))
-        if model.metadata
-        else list(STRATEGIC_TARGET_COLS)
-    )
-
-    bounds = {
-        "recommended_leverage": (1.0, 10.0, 1.0),
-        "max_exposure_frac": (0.0, 1.0, 0.5),
-        "stake_long_frac": (0.01, 0.3, 0.1),
-        "stake_short_frac": (0.01, 0.2, 0.05),
-        "stop_loss_frac": (0.005, 0.1, 0.02),
-        "take_profit_frac": (0.005, 0.2, 0.04),
-        "max_hold_hours": (0.5, 48.0, 4.0),
-    }
-
-    # Column order in the prediction matrix follows target_cols if the model
-    # is multi-output; default to ordered bounds otherwise.
-    pred_arrs = np.asarray(raw_preds)
-    is_multi_col = pred_arrs.ndim > 1 and pred_arrs.shape[1] > 1
-    param_list = []
-
-    for i in range(len(df)):
-        row = {}
-        if target_cols and is_multi_col:
-            for j, key in enumerate(target_cols):
-                default = bounds.get(key, (0.0, 1.0, 0.0))[2]
-                if j < pred_arrs.shape[1]:
-                    row[key] = _clamp_float(pred_arrs, (i, j), *bounds.get(key, (0.0, 1.0, default)))
-                else:
-                    row[key] = default
-        else:
-            for key in STRATEGIC_TARGET_COLS:
-                row[key] = bounds[key][2]
-
-        param_list.append({
-            "stake_long_frac": row.get("stake_long_frac", 0.1),
-            "stake_short_frac": row.get("stake_short_frac", 0.05),
-            "stop_loss_frac": row.get("stop_loss_frac", 0.02),
-            "take_profit_frac": row.get("take_profit_frac", 0.04),
-            "max_hold_hours": row.get("max_hold_hours", 4.0),
-            "max_exposure_frac": row.get("max_exposure_frac", 0.5),
-            "recommended_leverage": row.get("recommended_leverage", 1.0),
-            "regime": "trend",
-        })
-
-    return param_list
+# ── Meta-Parameter Bounds (formerly from strategic model) ────────────────
+# These are now computed heuristically in strategy.py, but bounds remain
+# for reference and validation.
+META_PARAM_BOUNDS = {
+    "recommended_leverage": (1.0, 10.0, 1.0),
+    "max_exposure_frac": (0.0, 1.0, 0.5),
+    "stake_long_frac": (0.01, 0.3, 0.1),
+    "stake_short_frac": (0.01, 0.2, 0.05),
+    "stop_loss_frac": (0.005, 0.1, 0.02),
+    "take_profit_frac": (0.005, 0.2, 0.04),
+    "max_hold_hours": (0.5, 48.0, 4.0),
+}
 
 
-def _clamp_float(pred_arr, idx, lo, hi, default):
-    value = default
+def _clamp_float(value: float, lo: float, hi: float, default: float) -> float:
+    """Clamp a value to [lo, hi] with fallback default."""
     try:
-        raw = float(pred_arr[idx])
-        if np.isfinite(raw):
-            value = raw
-    except (IndexError, ValueError, TypeError):
-        pass
-    return float(max(lo, min(hi, value)))
+        v = float(value)
+        if not np.isfinite(v):
+            return default
+    except (ValueError, TypeError):
+        return default
+    return float(max(lo, min(hi, v)))
 
 
 # ── Convenience Functions ──────────────────────────────────────────────
@@ -638,33 +583,15 @@ def train_tactical_model(
     feature_cols: List[str],
     model_params: dict = None,
 ) -> CatBoostModel:
-    """Train tactical (15m) model."""
+    """Train tactical model."""
     model = CatBoostModel(model_type="tactical", model_params=model_params)
     model.train(df, feature_cols, target_col=TARGET_COLUMN, save=True)
-    return model
-
-
-def train_strategic_model(
-    df: pd.DataFrame,
-    feature_cols: List[str],
-    model_params: dict = None,
-) -> CatBoostModel:
-    """Train strategic (1h) multi-output trade-parameter model."""
-    model = CatBoostModel(model_type="strategic", model_params=model_params)
-    model.train(df, feature_cols, target_cols=list(STRATEGIC_TARGET_COLS), save=True)
     return model
 
 
 def load_tactical_model(model_dir: str = MODEL_DIR) -> CatBoostModel:
     """Load latest tactical model from disk."""
     model = CatBoostModel(model_type="tactical", model_dir=model_dir)
-    model.load()
-    return model
-
-
-def load_strategic_model(model_dir: str = MODEL_DIR) -> CatBoostModel:
-    """Load latest strategic model from disk."""
-    model = CatBoostModel(model_type="strategic", model_dir=model_dir)
     model.load()
     return model
 

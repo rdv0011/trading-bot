@@ -475,7 +475,6 @@ def strategy_factory():
             broker=broker,
             config=config,
             tactical_model=MagicMock(),
-            strategic_model=MagicMock(),
             feature_cols=["close"],
             **kwargs,
         )

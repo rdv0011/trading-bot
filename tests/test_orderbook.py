@@ -59,7 +59,6 @@ def make_strat(strategy_module):
             broker=broker,
             config=cfg,
             tactical_model=MagicMock(),
-            strategic_model=MagicMock(),
             feature_cols=["close"],
             liquidity_monitor=monitor,
         )

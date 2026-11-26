@@ -46,9 +46,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from config import (  # noqa: E402
     SYMBOL,
     TIMEFRAME,
-    STRATEGIC_TF,
     WALKFORWARD_RETRAIN_EVERY_CANDLES,
-    STRATEGIC_TARGET_COLS,
     ABSOLUTE_THRESHOLD,
 )
 
@@ -56,13 +54,11 @@ from data import (  # noqa: E402
     download_historical,
     make_features_df,
     make_labels_df,
-    add_strategic_features_df,
     get_feature_cols,
 )
 from model import (  # noqa: E402
     CatBoostModel,
     rolling_tactical_predict,
-    predict_strategic_meta_params,
 )
 from simulate import run_simulation  # noqa: E402
 
@@ -143,26 +139,15 @@ def build_replay_sim(
     clip_lo = start - pd.Timedelta(days=pad_days)
     raw = raw_all.loc[clip_lo: end]
 
-    # 2. Load models.
+    # 2. Load tactical model only.
     tactical_model = CatBoostModel(model_type="tactical", model_dir=model_dir)
     tactical_model.load()
-    strategic_model = CatBoostModel(model_type="strategic", model_dir=model_dir)
-    strategic_model.load()
 
-    # 3. Build feature frames for each timeframe. add_strategic_features_df
-    #    needs base features already present (ret1/atr14), so the 1h raw data
-    #    must be feature-engineered first on its own timeframe.
+    # 3. Build feature frame.
     df_base_feat = make_features_df(raw, timeframe=TIMEFRAME)
-    df_strat = add_strategic_features_df(
-        make_features_df(raw, timeframe=STRATEGIC_TF),
-        timeframe=STRATEGIC_TF,
-    )
 
     # Tactical feature cols from the model metadata (authoritative, matches live).
     tact_features = tactical_model.metadata.get("feature_cols") or get_feature_cols(df_base_feat)
-    strat_features = strategic_model.metadata.get("feature_cols") or [
-        c for c in get_feature_cols(df_strat) if c not in STRATEGIC_TARGET_COLS
-    ]
 
     # 4. Tactical predictions (walk-forward retrain vs frozen).
     if replay == "walk":
@@ -179,25 +164,52 @@ def build_replay_sim(
         preds = tactical_model.predict(df_base, tact_features)
         tactical_preds = pd.Series(np.asarray(preds).ravel(), index=df_base.index)
 
-    # 5. Strategic meta-params (batch, mirrors simulate_mode).
-    strategic_meta_params = predict_strategic_meta_params(
-        df_strat, strategic_model, strat_features
-    )
+    # 5. Generate meta-params heuristically (no strategic model).
+    aligned_meta_params = []
+    for _, row in df_base.iterrows():
+        vol_12 = row.get("vol_12", 0.0)
+        vol_48 = row.get("vol_48", 0.0)
+        vol_ratio = vol_12 / max(vol_48, 1e-8)
+        abs_vol_ratio = row.get("abs_vol_ratio", 1.0)
+        atr14 = row.get("atr14", 0.0)
+        close = row.get("close", 1.0)
+        atr_pct = atr14 / max(close, 1e-8)
 
-    # 6. Align strategic (1h) params onto tactical (15m) rows via ffill.
-    strat_index = df_strat.index
-    strat_params_df = pd.DataFrame(strategic_meta_params, index=strat_index)
-    strat_params_reindexed = strat_params_df.reindex(df_base.index, method="ffill")
-    param_defaults = {
-        "stake_long_frac": 0.1, "stake_short_frac": 0.05,
-        "stop_loss_frac": 0.02, "take_profit_frac": 0.04,
-        "max_hold_hours": 4.0, "recommended_leverage": 1.0,
-        "max_exposure_frac": 1.0, "regime": "trend",
-    }
-    aligned_meta_params = [
-        row.to_dict()
-        for _, row in strat_params_reindexed.fillna(param_defaults).iterrows()
-    ]
+        if vol_ratio < 1.0:
+            regime = "trend"
+        elif vol_ratio < 1.6:
+            regime = "high_vol"
+        else:
+            regime = "chop"
+
+        base = {
+            "trend":     dict(leverage=5.0, stake_long=0.20, stake_short=0.10, sl=0.015, hold=8.0),
+            "high_vol":  dict(leverage=2.0, stake_long=0.10, stake_short=0.05, sl=0.030, hold=2.0),
+            "chop":      dict(leverage=1.0, stake_long=0.10, stake_short=0.05, sl=0.020, hold=4.0),
+        }[regime]
+
+        vol_scale = min(1.0, 1.0 / max(abs_vol_ratio, 0.5))
+        sl_frac = max(base["sl"], min(1.5 * atr_pct, 0.05))
+        tp_frac = sl_frac * 2.0
+
+        if vol_ratio > 1.6:
+            max_exposure = 0.4
+        elif vol_ratio > 1.0:
+            max_exposure = 0.7
+        else:
+            max_exposure = 1.0
+
+        meta = {
+            "recommended_leverage": base["leverage"],
+            "max_exposure_frac": max_exposure,
+            "stake_long_frac": base["stake_long"] * vol_scale,
+            "stake_short_frac": base["stake_short"] * vol_scale,
+            "stop_loss_frac": sl_frac,
+            "take_profit_frac": tp_frac,
+            "max_hold_hours": base["hold"],
+            "regime": regime,
+        }
+        aligned_meta_params.append(meta)
 
     # 7. Run simulation engine.
     trades_df, metrics, equity_curve = run_simulation(

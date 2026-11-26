@@ -113,7 +113,6 @@ def test_degenerate_detected_when_one_tree(strategy_mod):
     strat = strategy_mod.DualMLStrategy(
         broker=MagicMock(),
         tactical_model=MagicMock(model=MagicMock(tree_count_=1)),
-        strategic_model=MagicMock(),
         feature_cols=["close"],
         config=mock_config,
     )
@@ -124,7 +123,6 @@ def test_healthy_model_not_degenerate(strategy_mod):
     strat = strategy_mod.DualMLStrategy(
         broker=MagicMock(),
         tactical_model=MagicMock(model=MagicMock(tree_count_=100)),
-        strategic_model=MagicMock(),
         feature_cols=["close"],
         config=mock_config,
     )
@@ -139,7 +137,6 @@ def test_missing_tree_count_attr_assumed_healthy(strategy_mod):
     strat = strategy_mod.DualMLStrategy(
         broker=MagicMock(),
         tactical_model=MagicMock(model=SimpleNamespace()),
-        strategic_model=MagicMock(),
         feature_cols=["close"],
         config=mock_config,
     )
@@ -150,7 +147,6 @@ def test_no_model_not_flag_degenerate(strategy_mod):
     strat = strategy_mod.DualMLStrategy(
         broker=MagicMock(),
         tactical_model=None,
-        strategic_model=MagicMock(),
         feature_cols=["close"],
         config=mock_config,
     )

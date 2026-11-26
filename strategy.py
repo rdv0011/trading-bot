@@ -55,8 +55,8 @@ from config import (
     is_testnet_env,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
-from model import CatBoostModel, rolling_tactical_predict, strategic_batch_predict, predict_strategic_meta_params
-from data import (make_features_df, add_strategic_features_df, make_labels_df,
+from model import CatBoostModel, rolling_tactical_predict, META_PARAM_BOUNDS, _clamp_float
+from data import (make_features_df, make_labels_df,
                   adaptive_threshold, adaptive_liquidity_threshold, adaptive_trailing_threshold,
                   adaptive_vol_threshold, adaptive_spread_threshold, adaptive_depth_threshold,
                   compute_atr_from_klines, compute_vol_ratio_from_klines,
@@ -164,9 +164,9 @@ DEFAULT_META = {
 # ── DualMLStrategy Class ────────────────────────────────────────────────
 class DualMLStrategy:
     """
-    Dual-ML Strategy combining:
-    - Tactical ML (15m): Entry/exit signals via walk-forward prediction
-    - Strategic ML (1h): Meta-parameters (stake, SL, TP, max_hold, leverage, regime)
+    Single-ML Strategy:
+    - Tactical ML (1h): Entry/exit signals via walk-forward prediction
+    - Meta-parameters computed heuristically from regime/volatility (no strategic model)
     """
 
     def __init__(
@@ -174,10 +174,8 @@ class DualMLStrategy:
         broker: Any,  # BinanceBroker or MockBroker
         config: Any = None,
         tactical_model: Optional[CatBoostModel] = None,
-        strategic_model: Optional[CatBoostModel] = None,
         feature_cols: Optional[List[str]] = None,
         tactical_tf_cfg: Any = None,
-        strategic_tf_cfg: Any = None,
         model_dir: Optional[str] = None,
         liquidity_monitor: Any = None,
     ):
@@ -185,13 +183,12 @@ class DualMLStrategy:
         self.config = config
         self.liquidity_monitor = liquidity_monitor
 
-        # Models
+        # Models (tactical only)
         self.tactical_model = tactical_model
-        self.strategic_model = strategic_model
         self.model_dir = model_dir
         self._last_saved_at = {
             mt: (getattr(m, "metadata", {}) or {}).get("saved_at")
-            for mt, m in (("tactical", tactical_model), ("strategic", strategic_model))
+            for mt, m in (("tactical", tactical_model),)
             if m is not None
         }
 
@@ -200,7 +197,6 @@ class DualMLStrategy:
 
         # Timeframe configs (for walk-forward window sizes)
         self.tactical_tf_cfg = tactical_tf_cfg
-        self.strategic_tf_cfg = strategic_tf_cfg
 
         # State
         self.position = 0.0
@@ -997,6 +993,66 @@ class DualMLStrategy:
             if current_price > 0:
                 self._exit_position("circuit_breaker", current_price, datetime.now())
 
+    def _update_meta_params_heuristic(self, last_row: pd.Series) -> None:
+        """
+        Compute meta-parameters heuristically from regime/volatility.
+        Replaces the strategic ML model with deterministic rules.
+        """
+        # Get volatility regime indicators
+        vol_12 = last_row.get("vol_12", 0.0)
+        vol_48 = last_row.get("vol_48", 0.0)
+        vol_ratio = vol_12 / max(vol_48, 1e-8)
+        
+        # Absolute volume ratio (volume vs median)
+        abs_vol_ratio = last_row.get("abs_vol_ratio", 1.0)
+        
+        # ATR as % of price
+        atr14 = last_row.get("atr14", 0.0)
+        close = last_row.get("close", 1.0)
+        atr_pct = atr14 / max(close, 1e-8)
+        
+        # Determine regime
+        if vol_ratio < 1.0:
+            regime = "trend"
+        elif vol_ratio < 1.6:
+            regime = "high_vol"
+        else:
+            regime = "chop"
+        
+        # Base params by regime
+        base = {
+            "trend":     dict(leverage=5.0, stake_long=0.20, stake_short=0.10, sl=0.015, hold=8.0),
+            "high_vol":  dict(leverage=2.0, stake_long=0.10, stake_short=0.05, sl=0.030, hold=2.0),
+            "chop":      dict(leverage=1.0, stake_long=0.10, stake_short=0.05, sl=0.020, hold=4.0),
+        }[regime]
+        
+        # Vol scaling: reduce stake in high absolute volume (noisy) conditions
+        vol_scale = min(1.0, 1.0 / max(abs_vol_ratio, 0.5))
+        
+        # ATR-adjusted SL: use max of regime SL and 1.5×ATR%, cap at 5%
+        sl_frac = max(base["sl"], min(1.5 * atr_pct, 0.05))
+        tp_frac = sl_frac * 2.0  # 2R target
+        
+        # Exposure: reduce in high vol
+        if vol_ratio > 1.6:
+            max_exposure = 0.4
+        elif vol_ratio > 1.0:
+            max_exposure = 0.7
+        else:
+            max_exposure = 1.0
+        
+        self.current_meta = {
+            "recommended_leverage": base["leverage"],
+            "max_exposure_frac": max_exposure,
+            "stake_long_frac": base["stake_long"] * vol_scale,
+            "stake_short_frac": base["stake_short"] * vol_scale,
+            "stop_loss_frac": sl_frac,
+            "take_profit_frac": tp_frac,
+            "max_hold_hours": base["hold"],
+            "regime": regime,
+            "_init": True,
+        }
+
     def _live_iteration(self) -> None:
         """Fetch data, predict, and act on the latest candle."""
         now = datetime.now()
@@ -1084,33 +1140,9 @@ class DualMLStrategy:
         self._last_atr14 = float(df_feat.iloc[-1].get("atr14", 0.0) or 0.0)
         last_row = df_feat.iloc[-1]
 
-        # Strategic meta-params refresh roughly hourly
-        strat_every = max(1, int(3600 / max(self._sleep_seconds, 1)))
-        if (iteration % strat_every) == 0 or self.current_meta.get("_init") is None:
-            df_strat = self.broker.get_historical_prices(
-                self.broker.symbol, self._strategic_window, STRATEGIC_TF
-            )
-            if df_strat is not None and len(df_strat) > 50:
-                df_strat_feat = add_strategic_features_df(
-                    make_features_df(df_strat, timeframe=STRATEGIC_TF),
-                    timeframe=STRATEGIC_TF,
-                )
-                strat_feats = list(
-                    (self.strategic_model.metadata or {}).get("feature_cols", [])
-                )
-                strat_feats = [c for c in strat_feats if c in df_strat_feat.columns]
-                try:
-                    meta_list = predict_strategic_meta_params(
-                        df_strat_feat, self.strategic_model, strat_feats,
-                    )
-                    meta = meta_list[-1]
-                    meta["_init"] = True
-                    self.current_meta = meta
-                except Exception as e:
-                    log_warning(f"Strategic prediction failed, using defaults: {e}")
-                    self.current_meta = DEFAULT_META.copy()
-            else:
-                self.current_meta = DEFAULT_META.copy()
+        # Meta-params refresh (heuristic-based, no strategic model)
+        # Update every iteration since it's cheap
+        self._update_meta_params_heuristic(last_row)
 
         current_price = self.broker.get_last_price()
         if current_price <= 0:

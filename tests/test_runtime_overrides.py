@@ -61,7 +61,7 @@ def _make_strat(cfg, monitor=None):
     broker.symbol = "BTCUSDT"
     return strat_mod.DualMLStrategy(
         broker=broker, config=cfg, tactical_model=MagicMock(),
-        strategic_model=MagicMock(), feature_cols=["close"],
+        feature_cols=["close"],
         liquidity_monitor=monitor,
     )
 

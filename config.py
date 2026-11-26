@@ -46,7 +46,6 @@ _RUNTIME_OVERRIDES = {}
 SYMBOL = "BTCUSDT"
 TIMEFRAME = "1h"           # Tactical timeframe (was 15m)
 TACTICAL_TF = TIMEFRAME     # Alias for compatibility
-STRATEGIC_TF = "1h"        # Strategic timeframe (same as tactical now)
 HISTORY_DAYS = 180         # ~4320 candles 1h (live Binance 90d+)
 TRAIN_FRACTION = 0.8       # Chronological split: 80% train, 20% validation
 
@@ -78,27 +77,7 @@ TACTICAL_BALANCE_SAMPLES = _get_bool("TACTICAL_BALANCE_SAMPLES", True)    # enab
 TACTICAL_MIN_CLASS_WEIGHT = 0.1   # minimum weight for minority class
 TACTICAL_MAX_CLASS_WEIGHT = 5.0   # maximum weight for minority class
 
-# Strategic ML (1h, persisted model) - multi-output trade-parameter model
-STRATEGIC_MODEL_PARAMS = {
-    "iterations": 500,      # More thorough training
-    "depth": 8,
-    "learning_rate": 0.05,
-    "loss_function": "RMSE",
-    "verbose": False,
-}
-
-# Strategic targets predicted by the multi-output strategic model
-STRATEGIC_TARGET_COLS = [
-    "recommended_leverage",
-    "max_exposure_frac",
-    "stake_long_frac",
-    "stake_short_frac",
-    "stop_loss_frac",
-    "take_profit_frac",
-    "max_hold_hours",
-]
-
-# Heuristic map from regime -> recommended leverage (matches legacy)
+# Heuristic map from regime -> recommended leverage (used by heuristic meta-params)
 REGIME_LEVERAGE = {"trend": 5.0, "high_vol": 2.0, "chop": 1.0}
 # Stake fractions by regime
 REGIME_STAKE_LONG = {"trend": 0.2, "high_vol": 0.1, "chop": 0.1}
@@ -110,7 +89,7 @@ TAKE_PROFIT_MULT = 2.0
 REGIME_MAX_HOLD = {"trend": 8.0, "high_vol": 2.0, "chop": 4.0}
 
 # ── Trading Parameters ─────────────────────────────────────────────────
-# These are predicted by strategic ML, but defaults for simulation/defaults:
+# Defaults used when heuristic computation is not available:
 STAKE_LONG_FRAC_DEFAULT = 0.10    # 10% of equity for long
 STAKE_SHORT_FRAC_DEFAULT = 0.05   # 5% of equity for short
 STOP_LOSS_FRAC_DEFAULT = 0.02     # 2% stop loss

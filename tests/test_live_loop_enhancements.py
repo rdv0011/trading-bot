@@ -84,14 +84,9 @@ def strategy(simp_path):
     tactical.metadata = {"feature_cols": ["close"], "saved_at": "2026-01-01T00:00:00"}
     tactical.model = MagicMock()
 
-    strategic = MagicMock()
-    strategic.metadata = {"feature_cols": [], "saved_at": "2026-01-01T00:00:00"}
-    strategic.model = MagicMock()
-
     return strategy_mod.DualMLStrategy(
         broker=broker,
         tactical_model=tactical,
-        strategic_model=strategic,
         feature_cols=["close"],
         config=mock_config,
     )

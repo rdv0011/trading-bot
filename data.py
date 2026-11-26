@@ -16,12 +16,10 @@ import logging
 from binance.client import Client
 
 from config import (
-    SYMBOL, TACTICAL_TF, STRATEGIC_TF,
+    SYMBOL, TACTICAL_TF,
     HISTORY_DAYS, TRAIN_FRACTION,
     FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
-    MODEL_DIR, STRATEGIC_TARGET_COLS,
-    REGIME_LEVERAGE, REGIME_STAKE_LONG, REGIME_STAKE_SHORT,
-    REGIME_STOP_LOSS, TAKE_PROFIT_MULT, REGIME_MAX_HOLD,
+    MODEL_DIR,
     ABS_VOL_RATIO_CRITICAL, ABS_VOL_RATIO_ROLLING_WINDOW,
 )
 
@@ -527,59 +525,6 @@ def compute_vol_ratio_from_klines(
         return 1.0
     
     return float(vol_short / vol_long)
-
-
-# ── Strategic Feature & Label Engineering (1h) ─────────────────────────
-def add_strategic_features_df(
-    df: pd.DataFrame,
-    timeframe: str = STRATEGIC_TF,
-) -> pd.DataFrame:
-    """
-    Add strategic features (volatility ratio, drawdown, ATR%) on top of the
-    base features. Mirrors legacy strategic/strategicfeatures.make_strategic_features.
-    Returns df with base features + strategic features, NaN rows dropped.
-    """
-    df = df.copy()
-
-    df["vol_short"] = df["ret1"].rolling(24).std()
-    df["vol_long"] = df["ret1"].rolling(168).std()
-    df["vol_ratio_strategic"] = df["vol_short"] / df["vol_long"].clip(lower=1e-8)
-
-    rolling_max = df["close"].rolling(48).max()
-    df["drawdown"] = (df["close"] - rolling_max) / rolling_max.clip(lower=1e-8)
-    df["max_drawdown_window"] = df["drawdown"].rolling(48).min()
-
-    df["atr_pct"] = df["atr14"] / df["close"].clip(lower=1e-8)
-    df["atr_pct_ma"] = df["atr_pct"].rolling(168).mean()
-    df["atr_pct_ratio"] = df["atr_pct"] / df["atr_pct_ma"].clip(lower=1e-8)
-
-    return df.dropna().round(5)
-
-
-def make_strategic_labels_df(
-    df: pd.DataFrame,
-    timeframe: str = STRATEGIC_TF,
-) -> pd.DataFrame:
-    """
-    Build deterministic trade-parameter labels for the strategic model from
-    regime + volatility. Mirrors legacy _build_strategic_labels. Non-leaking:
-    each row's params depend only on that row's regime/volatility.
-    """
-    df = df.copy()
-
-    vol_ratio = df["vol_ratio_strategic"]
-
-    df["recommended_leverage"] = df["regime"].map(REGIME_LEVERAGE).fillna(1.0)
-    df["max_exposure_frac"] = np.where(
-        vol_ratio >= 1.6, 0.3, np.where(vol_ratio >= 1.0, 0.6, 1.0)
-    )
-    df["stake_long_frac"] = df["regime"].map(REGIME_STAKE_LONG).fillna(0.1)
-    df["stake_short_frac"] = df["regime"].map(REGIME_STAKE_SHORT).fillna(0.05)
-    df["stop_loss_frac"] = df["regime"].map(REGIME_STOP_LOSS).fillna(0.02)
-    df["take_profit_frac"] = df["stop_loss_frac"] * TAKE_PROFIT_MULT
-    df["max_hold_hours"] = df["regime"].map(REGIME_MAX_HOLD).fillna(4.0)
-
-    return df.dropna()
 
 
 # ── Label Generation (Future Return) ───────────────────────────────────

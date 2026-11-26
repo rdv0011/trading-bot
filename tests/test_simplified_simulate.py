@@ -7,10 +7,9 @@ Covers:
   3. load_featured_df() - validation data loading from data/ dir
   4. get_feature_cols() - feature column extraction
   5. rolling_tactical_predict() - walk-forward predictions
-  6. predict_strategic_meta_params() - strategic meta-param predictions
-  7. run_simulation() - MockBroker simulation
-  8. save_trades_csv() and equity CSV saving
-  9. Error handling and edge cases
+  6. run_simulation() - MockBroker simulation
+  7. save_trades_csv() and equity CSV saving
+  8. Error handling and edge cases
 """
 
 import sys
@@ -91,11 +90,8 @@ sys.modules["config"] = mock_config
 from model import (
     CatBoostModel,
     rolling_tactical_predict,
-    predict_strategic_meta_params,
-    strategic_batch_predict,
     TARGET_COLUMN,
 )
-from config import STRATEGIC_TARGET_COLS
 from simulate import (
     MockBroker,
     run_simulation,
@@ -422,21 +418,6 @@ class TestCatBoostModelPredict:
 
         assert isinstance(importance, dict)
         assert importance["ret1"] == 0.6
-
-    def test_ss18_predict_strategic_model(self, tmp_path):
-        df = _make_featured_df(100)
-        cb_model = MagicMock()
-        cb_model.predict = MagicMock(return_value=np.zeros(len(df)))
-
-        with patch("model.TACTICAL_MODEL_PARAMS", {}):
-            with patch("model.STRATEGIC_MODEL_PARAMS", {}):
-                model = CatBoostModel(model_type="strategic", model_dir=str(tmp_path))
-        model.model = cb_model
-
-        result = model.predict(df, ["ret1"])
-
-        assert len(result) == len(df)
-        assert result.name == "strategic_prediction"
 
 
 # ======================================================================
@@ -1070,136 +1051,6 @@ class TestRollingTacticalPredict:
 
             # Should create new models at i=50 (window), i=150 (50+100), i=250 (150+100)
             assert MockCB.call_count >= 3
-
-
-# ======================================================================
-# Strategic Meta-Parameter Prediction Tests
-# ======================================================================
-
-class TestPredictStrategicMetaParams:
-    """Test predict_strategic_meta_params function."""
-
-    def test_ss70_predict_meta_params_basic(self, tmp_path):
-        df = _make_featured_df(100)
-        feature_cols = get_feature_cols(df)
-
-        cb_model = MagicMock()
-        # order follows STRATEGIC_TARGET_COLS:
-        # [leverage, max_exposure, stake_long, stake_short, stop_loss, take_profit, max_hold]
-        cb_model.predict = MagicMock(
-            return_value=np.array([
-                [2.0, 0.6, 0.1, 0.05, 0.02, 0.04, 4.0]
-                for _ in range(len(df))
-            ])
-        )
-        cb_model.model = cb_model
-
-        model = MagicMock(spec=CatBoostModel)
-        model.model = cb_model
-        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
-
-        result = predict_strategic_meta_params(df, model, feature_cols)
-
-        assert isinstance(result, list)
-        assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.1
-        assert result[0]["stop_loss_frac"] == 0.02
-        assert result[0]["max_exposure_frac"] == 0.6
-
-    def test_ss71_predict_meta_params_scalar_output(self, tmp_path):
-        df = _make_featured_df(100)
-        feature_cols = get_feature_cols(df)
-
-        cb_model = MagicMock()
-        # Scalar (single-output) model is a return regressor, not a
-        # trade-parameter model -> all params fall back to safe defaults.
-        cb_model.predict = MagicMock(return_value=np.array([0.5] * len(df)))
-        cb_model.model = cb_model
-
-        model = MagicMock(spec=CatBoostModel)
-        model.model = cb_model
-        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
-
-        result = predict_strategic_meta_params(df, model, feature_cols)
-
-        assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.1
-        assert result[0]["stake_short_frac"] == 0.05  # default
-
-    def test_ss72_predict_meta_params_no_model_raises(self):
-        df = _make_featured_df(100)
-        model = MagicMock(spec=CatBoostModel)
-        model.model = None
-
-        with pytest.raises(RuntimeError, match="Strategic model not loaded"):
-            predict_strategic_meta_params(df, model, ["ret1"])
-
-    def test_ss73_predict_meta_params_short_array(self, tmp_path):
-        df = _make_featured_df(100)
-        feature_cols = get_feature_cols(df)
-
-        cb_model = MagicMock()
-        # A 1-column array cannot supply all targets -> missing ones default.
-        cb_model.predict = MagicMock(return_value=np.array([[0.1]] * len(df)))
-        cb_model.model = cb_model
-
-        model = MagicMock(spec=CatBoostModel)
-        model.model = cb_model
-        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
-
-        result = predict_strategic_meta_params(df, model, feature_cols)
-
-        assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.1  # default
-        assert result[0]["stake_short_frac"] == 0.05  # default
-
-    def test_ss74_predict_meta_params_empty_list_raises(self):
-        model = MagicMock(spec=CatBoostModel)
-        model.model = None
-
-        with pytest.raises(RuntimeError):
-            predict_strategic_meta_params(_make_featured_df(10), model, [])
-
-    def test_ss75_predict_meta_params_array_with_nan_values(self, tmp_path):
-        df = _make_featured_df(100)
-        feature_cols = get_feature_cols(df)
-
-        cb_model = MagicMock()
-        good = [0.6, 0.1, 0.05, 0.02, 0.04, 4.0, 1.0]
-        preds = []
-        for i in range(len(df)):
-            preds.append(good if i % 2 == 0 else [np.nan] * 7)
-        cb_model.predict = MagicMock(return_value=np.array(preds))
-        cb_model.model = cb_model
-
-        model = MagicMock(spec=CatBoostModel)
-        model.model = cb_model
-        model.metadata = {"target_cols": list(STRATEGIC_TARGET_COLS)}
-
-        result = predict_strategic_meta_params(df, model, feature_cols)
-
-        assert len(result) == len(df)
-        assert result[0]["stake_long_frac"] == 0.05
-        # NaN predictions fall back to the safe default, never a NaN stake.
-        assert result[1]["stake_long_frac"] == 0.1
-
-
-# ======================================================================
-# Strategic Batch Prediction Tests
-# ======================================================================
-
-class TestStrategicBatchPredict:
-    """Test strategic_batch_predict function."""
-
-    def test_ss76_strategic_batch_predict_basic(self, tmp_path):
-        df = _make_featured_df(100)
-        feature_cols = get_feature_cols(df)
-        model = _make_mock_model()
-
-        result = strategic_batch_predict(df, model, feature_cols)
-
-        assert isinstance(result, pd.Series)
-        assert len(result) == len(df)
 
 
 # ======================================================================

@@ -17,10 +17,10 @@ from datetime import datetime
 
 from config import (
     get_broker_config, is_testnet_env,
-    SYMBOL, TIMEFRAME, STRATEGIC_TF,
+    SYMBOL, TIMEFRAME,
     HISTORY_DAYS, TRAIN_FRACTION,
     FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
-    TACTICAL_MODEL_PARAMS, STRATEGIC_MODEL_PARAMS,
+    TACTICAL_MODEL_PARAMS,
     MIN_TREES,
     INITIAL_EQUITY, FEE, SLIPPAGE,
     WALKFORWARD_RETRAIN_EVERY_CANDLES, ABSOLUTE_THRESHOLD,
@@ -31,8 +31,7 @@ from logger import setup_logging, log_info, log_error
 from orderbook import estimate_initial_trade_intensity
 from data import run_full_pipeline, load_featured_df
 from model import (
-    CatBoostModel, rolling_tactical_predict,
-    predict_strategic_meta_params
+    CatBoostModel, rolling_tactical_predict
 )
 from simulate import run_simulation
 from compare import run_comparison
@@ -41,25 +40,17 @@ MODEL_DIR = "models"
 
 
 def train_mode(args):
-    """Train tactical and strategic models on historical data."""
+    """Train tactical model on historical data."""
     log_info("=" * 60)
     log_info("TRAINING MODE")
     log_info("=" * 60)
 
-    # Run data pipeline for both timeframes
+    # Run data pipeline for tactical timeframe
     log_info(f"\n--- Training Tactical Model ({TIMEFRAME}) ---")
     df_train_tactical, df_val_tactical = run_full_pipeline(
         symbol=args.symbol,
         whole_days=args.days,
         timeframe=TIMEFRAME,
-        train_frac=TRAIN_FRACTION,
-    )
-
-    log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
-    df_train_strategic, df_val_strategic = run_full_pipeline(
-        symbol=args.symbol,
-        whole_days=args.days,
-        timeframe=STRATEGIC_TF,
         train_frac=TRAIN_FRACTION,
     )
 
@@ -81,36 +72,9 @@ def train_mode(args):
         save=True,
     )
 
-    log_info(f"\n--- Training Strategic Model ({STRATEGIC_TF}) ---")
-    from data import add_strategic_features_df, make_strategic_labels_df, get_feature_cols
-    from config import STRATEGIC_TARGET_COLS
-
-    # The strategic model learns trade params from strategic (1h) features
-    df_strat_feat = add_strategic_features_df(df_train_strategic, timeframe=STRATEGIC_TF)
-    df_strat_labeled = make_strategic_labels_df(df_strat_feat, timeframe=STRATEGIC_TF)
-    strategic_feature_cols = [
-        c for c in get_feature_cols(df_strat_labeled)
-        if c not in STRATEGIC_TARGET_COLS
-    ]
-    log_info(f"Strategic feature columns: {len(strategic_feature_cols)} features")
-
-    # Train strategic model
-    log_info("\n--- Training Strategic Model ---")
-    strategic_model = CatBoostModel(
-        model_type="strategic",
-        model_params=STRATEGIC_MODEL_PARAMS
-    )
-    strategic_model.train(
-        df_strat_labeled,
-        strategic_feature_cols,
-        target_cols=list(STRATEGIC_TARGET_COLS),
-        save=True,
-    )
-
     log_info("\n" + "=" * 60)
     log_info("TRAINING COMPLETE")
     log_info(f"Tactical model: models/model_tactical.cbm")
-    log_info(f"Strategic model: models/model_strategic.joblib")
     log_info("=" * 60)
 
 
@@ -120,7 +84,7 @@ def simulate_mode(args):
     log_info("SIMULATION MODE")
     log_info("=" * 60)
 
-    # Load models
+    # Load tactical model
     log_info("Loading models...")
     tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
     tactical_model.load()
@@ -132,9 +96,6 @@ def simulate_mode(args):
         sys.exit(1)
     elif tree_count is not None:
         log_info(f"Tactical model tree count: {tree_count}")
-
-    strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
-    strategic_model.load()
 
     # Load validation data
     log_info("Loading validation data...")
@@ -165,53 +126,54 @@ def simulate_mode(args):
         window=wf_window,
     )
 
-    # Run strategic batch predictions for meta-params
-    log_info("\n--- Running Strategic Predictions ---")
-    from data import add_strategic_features_df
-    from config import STRATEGIC_TARGET_COLS
+    # Generate meta-params heuristically (no strategic model)
+    log_info("\n--- Generating Meta-Params (Heuristic) ---")
+    from model import META_PARAM_BOUNDS, _clamp_float
+    aligned_meta_params = []
+    for _, row in df_val.iterrows():
+        vol_12 = row.get("vol_12", 0.0)
+        vol_48 = row.get("vol_48", 0.0)
+        vol_ratio = vol_12 / max(vol_48, 1e-8)
+        abs_vol_ratio = row.get("abs_vol_ratio", 1.0)
+        atr14 = row.get("atr14", 0.0)
+        close = row.get("close", 1.0)
+        atr_pct = atr14 / max(close, 1e-8)
 
-    # Strategic model operates on its own timeframe's features; load that
-    # validation split, add the strategic features, and predict meta-params.
-    df_val_strat_raw = load_featured_df(f"df_{SYMBOL}_{STRATEGIC_TF}_val.csv")
-    if df_val_strat_raw is None or df_val_strat_raw.empty:
-        log_error("No strategic validation data found. Run 'train' mode first.")
-        sys.exit(1)
-    df_val_strat = add_strategic_features_df(df_val_strat_raw, timeframe=STRATEGIC_TF)
+        if vol_ratio < 1.0:
+            regime = "trend"
+        elif vol_ratio < 1.6:
+            regime = "high_vol"
+        else:
+            regime = "chop"
 
-    strat_feature_cols = [
-        c for c in get_feature_cols(df_val_strat)
-        if c not in STRATEGIC_TARGET_COLS
-    ]
-    strategic_meta_params = predict_strategic_meta_params(
-        df_val_strat,
-        strategic_model,
-        strat_feature_cols,
-    )
+        base = {
+            "trend":     dict(leverage=5.0, stake_long=0.20, stake_short=0.10, sl=0.015, hold=8.0),
+            "high_vol":  dict(leverage=2.0, stake_long=0.10, stake_short=0.05, sl=0.030, hold=2.0),
+            "chop":      dict(leverage=1.0, stake_long=0.10, stake_short=0.05, sl=0.020, hold=4.0),
+        }[regime]
 
-    # Align (forward-fill) the strategic (1h) params onto the tactical (15m)
-    # rows so every simulation row has a meta-param dict. Warmup rows before
-    # the first strategic timestamp get NaN from ffill; coalesce to defaults.
-    strat_index = df_val_strat.index
-    strat_params_df = pd.DataFrame(
-        strategic_meta_params, index=strat_index
-    )
-    strat_params_reindexed = strat_params_df.reindex(
-        df_val.index, method="ffill"
-    )
-    param_defaults = {
-        "stake_long_frac": 0.1,
-        "stake_short_frac": 0.05,
-        "stop_loss_frac": 0.02,
-        "take_profit_frac": 0.04,
-        "max_hold_hours": 4.0,
-        "recommended_leverage": 1.0,
-        "max_exposure_frac": 1.0,
-        "regime": "trend",
-    }
-    aligned_meta_params = [
-        row.to_dict()
-        for _, row in strat_params_reindexed.fillna(param_defaults).iterrows()
-    ]
+        vol_scale = min(1.0, 1.0 / max(abs_vol_ratio, 0.5))
+        sl_frac = max(base["sl"], min(1.5 * atr_pct, 0.05))
+        tp_frac = sl_frac * 2.0
+
+        if vol_ratio > 1.6:
+            max_exposure = 0.4
+        elif vol_ratio > 1.0:
+            max_exposure = 0.7
+        else:
+            max_exposure = 1.0
+
+        meta = {
+            "recommended_leverage": base["leverage"],
+            "max_exposure_frac": max_exposure,
+            "stake_long_frac": base["stake_long"] * vol_scale,
+            "stake_short_frac": base["stake_short"] * vol_scale,
+            "stop_loss_frac": sl_frac,
+            "take_profit_frac": tp_frac,
+            "max_hold_hours": base["hold"],
+            "regime": regime,
+        }
+        aligned_meta_params.append(meta)
 
     # Run simulation
     log_info("\n--- Running Simulation ---")
@@ -241,8 +203,8 @@ def live_mode(args):
     log_info(f"LIVE TRADING MODE ({trading_env})")
     log_info("=" * 60)
 
-    # Load models
-    log_info("Loading models...")
+    # Load tactical model only (no strategic model)
+    log_info("Loading tactical model...")
     tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
     tactical_model.load()
 
@@ -253,9 +215,6 @@ def live_mode(args):
         sys.exit(1)
     elif tree_count is not None:
         log_info(f"Tactical model tree count: {tree_count}")
-
-    strategic_model = CatBoostModel(model_type="strategic", model_dir=args.model_dir)
-    strategic_model.load()
 
     # Create broker (loads credentials from .env via config module).
     # TRADING_ENV controls testnet (debug) vs mainnet (production); a mainnet
@@ -280,8 +239,8 @@ def live_mode(args):
 
     # Probe connectivity; the initial fetch may transiently fail (e.g. rate
     # limit / network), so retry with backoff before giving up on startup.
-    # 7 days of 15m candles = 7 * 24 * 4 = 672 candles
-    candles_7d = 7 * 24 * 4
+    # 7 days of 1h candles = 7 * 24 = 168 candles
+    candles_7d = 7 * 24
     df_sample = None
     for _attempt in range(5):
         df_sample = broker.get_historical_prices(SYMBOL, candles_7d, TIMEFRAME)
@@ -304,12 +263,11 @@ def live_mode(args):
         liquidity_monitor.start()
         log_info("Liquidity recorder started (mainnet WS orderbook)")
 
-    # Create strategy
+    # Create strategy (no strategic model)
     from strategy import DualMLStrategy
     strategy = DualMLStrategy(
         broker=broker,
         tactical_model=tactical_model,
-        strategic_model=strategic_model,
         feature_cols=feature_cols,
         model_dir=args.model_dir,
         liquidity_monitor=liquidity_monitor,
