@@ -1341,6 +1341,7 @@ class DualMLStrategy:
             if not conf:
                 log_info(f"PHASE 3: 15m confirmation failed ({signal} {pred:+.6f}); holding")
                 return
+            log_info(f"PHASE 3: 15m confirmation PASSED ({signal} {pred:+.6f} thr={thr:.5f})")
             self._enter_position(signal, current_price, now, pred=pred, threshold=thr, abs_vol_ratio=abs_vol_ratio)
         elif signal in ("long", "short") and self.position != 0:
             same_dir = (
@@ -2295,16 +2296,25 @@ class DualMLStrategy:
         momentum_15m = compute_momentum(close_15m, period=1)
         vol_zscore_15m = compute_volume_zscore(volume_15m)
 
-        # RSI regime checks
-        if side == "long":
-            rsi_ok = (rsi_15m >= CONFIRM_15M_RSI_MIN_LONG) and (rsi_15m <= CONFIRM_15M_RSI_MAX_LONG)
-        else:  # short
-            rsi_ok = (rsi_15m <= CONFIRM_15M_RSI_MIN_SHORT) or (rsi_15m >= CONFIRM_15M_RSI_MAX_SHORT)
+        rsi_last = float(rsi_15m.iloc[-1]) if len(rsi_15m) else np.nan
+        mom_last = float(momentum_15m.iloc[-1]) if len(momentum_15m) else np.nan
 
-        momentum_ok = float(np.abs(momentum_15m.iloc[-1])) >= CONFIRM_15M_MOMENTUM_MIN
+        # RSI regime checks (validate on the *latest* 15m candle).
+        # Longs: RSI must be in neutral zone (not oversold / not overbought).
+        # Shorts: RSI must be extended (overbought >= MAX or oversold <= MIN).
+        if side == "long":
+            rsi_ok = (rsi_last >= CONFIRM_15M_RSI_MIN_LONG) and (rsi_last <= CONFIRM_15M_RSI_MAX_LONG)
+        else:  # short
+            rsi_ok = (rsi_last >= CONFIRM_15M_RSI_MAX_SHORT) or (rsi_last <= CONFIRM_15M_RSI_MIN_SHORT)
+
+        # Momentum must be aligned with the signal direction (not just abs magnitude).
+        mom_ok = (
+            mom_last >= CONFIRM_15M_MOMENTUM_MIN if side == "long"
+            else mom_last <= -CONFIRM_15M_MOMENTUM_MIN
+        )
         vol_ok = vol_zscore_15m >= CONFIRM_15M_VOLUME_MIN_ZSCORE
 
-        return rsi_ok and momentum_ok and vol_ok
+        return rsi_ok and mom_ok and vol_ok
 
     def _enter_position(self, side: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0, abs_vol_ratio: float = 1.0) -> None:
         """Open new position with optional confidence-weighted stake scaling."""
