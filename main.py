@@ -17,7 +17,7 @@ from datetime import datetime
 
 from config import (
     get_broker_config, is_testnet_env,
-    SYMBOL, TIMEFRAME,
+    SYMBOL, TIMEFRAME, TACTICAL_TF,
     HISTORY_DAYS, TRAIN_FRACTION,
     FEATURE_LAGS, EMA_SPANS, ATR_PERIOD,
     TACTICAL_MODEL_PARAMS,
@@ -203,18 +203,12 @@ def live_mode(args):
     log_info(f"LIVE TRADING MODE ({trading_env})")
     log_info("=" * 60)
 
-    # Load tactical model only (no strategic model)
-    log_info("Loading tactical model...")
-    tactical_model = CatBoostModel(model_type="tactical", model_dir=args.model_dir)
-    tactical_model.load()
-
-    # Pre-flight validation: reject underfit models
-    tree_count = getattr(tactical_model.model, "tree_count_", None)
-    if tree_count is not None and tree_count < 10:
-        log_error(f"Model underfit: only {tree_count} trees. Minimum {MIN_TREES} required. Retrain required.")
-        sys.exit(1)
-    elif tree_count is not None:
-        log_info(f"Tactical model tree count: {tree_count}")
+    # Phase 2: in-memory tactical model training at startup (no strategic model).
+    # A fresh CatBoostModel is created here and trained on 180 days of historical
+    # data below; it is kept only in memory for the lifetime of this process
+    # (no disk persistence, no periodic walk-forward retraining).
+    log_info("Training tactical model in-memory (Phase 2)...")
+    tactical_model = CatBoostModel(model_type="tactical", model_params=TACTICAL_MODEL_PARAMS)
 
     # Create broker (loads credentials from .env via config module).
     # TRADING_ENV controls testnet (debug) vs mainnet (production); a mainnet
@@ -229,13 +223,6 @@ def live_mode(args):
         testnet=use_testnet,
         symbol=SYMBOL,
     )
-
-    # Feature columns must match the trained tactical model. Derive them from
-    # the model's own metadata (authoritative) rather than a raw OHLCV sample.
-    feature_cols = list(tactical_model.metadata.get("feature_cols", []))
-    if not feature_cols:
-        log_error("Tactical model metadata has no feature_cols; aborting live startup")
-        sys.exit(1)
 
     # Probe connectivity; the initial fetch may transiently fail (e.g. rate
     # limit / network), so retry with backoff before giving up on startup.
@@ -253,6 +240,28 @@ def live_mode(args):
     if df_sample is None or len(df_sample) == 0:
         log_error("Could not fetch initial market data; aborting live startup")
         sys.exit(1)
+
+    # ── Phase 2: In-memory tactical model training on startup ───────────────
+    # Train tactical model on 180 days of 1h data, store only in memory (no disk persist),
+    # and disable periodic walk-forward retraining (WALKFORWARD_RETRAIN_EVERY=0 in config).
+    from data import run_full_pipeline, get_feature_cols
+    df_train_tactical, _ = run_full_pipeline(
+        symbol=SYMBOL,
+        whole_days=HISTORY_DAYS,
+        timeframe=TACTICAL_TF,
+        train_frac=TRAIN_FRACTION,
+    )
+    feature_cols = get_feature_cols(df_train_tactical)
+    log_info(f"Training tactical model in-memory on {len(df_train_tactical)} days of {TACTICAL_TF} data ({len(feature_cols)} features)")
+    tactical_model.train(df_train_tactical, feature_cols, target_col="future_ret", save=False)
+
+    # Post-training validation: reject underfit models
+    tree_count = getattr(tactical_model.model, "tree_count_", None)
+    if tree_count is not None and tree_count < MIN_TREES:
+        log_error(f"Model underfit: only {tree_count} trees. Minimum {MIN_TREES} required. Retrain required.")
+        sys.exit(1)
+    elif tree_count is not None:
+        log_info(f"Tactical model tree count: {tree_count}")
 
     # Phase 1-2: optional mainnet WS orderbook recorder feeding liquidity
     # gates. Fail-open: if it dies, strategy gates log and proceed (no halt).

@@ -500,31 +500,86 @@ def compute_vol_ratio_from_klines(
     price_col: str = "close",
 ) -> float:
     """Compute volatility ratio (short_window / long_window) from klines.
-    
+
     Uses rolling standard deviation of log returns.
-    
+
     Args:
         df: DataFrame with close prices
         short_window: Short volatility window (default 12)
         long_window: Long volatility window (default 48)
         price_col: Close price column name
-    
+
     Returns:
         vol_ratio = vol_short / vol_long, or 1.0 if insufficient data
     """
     if df is None or len(df) < long_window + 1:
         return 1.0
-    
+
     close = df[price_col]
     log_ret = np.log(close / close.shift(1))
-    
+
     vol_short = log_ret.rolling(short_window).std().iloc[-1]
     vol_long = log_ret.rolling(long_window).std().iloc[-1]
-    
+
     if not np.isfinite(vol_long) or vol_long == 0:
         return 1.0
-    
+
     return float(vol_short / vol_long)
+
+
+# ── Phase 3: 15m Confirmation Helpers ──────────────────────────────────
+def compute_rsi(close: pd.Series, period: int = 14) -> pd.Series:
+    """
+    Compute the Relative Strength Index (RSI) using Wilder's EMA smoothing.
+
+    Args:
+        close: Series of close prices
+        period: RSI lookback period (default 14)
+
+    Returns:
+        Series of RSI values (0-100), with first `period` values as NaN
+    """
+    delta = close.diff()
+    gain = delta.clip(lower=0)
+    loss = -delta.clip(upper=0)
+    avg_gain = gain.ewm(alpha=1.0 / period, adjust=False).mean()
+    avg_loss = loss.ewm(alpha=1.0 / period, adjust=False).mean()
+    rs = avg_gain / avg_loss.replace(0, np.nan)
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+
+def compute_momentum(close: pd.Series, period: int = 1) -> pd.Series:
+    """
+    Compute price momentum as percentage change over `period` bars.
+
+    Args:
+        close: Series of close prices
+        period: Lookback period for momentum calculation
+
+    Returns:
+        Series of momentum values (percentage change)
+    """
+    return close.pct_change(period)
+
+
+def compute_volume_zscore(volume: pd.Series) -> float:
+    """
+    Compute z-score of volume: (volume - mean) / std.
+
+    Args:
+        volume: Series of volume values
+
+    Returns:
+        z-score (float); returns 0.0 if insufficient data
+    """
+    if volume is None or len(volume) < 2:
+        return 0.0
+    mean = volume.mean()
+    std = volume.std()
+    if std == 0 or np.isnan(std):
+        return 0.0
+    return float((volume.iloc[-1] - mean) / std)
 
 
 # ── Label Generation (Future Return) ───────────────────────────────────

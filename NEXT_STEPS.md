@@ -194,6 +194,16 @@
   - Updated compare_live_vs_sim.py and all tests
   - Simplifies codebase: single tactical model (1h) + heuristic meta-params
 
+### Phase 2: In-Memory Tactical Model Training (✅ DONE)
+- **Implemented** in `live_mode` (main.py): trains the tactical model on 180 days of 1h data via `run_full_pipeline(symbol=SYMBOL, whole_days=HISTORY_DAYS, timeframe=TACTICAL_TF, train_frac=TRAIN_FRACTION)`, stores only in memory (`save=False`), no disk persistence.
+- **Disabled periodic walk-forward retraining**: set `WALKFORWARD_RETRAIN_EVERY = 0` in config.py so the live loop no longer retrains on cadence.
+
+### Phase 3: Hybrid 15m Entry Confirmation Filter (✅ DONE)
+- **Added** config flags: `CONFIRM_15M_ENABLED`, `CONFIRM_15M_TF="15m"`, `CONFIRM_15M_LIMIT=200`, RSI(14)/volume-zscore/momentum thresholds.
+- **Added** helpers in `data.py`: `compute_rsi`, `compute_momentum`, `compute_volume_zscore`.
+- **Added** `_phase3_15m_confirm()` in `strategy.py`: fetches recent 15m candles via broker, computes RSI(14), momentum, volume z-score; blocks entry when RSI is oversold/overbought for longs / conflicting for shorts, or momentum/volume z-score below threshold.
+- **Hooked** in `_live_iteration` right before `_enter_position`.
+
 ### Code Quality Improvements
 - **Refactor large functions**: Split `_check_exits()` and `_sync_trailing_orders()` into smaller helpers
 - **Naming consistency**: Standardize all variables to `snake_case`

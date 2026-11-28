@@ -83,6 +83,7 @@ mock_config.PARTIAL_EXIT_ENABLED = False
 mock_config.PARTIAL_EXIT_FRACTION = 0.33
 mock_config.REVERSAL_FULL_CLOSE_STREAK = 2
 mock_config.TRADE_COOLDOWN_ENABLED = False
+mock_config.CONFIRM_15M_ENABLED = False
 mock_config.TRADE_COOLDOWN_MINUTES = 30
 
 sys.modules["config"] = mock_config

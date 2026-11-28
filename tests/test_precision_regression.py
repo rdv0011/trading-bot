@@ -36,6 +36,7 @@ mock_config.SCALING_ENABLED = False
 mock_config.PARTIAL_EXIT_ENABLED = False
 mock_config.TRAILING_STOP_ENABLED = False
 mock_config.TRADE_COOLDOWN_ENABLED = False
+mock_config.CONFIRM_15M_ENABLED = False
 
 
 @pytest.fixture

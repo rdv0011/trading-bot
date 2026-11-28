@@ -52,6 +52,9 @@ from config import (
     LIQ_EXIT_ADAPTIVE_QUANTILE, LIQ_EXIT_ADAPTIVE_MIN_USD, LIQ_EXIT_ADAPTIVE_MAX_USD,
     LIQ_EXIT_GRACE_PERIOD_MIN, LIQ_EXIT_TREND_RELAX_ENABLED, LIQ_EXIT_TREND_RELAX_MULT,
     TREND_FILTER_ENABLED, TREND_FILTER_EMA_PERIOD, TREND_FILTER_REQUIRE_ALIGNMENT,
+    CONFIRM_15M_ENABLED, CONFIRM_15M_TF, CONFIRM_15M_LIMIT, CONFIRM_15M_RSI_PERIOD,
+    CONFIRM_15M_RSI_MIN_LONG, CONFIRM_15M_RSI_MAX_LONG, CONFIRM_15M_RSI_MIN_SHORT,
+    CONFIRM_15M_RSI_MAX_SHORT, CONFIRM_15M_VOLUME_MIN_ZSCORE, CONFIRM_15M_MOMENTUM_MIN,
     is_testnet_env,
 )
 from logger import log_info, log_debug, log_warning, log_error, log_trade_entry, log_trade_exit, log_equity, log_cost_summary, log_edge_summary
@@ -60,6 +63,7 @@ from data import (make_features_df, make_labels_df,
                   adaptive_threshold, adaptive_liquidity_threshold, adaptive_trailing_threshold,
                   adaptive_vol_threshold, adaptive_spread_threshold, adaptive_depth_threshold,
                   compute_atr_from_klines, compute_vol_ratio_from_klines,
+                  compute_rsi, compute_momentum, compute_volume_zscore,
                   classify_vol_state, classify_abs_vol_state)
 
 
@@ -1333,6 +1337,10 @@ class DualMLStrategy:
 
         # Entry / same-direction scaling / opposite-direction partial exit
         if self.position == 0 and signal in ("long", "short"):
+            conf = self._phase3_15m_confirm(signal, current_price, now, pred=pred, threshold=thr, abs_vol_ratio=abs_vol_ratio)
+            if not conf:
+                log_info(f"PHASE 3: 15m confirmation failed ({signal} {pred:+.6f}); holding")
+                return
             self._enter_position(signal, current_price, now, pred=pred, threshold=thr, abs_vol_ratio=abs_vol_ratio)
         elif signal in ("long", "short") and self.position != 0:
             same_dir = (
@@ -2252,6 +2260,51 @@ class DualMLStrategy:
         # Enter if flat
         if self.position == 0 and signal in ("long", "short"):
             self._enter_position(signal, current_price, current_time, pred=pred, threshold=threshold)
+
+    # ── Phase 3: Hybrid 15m Entry Confirmation Filter ─────────────────────
+    def _phase3_15m_confirm(self, side: str, price: float, timestamp: datetime,
+                            pred: float = 0.0, threshold: float = 0.0,
+                            abs_vol_ratio: float = 1.0) -> bool:
+        """Validate a 1h tactical signal using 15m data (RSI, volume, momentum).
+
+        Fetches recent 15m candles and computes:
+          - RSI(14): reject longs when oversold/overbought; reject shorts when
+            the 15m RSI is in a conflicting zone.
+          - Momentum: require recent absolute price change >= threshold.
+          - Volume z-score: require a volume spike above threshold.
+
+        Returns True if the signal is confirmed; False blocks the entry.
+        """
+        if not CONFIRM_15M_ENABLED:
+            return True
+
+        try:
+            df_15m = self.broker.get_historical_prices(SYMBOL, CONFIRM_15M_LIMIT, CONFIRM_15M_TF)
+        except Exception as e:
+            log_debug(f"15m confirmation fetch failed: {e}")
+            return False
+
+        if df_15m is None or len(df_15m) < CONFIRM_15M_LIMIT:
+            log_warning(f"Insufficient 15m data for confirmation ({len(df_15m) if df_15m is not None else 0} bars < {CONFIRM_15M_LIMIT})")
+            return False
+
+        close_15m = df_15m["close"]
+        volume_15m = df_15m["volume"]
+
+        rsi_15m = compute_rsi(close_15m, period=CONFIRM_15M_RSI_PERIOD)
+        momentum_15m = compute_momentum(close_15m, period=1)
+        vol_zscore_15m = compute_volume_zscore(volume_15m)
+
+        # RSI regime checks
+        if side == "long":
+            rsi_ok = (rsi_15m >= CONFIRM_15M_RSI_MIN_LONG) and (rsi_15m <= CONFIRM_15M_RSI_MAX_LONG)
+        else:  # short
+            rsi_ok = (rsi_15m <= CONFIRM_15M_RSI_MIN_SHORT) or (rsi_15m >= CONFIRM_15M_RSI_MAX_SHORT)
+
+        momentum_ok = float(np.abs(momentum_15m.iloc[-1])) >= CONFIRM_15M_MOMENTUM_MIN
+        vol_ok = vol_zscore_15m >= CONFIRM_15M_VOLUME_MIN_ZSCORE
+
+        return rsi_ok and momentum_ok and vol_ok
 
     def _enter_position(self, side: str, price: float, timestamp: datetime, pred: float = 0.0, threshold: float = 0.0, abs_vol_ratio: float = 1.0) -> None:
         """Open new position with optional confidence-weighted stake scaling."""

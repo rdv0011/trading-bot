@@ -128,7 +128,7 @@ INITIAL_EQUITY = 1.0          # Start with 1.0 (100%)
 # the live model retrained every ~10 min DOES signal (observed: live saw ~28
 # entry episodes over 2 days, default sim saw 0). The sim therefore must
 # retrain far more often than 100 candles to mirror live's behavior.
-WALKFORWARD_RETRAIN_EVERY = 10    # how often LIVE retrains, in live iterations (set 0 to disable)
+WALKFORWARD_RETRAIN_EVERY = 0    # how often LIVE retrains, in live iterations (set 0 to disable)
 WALKFORWARD_RETRAIN_EVERY_CANDLES = 1   # how often SIM retrains, in 15m candles (mirrors live)
 
 # Live model hot-swap: reload tactical/strategic models from disk this often
@@ -297,6 +297,20 @@ COST_SLIPPAGE_TOD_WINDOWS = {"00-06": 1.5, "06-12": 1.0, "12-18": 0.8, "18-24": 
 # ── Trade Cooldown (Phase 3) ───────────────────────────────────────────
 TRADE_COOLDOWN_ENABLED = _get_bool("TRADE_COOLDOWN_ENABLED", True)
 TRADE_COOLDOWN_MINUTES = 30           # minimum gap between new entries
+
+# ── Hybrid 15m Entry Confirmation Filter (Phase 3) ─────────────────────
+# Validate 1h tactical signals using 15m data (RSI, volume, momentum) before
+# entering trades. Blocks entries that conflict with the 15m picture.
+CONFIRM_15M_ENABLED = _get_bool("CONFIRM_15M_ENABLED", True)
+CONFIRM_15M_TF = "15m"                 # confirmation timeframe
+CONFIRM_15M_LIMIT = 200                # candles of 15m data to fetch (~50h)
+CONFIRM_15M_RSI_PERIOD = 14            # RSI lookback for confirmation
+CONFIRM_15M_RSI_MIN_LONG = 30.0        # RSI must be above this (not oversold) for long
+CONFIRM_15M_RSI_MAX_LONG = 70.0        # RSI must be below this (not overbought) for long
+CONFIRM_15M_RSI_MIN_SHORT = 30.0       # RSI must be above this for short
+CONFIRM_15M_RSI_MAX_SHORT = 70.0       # RSI must be below this (not overbought) for short
+CONFIRM_15M_VOLUME_MIN_ZSCORE = 1.0    # require volume spike above this z-score
+CONFIRM_15M_MOMENTUM_MIN = 0.0005      # min abs momentum (|pct_change|) required
 
 # ── Circuit Breaker (Risk Management) ────────────────────────────────────
 CIRCUIT_BREAKER_ENABLED = _get_bool("CIRCUIT_BREAKER_ENABLED", True)      # enable circuit breaker

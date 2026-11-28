@@ -138,6 +138,7 @@ def _base_cfg(**overrides):
         REVERSAL_FULL_CLOSE_STREAK=2,
         TRADE_COOLDOWN_ENABLED=True,
         TRADE_COOLDOWN_MINUTES=30,
+        CONFIRM_15M_ENABLED=False,
     )
     for k, v in overrides.items():
         setattr(cfg, k, v)
