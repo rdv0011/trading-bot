@@ -1113,15 +1113,25 @@ class DualMLStrategy:
             ema_period = int(_cfg_flag("TREND_FILTER_EMA_PERIOD", 50, self.config))
             close_prices = df_tactical["close"]
             if len(close_prices) >= ema_period:
-                ema = close_prices.ewm(span=ema_period, adjust=False).mean().iloc[-1]
+                ema_series = close_prices.ewm(span=ema_period, adjust=False).mean()
+                ema = ema_series.iloc[-1]
                 current_price = close_prices.iloc[-1]
-                if current_price > ema:
+                slope_lookback = int(_cfg_flag("TREND_FILTER_EMA_SLOPE_LOOKBACK", 20, self.config))
+                ema_prev = ema_series.iloc[-1 - slope_lookback] if len(ema_series) > slope_lookback else ema
+                ema_slope = ema - ema_prev
+                # Slope-aware trend: price must be on the "correct" side of the EMA
+                # AND the EMA itself must be rising (for up) / falling (for down).
+                # This prevents longs while price is momentarily above a flat/rolling-over EMA.
+                if current_price > ema and ema_slope > 0:
                     trend_direction = "up"
-                elif current_price < ema:
+                elif current_price < ema and ema_slope < 0:
                     trend_direction = "down"
                 else:
                     trend_direction = "neutral"
-                log_debug(f"[TREND FILTER] EMA({ema_period})={ema:.2f}, price={current_price:.2f}, trend={trend_direction}")
+                log_debug(
+                    f"[TREND FILTER] EMA({ema_period})={ema:.2f}, price={current_price:.2f}, "
+                    f"ema_slope={ema_slope:+.2f} ({slope_lookback}b), trend={trend_direction}"
+                )
 
         # Use separate short threshold
         short_thr = float(_cfg_flag("ABSOLUTE_THRESHOLD_SHORT", 0.003, self.config))

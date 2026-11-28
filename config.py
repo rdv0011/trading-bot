@@ -284,6 +284,7 @@ LIQ_EXIT_TREND_RELAX_MULT = 0.5               # multiply threshold by this in st
 # ── Trend-Following Filter ────────────────────────────────────────────────
 TREND_FILTER_ENABLED = _get_bool("TREND_FILTER_ENABLED", True)   # enable EMA trend filter
 TREND_FILTER_EMA_PERIOD = 50                  # EMA period for trend detection
+TREND_FILTER_EMA_SLOPE_LOOKBACK = 20        # EMA slope lookback in bars (EMA_now vs EMA N bars ago)
 TREND_FILTER_REQUIRE_ALIGNMENT = True         # require signal direction = trend direction
 
 # ── Cost-to-Edge Optimization ───────────────────────────────────────────
