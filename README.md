@@ -1,33 +1,30 @@
 # Dual-ML Bitcoin Trading Bot (Simplified)
 
-Minimal dual-ML trading system for BTCUSDT futures with simulation vs demo comparison.
+Minimal trading system for BTCUSDT futures with in-memory tactical model, heuristic meta-params, and 15m entry confirmation filter. No strategic model.
 
 ## Architecture
-
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Dual-ML Architecture                   │
+│                     Simplified Architecture                 │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
-│  ┌─────────────────┐      ┌─────────────────┐              │
-│  │ Tactical ML     │      │ Strategic ML    │              │
-│  │ (15m)           │      │ (1h)            │              │
-│  │                 │      │                 │              │
-│  │ - Walk-forward  │      │ - Batch predict │              │
-│  │ - Retrain every │──────│ - Meta-params:  │              │
-│  │   N candles     │      │   stake, SL, TP,│              │
-│  │ - Predicts:     │      │   leverage,     │              │
-│  │   future_ret    │      │   regime        │              │
-│  └────────┬────────┘      └────────┬────────┘              │
-│           │                        │                        │
-│           ▼                        ▼                        │
-│  ┌─────────────────┐      ┌─────────────────┐              │
-│  │ Signal Logic    │      │ Position Mgmt   │              │
-│  │ pred > thr →    │      │ stake × equity  │              │
-│  │   LONG          │      │ SL/TP brackets  │              │
-│  │ pred < -thr →   │      │ Max hold time   │              │
-│  │   SHORT         │      │                 │              │
-│  └─────────────────┘      └─────────────────┘              │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │ Tactical ML (1h)                                      │ │
+│  │ - In-memory training at startup (Phase 2)              │ │
+│  │ - No disk persistence, no walk-forward retraining     │ │
+│  │ - WALKFORWARD_RETRAIN_EVERY=0                        │ │
+│  │ - 180 days of 1h data, balanced labels, early-stopped │ │
+│  │ - Tree count: 30 (early stopped)                   │ │
+│  └─────────────────────────────────────────────────────────┘ │
+│                                                             │
+│  ┌─────────────────────────────────────────────────────────┐ │
+│  │ Position Mgmt & Filters                               │ │
+│  │ - 15m entry confirmation (Phase 3): RSI, volume,      │ │
+│  │   momentum gates before entering                      │ │
+│  │ - Heuristic meta-params replace strategic model       │ │
+│  │ - Adaptive thresholds (ATR, vol ratio, liquidity)    │ │
+│  │ - Trailing SL, circuit breaker, regime gates         │ │
+│  └─────────────────────────────────────────────────────────┘ │
 │                                                             │
 └─────────────────────────────────────────────────────────────┘
 ```
@@ -39,10 +36,10 @@ Minimal dual-ML trading system for BTCUSDT futures with simulation vs demo compa
 | `main.py` | CLI entry point: train, simulate, live, compare |
 | `config.py` | All hyperparameters in one place |
 | `data.py` | Download, features, labels, train/val split |
-| `model.py` | CatBoost models (tactical + strategic) |
+| `model.py` | CatBoost tactical model (in-memory training) |
 | `simulate.py` | MockBroker + validation backtest |
 | `broker.py` | BinanceBroker (live) + MockBroker (sim) |
-| `strategy.py` | Dual-ML strategy logic |
+| `strategy.py` | Simplified strategy logic with 15m filter |
 | `logger.py` | Console + file + trade CSV logging |
 | `compare.py` | Sim vs Demo comparison + HTML report |
 | `utils.py` | Shared utilities |
@@ -59,7 +56,7 @@ pip install catboost pandas numpy scikit-learn python-dotenv
 cp .env.example .env
 # Edit .env and add your Binance testnet API credentials
 
-# 3. Train both models
+# 3. Train models (tactical model is now trained in-memory during live startup)
 python main.py train
 
 # 4. Run simulation on validation data
@@ -95,28 +92,25 @@ Get testnet API keys from: https://testnet.binance.vision/
 
 ### Train Mode
 
-Downloads historical data, engineers features, and trains both models:
+Downloads historical data, engineers features, and trains models:
 
 ```bash
 python main.py train --symbol BTCUSDT --days 180
 ```
 
 **What it does:**
-1. Downloads 90 days of 15m + 1h candles from Binance testnet
+1. Downloads 180 days of 1h candles from Binance
 2. Engineers features: returns, EMAs, ATR, volatility, time encoding, regime
-3. Generates labels: future_ret (4 candles ahead for 15m)
+3. Generates labels: future_ret (lookahead candles for 1h timeframe)
 4. Splits chronologically: 80% train, 20% validation
-5. Trains tactical model (CatBoost, iterations=100)
-6. Trains strategic model (CatBoost, iterations=300)
-7. Saves to `models/` directory
+5. Trains tactical model (CatBoost, iterations=300, early-stopped to 30)
+6. Saves to `models/` directory (optional for live - model trained in-memory)
 
 **Output:**
 ```
 models/
 ├── model_tactical.cbm      # Tactical CatBoost model
 ├── model_tactical_meta.json # Tactical metadata
-├── model_strategic.cbm      # Strategic CatBoost model
-└── model_strategic_meta.json # Strategic metadata
 ```
 
 ### Simulate Mode
@@ -129,9 +123,9 @@ python main.py simulate --model-dir models/
 
 **What it does:**
 1. Loads validation data
-2. Loads both models
-3. Runs walk-forward tactical predictions (retrains every 100 candles)
-4. Gets strategic meta-parameters (batch prediction)
+2. Loads tactical model
+3. Runs walk-forward tactical predictions (retrain_every=100 candles)
+4. Gets meta-parameters from heuristic (replaces strategic model)
 5. Simulates trades with MockBroker (fees, slippage, brackets)
 6. Calculates metrics (return, Sharpe, drawdown, win rate)
 7. Saves trades CSV + equity curve
@@ -162,11 +156,20 @@ python main.py live \
 ```
 
 **Features:**
+- **Phase 2**: Tactical model trained in-memory on 180 days of 1h data at startup (no disk persistence)
+- **Phase 3**: 15m entry confirmation filter - validates 1h signals using 15m data (RSI, volume z-score, momentum)
+- No periodic retraining (WALKFORWARD_RETRAIN_EVERY=0)
 - Rate limiter (1000 weight/min)
 - Circuit breaker on -1003 errors
 - Position caching (2s TTL)
 - Bracket orders (TP/SL)
 - Daily trade logging
+
+**Startup sequence:**
+1. Train tactical model in-memory on 180 days of 1h data
+2. Validate tree count (min 10 trees)
+3. Create strategy with feature_cols from training data
+4. Start live loop with 15m confirmation filter
 
 ### Compare Mode
 
@@ -203,30 +206,22 @@ Configuration is loaded from `config.py` which reads `.env` file at startup. All
 ```python
 # Data (overridable via .env)
 SYMBOL = "BTCUSDT"                    # SYMBOL
-TACTICAL_TF = "15m"                   # TACTICAL_TIMEFRAME
-STRATEGIC_TF = "1h"                   # STRATEGIC_TIMEFRAME
-HISTORY_DAYS = 90                     # STRATEGIC_DAYS
+TIMEFRAME = "1h"                      # TACTICAL_TF (was 15m)
+TACTICAL_TF = "1h"                    # Alias for compatibility
+HISTORY_DAYS = 180                    # STRATEGIC_DAYS
 TRAIN_FRACTION = 0.8
 
 # Features
 FEATURE_LAGS = [1, 2, 3, 5, 10, 20, 50]
 EMA_SPANS = [5, 10, 20, 50, 100]
 ATR_PERIOD = 14
-LABEL_HORIZON = 4  # 4 candles = 1 hour ahead
+LABEL_HORIZON = 4  # 4 candles for 1h timeframe
 
 # Tactical Model
 TACTICAL_MODEL_PARAMS = {
-    "iterations": 100,                # TACTICAL_ITERATIONS
+    "iterations": 300,                # TACTICAL_ITERATIONS
     "depth": 6,
     "learning_rate": 0.05,
-    "loss_function": "RMSE",
-}
-
-# Strategic Model
-STRATEGIC_MODEL_PARAMS = {
-    "iterations": 300,                # STRATEGIC_ITERATIONS
-    "depth": 8,
-    "learning_rate": 0.03,
     "loss_function": "RMSE",
 }
 
@@ -245,7 +240,19 @@ ABSOLUTE_THRESHOLD = 0.003
 INITIAL_EQUITY = 1.0
 FEE = 0.0004                          # SIMULATION_FEE
 SLIPPAGE = 0.0003                     # SIMULATION_SLIPPAGE
-WALKFORWARD_RETRAIN_EVERY = 100
+WALKFORWARD_RETRAIN_EVERY = 0         # Disabled (Phase 2)
+
+# Phase 3: 15m Confirmation Filter
+CONFIRM_15M_ENABLED = True            # Enable 15m entry confirmation
+CONFIRM_15M_TF = "15m"                # Confirmation timeframe
+CONFIRM_15M_LIMIT = 200               # Candles to fetch (~50h)
+CONFIRM_15M_RSI_PERIOD = 14           # RSI lookback
+CONFIRM_15M_RSI_MIN_LONG = 30.0       # RSI must be above this (not oversold) for long
+CONFIRM_15M_RSI_MAX_LONG = 70.0       # RSI must be below this (not overbought) for long
+CONFIRM_15M_RSI_MIN_SHORT = 30.0      # RSI must be above this for short
+CONFIRM_15M_RSI_MAX_SHORT = 70.0      # RSI must be below this (not overbought) for short
+CONFIRM_15M_VOLUME_MIN_ZSCORE = 1.0   # Require volume spike above this z-score
+CONFIRM_15M_MOMENTUM_MIN = 0.0005     # Min abs momentum (|pct_change|) required
 
 # API Credentials (from .env only, NOT hardcoded)
 # BINANCE_TESTNET_FUTURES_API_KEY
@@ -258,16 +265,14 @@ WALKFORWARD_RETRAIN_EVERY = 100
 - `SYMBOL` - Trading pair (default: BTCUSDT)
 - `MARKET_TYPE` - futures or spot (default: futures)
 - `TESTNET` - true/false (default: true)
-- `TACTICAL_TIMEFRAME` - Tactical timeframe (default: 5m)
-- `STRATEGIC_TIMEFRAME` - Strategic timeframe (default: 1h)
-- `STRATEGIC_DAYS` - Strategic training days (default: 365)
-- `TACTICAL_DAYS` - Tactical training days (default: 45)
+- `TACTICAL_TIMEFRAME` - Tactical timeframe (default: 1h)
+- `STRATEGIC_DAYS` - Tactical training days (default: 180)
 - `TACTICAL_ITERATIONS` - Tactical model iterations (default: 300)
-- `STRATEGIC_ITERATIONS` - Strategic model iterations (default: 300)
 - `LEVERAGE` - Default leverage (default: 1.0)
 - `SIMULATION_FEE` - Fee per side (default: 0.0004)
 - `SIMULATION_SLIPPAGE` - Fixed slippage (default: 0.0003)
-- `WALKFORWARD_RETRAIN_EVERY` - Retrain interval (default: 100)
+- `WALKFORWARD_RETRAIN_EVERY` - Retrain interval (default: 0, disabled)
+- `CONFIRM_15M_ENABLED` - Enable 15m entry confirmation (default: True)
 
 **Required for live trading** (in `.env`):
 - `BINANCE_TESTNET_FUTURES_API_KEY` / `BINANCE_TESTNET_FUTURES_API_SECRET`
@@ -277,7 +282,9 @@ WALKFORWARD_RETRAIN_EVERY = 100
 
 | Feature | Description |
 |---------|-------------|
-| Walk-forward | Tactical model retrains every 100 candles |
+| Phase 2: In-memory training | Tactical model trained on 180 days of 1h data at startup, no disk persistence |
+| Phase 3: 15m confirmation | RSI(14), volume z-score, momentum filters validate 1h signals before entry |
+| Walk-forward disabled | No periodic retraining (WALKFORWARD_RETRAIN_EVERY=0) |
 | Regime detection | trend / chop / high_vol classification |
 | Bracket orders | Automatic TP/SL on entry |
 | Rate limiting | 1000 weight/min with circuit breaker |
@@ -300,7 +307,7 @@ logs/trades_2026-08-31.csv
 One row per completed trade with:
 - Timestamp, symbol, side, entry/exit prices
 - PnL, regime, exit reason
-- Tactical prediction, strategic parameters
+- Tactical prediction, meta-parameters
 
 ### Equity Curve
 ```
@@ -392,7 +399,7 @@ sudo python3 /usr/local/bin/fan_pwm.py
 Run `python main.py train` first to create train/val splits.
 
 ### "Model not loaded"
-Ensure `models/` directory exists with trained models.
+Ensure `models/` directory exists with trained models (optional for live mode - model trained in-memory).
 
 ### "Rate-limit cooldown"
 Normal behavior. Wait for cooldown period (exponential backoff up to 5min).
